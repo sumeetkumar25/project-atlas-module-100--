@@ -1,0 +1,122 @@
+# atlas/modules/module106_state_transition/validator.py
+"""
+Module 106 - State Transition Validator
+"""
+
+import numpy as np
+import pandas as pd
+from .engine import TransitionResult
+from .statistics import TransitionStatistics
+
+
+class StateTransitionValidator:
+    """Validator for state transition results."""
+    
+    def validate(
+        self,
+        result: TransitionResult,
+        statistics: TransitionStatistics
+    ) -> bool:
+        """
+        Validate results and statistics.
+        
+        Args:
+            result: TransitionResult from engine
+            statistics: TransitionStatistics from statistics engine
+            
+        Returns:
+            True if validation passes
+            
+        Raises:
+            ValueError: If validation fails
+        """
+        issues = []
+        
+        # Validate count matrix shape
+        if result.transition_counts.shape != (16, 16):
+            issues.append(
+                f"Count matrix shape should be (16,16), got {result.transition_counts.shape}"
+            )
+        
+        # Validate probability matrix shape
+        if result.transition_probabilities.shape != (16, 16):
+            issues.append(
+                f"Probability matrix shape should be (16,16), got {result.transition_probabilities.shape}"
+            )
+        
+        # Validate probability rows sum to 1
+        if not result.transition_probabilities.empty:
+            row_sums = result.transition_probabilities.sum(axis=1)
+            # Only check rows that have transitions
+            has_transitions = result.transition_counts.sum(axis=1) > 0
+            valid_rows = row_sums[has_transitions]
+            
+            if not np.allclose(valid_rows, 1, atol=1e-10):
+                issues.append(
+                    f"Some probability rows do not sum to 1: {valid_rows[~np.isclose(valid_rows, 1)]}"
+                )
+        
+        # Validate self-transition rate
+        if not (0 <= result.self_transition_rate <= 1):
+            issues.append(
+                f"Self-transition rate must be in [0,1], got {result.self_transition_rate}"
+            )
+        
+        # Validate entropy
+        if result.entropy < 0:
+            issues.append(f"Entropy cannot be negative: {result.entropy}")
+        
+        if result.entropy > 4:  # Max entropy for 16 states is log2(16) = 4
+            issues.append(f"Entropy too high: {result.entropy} (max 4)")
+        
+        # Validate sample size
+        if result.sample_size <= 0:
+            issues.append(f"Invalid sample size: {result.sample_size}")
+        
+        # Validate statistics match result
+        if not np.isclose(
+            statistics.self_transition_rate,
+            result.self_transition_rate,
+            atol=1e-8
+        ):
+            issues.append(
+                f"Self-transition rate mismatch: stats={statistics.self_transition_rate}, "
+                f"result={result.self_transition_rate}"
+            )
+        
+        if not np.isclose(
+            statistics.entropy,
+            result.entropy,
+            atol=1e-8
+        ):
+            issues.append(
+                f"Entropy mismatch: stats={statistics.entropy}, "
+                f"result={result.entropy}"
+            )
+        
+        if issues:
+            raise ValueError(
+                f"State Transition validation failed with {len(issues)} issue(s):\n" +
+                "\n".join(f"  - {issue}" for issue in issues)
+            )
+        
+        return True
+
+
+def run_validation(result, statistics):
+    """Run validation with user-friendly output."""
+    validator = StateTransitionValidator()
+    
+    print("\n" + "=" * 60)
+    print("STATE TRANSITION VALIDATION")
+    print("=" * 60)
+    
+    try:
+        validator.validate(result, statistics)
+        print("\n  ✓ All validation checks passed")
+        print("=" * 60)
+        return True
+    except ValueError as e:
+        print(e)
+        print("=" * 60)
+        return False

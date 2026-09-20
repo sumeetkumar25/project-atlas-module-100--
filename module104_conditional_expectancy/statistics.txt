@@ -1,0 +1,86 @@
+# atlas/modules/module104_conditional_expectancy/statistics.py
+"""
+Module 104 - Conditional Expectancy Statistics
+
+Provides statistical analysis and classification of expectancy results.
+"""
+
+from dataclasses import dataclass, asdict
+import numpy as np
+import pandas as pd
+from .engine import ExpectancyResult
+
+
+@dataclass
+class ConditionalExpectancyStatistics:
+    """High-level statistics from conditional expectancy analysis."""
+    best_state: int
+    best_expectancy: float
+    average_expectancy: float
+    positive_states: int
+    negative_states: int
+    sample_size: int
+    total_states: int
+    future_horizon: int
+
+
+class ConditionalExpectancyStatisticsEngine:
+    """Engine for generating high-level statistics."""
+    
+    METADATA = {
+        "module": 104,
+        "name": "Conditional Expectancy",
+        "version": "1.0.0",
+        "description": "Evaluates conditional expected returns for each market state"
+    }
+    
+    def analyze(self, result: ExpectancyResult) -> ConditionalExpectancyStatistics:
+        """
+        Analyze results and generate high-level statistics.
+        
+        Args:
+            result: ExpectancyResult from engine
+            
+        Returns:
+            ConditionalExpectancyStatistics
+        """
+        table = result.expectancy_table
+        
+        if table.empty:
+            return ConditionalExpectancyStatistics(
+                best_state=-1,
+                best_expectancy=0.0,
+                average_expectancy=0.0,
+                positive_states=0,
+                negative_states=0,
+                sample_size=result.sample_size,
+                total_states=0,
+                future_horizon=result.future_horizon
+            )
+        
+        # Calculate statistics
+        mean_returns = table["mean"].values
+        
+        positive_states = np.sum(mean_returns > 0)
+        negative_states = np.sum(mean_returns <= 0)
+        
+        best_expectancy = table.iloc[0]["mean"] * 100  # Convert to percentage
+        
+        return ConditionalExpectancyStatistics(
+            best_state=result.best_state,
+            best_expectancy=best_expectancy,
+            average_expectancy=np.mean(mean_returns) * 100,
+            positive_states=int(positive_states),
+            negative_states=int(negative_states),
+            sample_size=result.sample_size,
+            total_states=result.total_states,
+            future_horizon=result.future_horizon
+        )
+    
+    def summary_dataframe(self, stats: ConditionalExpectancyStatistics) -> pd.DataFrame:
+        """Convert statistics to DataFrame."""
+        return pd.DataFrame([asdict(stats)])
+    
+    def summary_dict(self, stats: ConditionalExpectancyStatistics) -> dict:
+        """Convert statistics to dictionary."""
+        return asdict(stats)

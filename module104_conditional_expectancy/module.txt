@@ -1,0 +1,274 @@
+"""
+Module 104
+Conditional Expectancy
+
+Evaluates conditional expected returns for each market state.
+
+Pipeline: load states → compute future returns → calculate expectancy → statistics → validation → report → export
+"""
+
+from typing import Optional, Dict, Any
+import pandas as pd
+import numpy as np
+
+from atlas.core.base_research_module import BaseResearchModule
+from atlas.framework.registry import AtlasRegistry
+
+from .engine import ConditionalExpectancyEngine
+from .statistics import ConditionalExpectancyStatisticsEngine
+from .validator import run_validation
+from .report import ConditionalExpectancyReport
+
+
+class ConditionalExpectancyResearch(BaseResearchModule):
+    """Main research module for conditional expectancy."""
+    
+    MODULE_OUTPUT = "module104"
+    
+    METADATA = {
+        "module": "104",
+        "name": "Conditional Expectancy",
+        "version": "1.0.0",
+        "description": "Evaluates conditional expected returns for each market state",
+        "depends_on": ["103"]  # Explicit dependency on Module 103
+    }
+    
+    def __init__(
+        self,
+        registry: Optional[AtlasRegistry] = None,
+        future_horizon: int = 10,
+        min_samples: int = 30
+    ):
+        """
+        Initialize the conditional expectancy module.
+        
+        Args:
+            registry: Optional Atlas registry
+            future_horizon: Number of bars ahead for returns
+            min_samples: Minimum samples per state
+        """
+        super().__init__(
+            module_name="Conditional Expectancy",
+            module_version=self.METADATA["version"],
+        )
+        
+        self.registry = registry or AtlasRegistry()
+        self.engine = ConditionalExpectancyEngine(
+            future_horizon=future_horizon,
+            min_samples=min_samples
+        )
+        self.stats_engine = ConditionalExpectancyStatisticsEngine()
+        self.result_data = None
+        self.statistics = None
+        self.state_report = None
+    
+    def _register_pipeline_steps(self):
+        """Register pipeline steps."""
+        self.pipeline_steps = [
+            ("conditional_expectancy", self._compute_expectancy),
+            ("statistics", self._compute_statistics),
+            ("validate", self._validate),
+            ("export", self._export_results),
+        ]
+    
+    def _prepare_data(self) -> Dict[str, Any]:
+        """
+        Prepare data from DataFrame.
+        
+        This module depends on Module 103's 'state' column.
+        The framework should inject it via dependency injection.
+        """
+        # -------------------------------------------------------
+        # DEBUG INPUT DATAFRAME
+        # -------------------------------------------------------
+        print("\n" + "=" * 70)
+        print("MODULE 104 INPUT DATAFRAME")
+        print("=" * 70)
+        print("Columns:", list(self.df.columns))
+        print("Shape:", self.df.shape)
+        
+        if "state" in self.df.columns:
+            print("State dtype:", self.df["state"].dtype)
+            print("First 10 states:", self.df["state"].head(10).tolist())
+        
+        print("=" * 70)
+        
+        # Check if we have states column (from Module 103)
+        if "state" not in self.df.columns:
+            raise ValueError(
+                "DataFrame must contain 'state' column from Module 103.\n"
+                "This module depends on Module 103. Ensure it runs first.\n"
+                f"Available columns: {list(self.df.columns)}"
+            )
+        
+        # Ensure we have close column
+        if "close" not in self.df.columns:
+            raise ValueError("DataFrame must contain 'close' column")
+        
+        states = self.df["state"].values
+        
+        # ========== DEBUG: Validate states shape ==========
+        print("\n" + "="*70)
+        print("MODULE 104 - STATE VALIDATION")
+        print("="*70)
+        print(f"states type: {type(states)}")
+        print(f"states shape: {states.shape}")
+        print(f"states dtype: {states.dtype}")
+        print(f"states unique values: {np.unique(states)}")
+        print(f"states first 10: {states[:10]}")
+        print("="*70)
+        
+        # Expect states to be a 1D array (n_samples,)
+        if len(states.shape) != 1:
+            raise ValueError(
+                f"States must be a 1D array, got shape {states.shape}. "
+                "Module 103 may have exported the wrong format."
+            )
+        
+        return {
+            "states": states,
+            "close": self.df["close"]
+        }
+    
+    def _compute_expectancy(self) -> Dict[str, Any]:
+        """Step 1: Compute conditional expectancy."""
+        self.logger.info("Step 1: Computing conditional expectancy")
+        
+        prepared = self._prepare_data()
+        
+        self.result_data = self.engine.compute(
+            states=prepared["states"],
+            close=prepared["close"]
+        )
+        
+        self.logger.metric(
+            "Total States",
+            f"{self.result_data.total_states}/16"
+        )
+        self.logger.metric(
+            "Best State",
+            str(self.result_data.best_state)
+        )
+        self.logger.metric(
+            "Sample Size",
+            f"{self.result_data.sample_size:,}"
+        )
+        self.logger.success("Conditional expectancy computed")
+        
+        # Generate state report
+        self.state_report = ConditionalExpectancyReport.generate_state_report(
+            self.result_data.expectancy_table
+        )
+        
+        return {
+            "total_states": self.result_data.total_states,
+            "best_state": self.result_data.best_state,
+            "sample_size": self.result_data.sample_size,
+        }
+    
+    def _compute_statistics(self) -> Dict[str, Any]:
+        """Step 2: Compute statistics."""
+        self.logger.info("Step 2: Computing statistics")
+        self.statistics = self.stats_engine.analyze(self.result_data)
+        
+        self.logger.metric(
+            "Positive States",
+            f"{self.statistics.positive_states}/{self.statistics.total_states}"
+        )
+        self.logger.metric(
+            "Best Expectancy",
+            f"{self.statistics.best_expectancy:.2f}%"
+        )
+        self.logger.success("Statistics computed")
+        
+        return self.stats_engine.summary_dict(self.statistics)
+    
+    def _validate(self) -> Dict[str, Any]:
+        """Step 3: Validation."""
+        self.logger.info("Step 3: Validation")
+        passed = run_validation(self.result_data, self.statistics)
+        self.logger.success("Validation complete")
+        return {"validation_passed": passed}
+    
+    def _export_results(self) -> Dict[str, Any]:
+        """Step 4: Export."""
+        self.logger.info("Step 4: Export")
+        
+        # Create standardized artifacts
+        self.result.artifacts["features"] = self.result_data.expectancy_table
+        self.result.artifacts["statistics"] = pd.DataFrame([self.statistics.__dict__]) if hasattr(self.statistics, '__dict__') else pd.DataFrame()
+        self.result.artifacts["report"] = ConditionalExpectancyReport.generate(
+            self.statistics,
+            metadata=self.METADATA,
+            dataset_name=self.result.dataset_identifier,
+        )
+        self.result.artifacts["validation"] = True
+        self.result.artifacts["metadata"] = {
+            "module": self.MODULE_OUTPUT,
+            "version": self.METADATA.get("version", "1.0.0"),
+            "dataset": self.result.dataset_identifier,
+            "future_horizon": self.engine.future_horizon,
+            "min_samples": self.engine.min_samples,
+            "depends_on": self.METADATA.get("depends_on", [])
+        }
+        
+        # Store legacy artifacts
+        self.result.artifacts["expectancy_table"] = self.result_data.expectancy_table
+        self.result.artifacts["conditional_expectancy_report"] = self.result.artifacts["report"]
+        self.result.artifacts["state_report"] = self.state_report
+        
+        # Store detailed results as dict
+        self.result.artifacts["detailed_results"] = {
+            "expectancy_table": self.result_data.expectancy_table.to_dict(orient="records"),
+            "best_state": self.result_data.best_state,
+            "total_states": self.result_data.total_states,
+            "future_horizon": self.result_data.future_horizon,
+            "sample_size": self.result_data.sample_size
+        }
+        
+        # ----------------------------------------------------
+        # ARTIFACT INSPECTION
+        # ----------------------------------------------------
+        print("\n" + "="*70)
+        print("MODULE 104 ARTIFACT INSPECTION")
+        print("="*70)
+        
+        print("Artifacts keys:")
+        print(list(self.result.artifacts.keys()))
+        
+        required = ["features", "statistics", "report", "validation"]
+        missing = [k for k in required if k not in self.result.artifacts]
+        if missing:
+            print(f"\n⚠ Missing required artifacts: {missing}")
+        else:
+            print("\n✓ All required artifacts present")
+        
+        if "features" in self.result.artifacts:
+            df = self.result.artifacts["features"]
+            print(f"\nFeature artifact: {len(df)} rows, {len(df.columns)} cols")
+        
+        print("="*70)
+        
+        self.logger.metric("Artifacts", str(len(self.result.artifacts)))
+        self.logger.success("Export complete")
+        
+        return {
+            "export_status": "complete",
+            "artifact_count": len(self.result.artifacts),
+        }
+    
+    def compute(self) -> Dict[str, Any]:
+        """Run the full computation pipeline."""
+        self.logger.section("Conditional Expectancy Pipeline")
+        results = self.execute_pipeline()
+        self.result.status = "completed"
+        self.logger.success("Module 104 complete")
+        return results
+    
+    def run(self, filepath: str, output_dir=None):
+        """Run module on file."""
+        return super().run(filepath, output_dir)
+    
+    def run_dataframe(self, df, dataset_id="in_memory", output_dir=None):
+        """Run module on DataFrame."""
+        return super().run_dataframe(df, dataset_id, output_dir)

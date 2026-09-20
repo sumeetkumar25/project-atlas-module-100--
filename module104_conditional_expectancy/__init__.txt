@@ -1,0 +1,9 @@
+# atlas/modules/module104_conditional_expectancy/__init__.py
+"""
+Module 104
+Conditional Expectancy
+"""
+
+from .module import ConditionalExpectancyResearch
+
+__all__ = ["ConditionalExpectancyResearch"]

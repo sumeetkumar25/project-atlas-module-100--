@@ -1,0 +1,177 @@
+# atlas/modules/module104_conditional_expectancy/engine.py
+"""
+Module 104 - Conditional Expectancy Engine
+
+Evaluates conditional expected returns for each market state.
+
+Pipeline:
+  1. Accept market states (0-15) from Module 103
+  2. Compute future returns
+  3. Calculate expectancy per state
+  4. Rank states by mean return
+  5. Identify best state
+"""
+
+import numpy as np
+import pandas as pd
+from dataclasses import dataclass
+from typing import Optional, List, Dict, Any
+
+
+@dataclass
+class ExpectancyResult:
+    """Results from conditional expectancy analysis."""
+    expectancy_table: pd.DataFrame
+    best_state: int
+    total_states: int
+    future_horizon: int
+    sample_size: int
+    
+    def __post_init__(self):
+        """Ensure table is sorted after initialization."""
+        if not self.expectancy_table.empty:
+            self.expectancy_table = self.expectancy_table.sort_values(
+                "mean",
+                ascending=False
+            ).reset_index(drop=True)
+
+
+class ConditionalExpectancyEngine:
+    """Core engine for conditional expectancy calculations."""
+
+    def __init__(self, future_horizon: int = 10, min_samples: int = 30):
+        """
+        Initialize the conditional expectancy engine.
+        
+        Args:
+            future_horizon: Number of bars ahead to calculate returns
+            min_samples: Minimum samples required per state
+        """
+        self.future_horizon = future_horizon
+        self.min_samples = min_samples
+
+    def compute_future_return(self, close: pd.Series) -> np.ndarray:
+        """
+        Compute future returns over the specified horizon.
+        
+        Args:
+            close: Close price series
+            
+        Returns:
+            Array of future returns
+        """
+        future = close.shift(-self.future_horizon)
+        return (future / close - 1).values
+
+    def evaluate_state(
+        self,
+        returns: np.ndarray,
+        state_id: int,
+        mask: np.ndarray
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Evaluate a single market state.
+        
+        Args:
+            returns: Array of future returns
+            state_id: The state ID (0-15)
+            mask: Boolean mask for this state
+            
+        Returns:
+            Dictionary with state statistics or None if insufficient samples
+        """
+        r = returns[mask]
+        
+        # Remove NaN values
+        r = r[~np.isnan(r)]
+        
+        if len(r) < self.min_samples:
+            return None
+        
+        return {
+            "state": state_id,
+            "samples": len(r),
+            "mean": np.mean(r),
+            "median": np.median(r),
+            "std": np.std(r),
+            "min": np.min(r),
+            "max": np.max(r),
+            "win_rate": np.mean(r > 0)
+        }
+
+    def compute(
+        self,
+        states: np.ndarray,
+        close: pd.Series
+    ) -> ExpectancyResult:
+        """
+        Main computation method.
+        
+        Args:
+            states: Array of market states (0-15)
+            close: Close price series
+            
+        Returns:
+            ExpectancyResult with all computed statistics
+        """
+        # Validate inputs
+        if len(states) == 0:
+            raise ValueError("States array is empty")
+        
+        if len(close) == 0:
+            raise ValueError("Close series is empty")
+        
+        # Align lengths
+        min_length = min(len(states), len(close))
+        states = states[:min_length]
+        close = close.iloc[:min_length]
+        
+        # Compute future returns
+        future_returns = self.compute_future_return(close)
+        
+        # Align states and returns (remove NaN)
+        valid_mask = ~np.isnan(future_returns)
+        states = states[valid_mask]
+        future_returns = future_returns[valid_mask]
+        
+        # Evaluate each state (0-15)
+        rows = []
+        
+        for state in range(16):  # States 0-15
+            mask = states == state
+            result = self.evaluate_state(future_returns, state, mask)
+            
+            if result is not None:
+                rows.append(result)
+        
+        # Create DataFrame
+        if rows:
+            table = pd.DataFrame(rows)
+            
+            # Sort by mean return (descending)
+            table = table.sort_values(
+                "mean",
+                ascending=False
+            ).reset_index(drop=True)
+            
+            # Get best state
+            best_state = int(table.iloc[0]["state"])
+            
+            result = ExpectancyResult(
+                expectancy_table=table,
+                best_state=best_state,
+                total_states=len(table),
+                future_horizon=self.future_horizon,
+                sample_size=len(future_returns)
+            )
+        else:
+            # No valid states found
+            result = ExpectancyResult(
+                expectancy_table=pd.DataFrame(),
+                best_state=-1,
+                total_states=0,
+                future_horizon=self.future_horizon,
+                sample_size=0
+            )
+        
+        return result

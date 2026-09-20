@@ -1,0 +1,1 @@
+python -m atlas.modules.module107_state_forecasting.test_module

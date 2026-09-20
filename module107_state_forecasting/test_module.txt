@@ -1,0 +1,446 @@
+# atlas/modules/module107_state_forecasting/test_module.py
+"""
+Module 107 - Integration Test
+
+Tests state forecasting engine, statistics, validator, report, and pipeline.
+"""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+
+import numpy as np
+import pandas as pd
+
+from atlas.modules.module107_state_forecasting.engine import StateForecastingEngine
+from atlas.modules.module107_state_forecasting.statistics import StateForecastingStatisticsEngine
+from atlas.modules.module107_state_forecasting.validator import run_validation
+from atlas.modules.module107_state_forecasting.module import StateForecastingResearch
+
+
+def create_test_transition_matrix(n=16):
+    """
+    Create a test transition probability matrix of size n x n.
+    
+    Args:
+        n: Size of the matrix
+        
+    Returns:
+        DataFrame with transition probabilities
+    """
+    if n == 16:
+        # Create 16x16 matrix with strong self-transition for specific states
+        P = np.zeros((16, 16))
+        
+        # State 4: 70% stay, 30% go to 7
+        P[4, 4] = 0.70
+        P[4, 7] = 0.30
+        
+        # State 7: 60% stay, 40% go to 2
+        P[7, 7] = 0.60
+        P[7, 2] = 0.40
+        
+        # State 2: 80% stay, 20% go to 13
+        P[2, 2] = 0.80
+        P[2, 13] = 0.20
+        
+        # State 13: 50% stay, 50% go to 5
+        P[13, 13] = 0.50
+        P[13, 5] = 0.50
+        
+        # State 5: 90% stay, 10% go to 4
+        P[5, 5] = 0.90
+        P[5, 4] = 0.10
+        
+        # Fill remaining rows with random transitions (sum to 1)
+        for i in range(16):
+            if i not in [2, 4, 5, 7, 13]:
+                row = np.random.rand(16)
+                row = row / row.sum()
+                P[i, :] = row
+    else:
+        # Create n x n matrix with strong diagonal
+        P = np.random.rand(n, n)
+        # Make diagonal dominant
+        for i in range(n):
+            P[i, i] += 2.0
+        # Normalize rows to sum to 1
+        P = P / P.sum(axis=1, keepdims=True)
+    
+    return pd.DataFrame(P, index=range(n), columns=range(n))
+
+
+def test_engine_validation():
+    """Test 1: Transition matrix validation."""
+    print("\n" + "=" * 60)
+    print("TEST 1: Transition Matrix Validation")
+    print("=" * 60)
+    
+    engine = StateForecastingEngine()
+    
+    # Valid matrix
+    P_valid = np.array([
+        [0.7, 0.3],
+        [0.4, 0.6]
+    ])
+    engine._validate_transition_matrix(P_valid)  # Should not raise
+    
+    # Invalid: rows don't sum to 1
+    P_invalid = np.array([
+        [0.4, 0.4],
+        [0.3, 0.3]
+    ])
+    try:
+        engine._validate_transition_matrix(P_invalid)
+        assert False, "Should have raised ValueError"
+    except ValueError as e:
+        print(f"  Caught expected error: {str(e)[:50]}...")
+    
+    # Invalid: negative values
+    P_negative = np.array([
+        [0.7, 0.3],
+        [-0.1, 1.1]
+    ])
+    try:
+        engine._validate_transition_matrix(P_negative)
+        assert False, "Should have raised ValueError"
+    except ValueError as e:
+        print(f"  Caught expected error: {str(e)[:50]}...")
+    
+    print("  ✓ Matrix validation test passed")
+    return True
+
+
+def test_engine_convergence_norms():
+    """Test 2: Different matrix norms for convergence."""
+    print("\n" + "=" * 60)
+    print("TEST 2: Convergence with Different Norms")
+    print("=" * 60)
+    
+    # Create matrix that converges slowly
+    P = np.array([
+        [0.99, 0.01],
+        [0.01, 0.99]
+    ])
+    
+    # Test different norms
+    norms = ["inf", "fro", "1", "2"]
+    results = {}
+    
+    for norm in norms:
+        engine = StateForecastingEngine(
+            convergence_threshold=1e-5,
+            max_steps=200,
+            norm_type=norm
+        )
+        steps = engine.compute_convergence(P)
+        results[norm] = steps
+    
+    print("  Convergence steps by norm type:")
+    for norm, steps in results.items():
+        print(f"    {norm}: {steps} steps")
+    
+    # All should find convergence
+    assert all(steps > 0 for steps in results.values())
+    assert all(steps <= 200 for steps in results.values())
+    
+    print("  ✓ Convergence norms test passed")
+    return True
+
+
+def test_engine_dimension_independence():
+    """Test 3: Engine works with different dimensions."""
+    print("\n" + "=" * 60)
+    print("TEST 3: Dimension Independence")
+    print("=" * 60)
+    
+    engine = StateForecastingEngine()
+    
+    # Test with 2x2 matrix
+    P2 = create_test_transition_matrix(n=2)
+    result2 = engine.compute(P2)
+    
+    assert result2.one_step.shape == (2, 2)
+    assert result2.three_step.shape == (2, 2)
+    assert result2.five_step.shape == (2, 2)
+    assert len(result2.stationary_distribution) == 2
+    
+    # Test with 3x3 matrix
+    P3 = create_test_transition_matrix(n=3)
+    result3 = engine.compute(P3)
+    
+    assert result3.one_step.shape == (3, 3)
+    assert result3.three_step.shape == (3, 3)
+    assert result3.five_step.shape == (3, 3)
+    assert len(result3.stationary_distribution) == 3
+    
+    # Test with 16x16 matrix (actual Atlas)
+    P16 = create_test_transition_matrix(n=16)
+    result16 = engine.compute(P16)
+    
+    assert result16.one_step.shape == (16, 16)
+    assert result16.three_step.shape == (16, 16)
+    assert result16.five_step.shape == (16, 16)
+    assert len(result16.stationary_distribution) == 16
+    
+    print("  ✓ 2x2 matrix works")
+    print("  ✓ 3x3 matrix works")
+    print("  ✓ 16x16 matrix works")
+    print("  ✓ Dimension independence test passed")
+    return True
+
+
+def test_engine_multi_step():
+    """Test 4: Multi-step forecasting."""
+    print("\n" + "=" * 60)
+    print("TEST 4: Multi-Step Forecasting")
+    print("=" * 60)
+    
+    engine = StateForecastingEngine()
+    
+    # Create test matrix
+    P = np.array([
+        [0.7, 0.3],
+        [0.4, 0.6]
+    ])
+    
+    # Test 2-step
+    P2 = engine.compute_multi_step(P, 2)
+    P2_expected = P @ P
+    
+    assert np.allclose(P2.values, P2_expected)
+    
+    # Test 3-step
+    P3 = engine.compute_multi_step(P, 3)
+    P3_expected = P @ P @ P
+    
+    assert np.allclose(P3.values, P3_expected)
+    
+    print("  ✓ Multi-step forecasting test passed")
+    return True
+
+
+def test_engine_stationary():
+    """Test 5: Stationary distribution."""
+    print("\n" + "=" * 60)
+    print("TEST 5: Stationary Distribution")
+    print("=" * 60)
+    
+    engine = StateForecastingEngine()
+    
+    # Create test matrix
+    P = np.array([
+        [0.7, 0.3],
+        [0.4, 0.6]
+    ])
+    
+    stationary = engine.compute_stationary_distribution(P)
+    
+    # Check sum to 1
+    assert np.isclose(stationary.sum(), 1)
+    
+    # Check πP = π
+    piP = stationary.values @ P
+    assert np.allclose(stationary.values, piP, atol=1e-10)
+    
+    print(f"  Stationary distribution: {stationary.values}")
+    print("  ✓ Stationary distribution test passed")
+    return True
+
+
+def test_engine_compute():
+    """Test 6: Full engine computation."""
+    print("\n" + "=" * 60)
+    print("TEST 6: Full Engine Computation")
+    print("=" * 60)
+    
+    engine = StateForecastingEngine()
+    prob_matrix = create_test_transition_matrix(n=16)
+    
+    result = engine.compute(prob_matrix)
+    
+    # Check results
+    n = prob_matrix.shape[0]
+    assert result.one_step.shape == (n, n)
+    assert result.three_step.shape == (n, n)
+    assert result.five_step.shape == (n, n)
+    assert not result.stationary_distribution.empty
+    assert result.convergence_steps > 0
+    
+    # Check row sums for one-step
+    assert np.allclose(result.one_step.sum(axis=1), 1)
+    
+    # Check row sums for three-step
+    assert np.allclose(result.three_step.sum(axis=1), 1)
+    
+    # Check row sums for five-step
+    assert np.allclose(result.five_step.sum(axis=1), 1)
+    
+    # Check stationary distribution
+    assert np.isclose(result.stationary_distribution.sum(), 1)
+    
+    # Verify P3 = P @ P @ P
+    P = prob_matrix.values
+    P3_computed = np.linalg.matrix_power(P, 3)
+    assert np.allclose(result.three_step.values, P3_computed)
+    
+    print(f"  Convergence steps: {result.convergence_steps}")
+    print(f"  Dominant state: {result.stationary_distribution.idxmax()}")
+    print(f"  Dominant prob: {result.stationary_distribution.max():.4f}")
+    print("  ✓ Full engine test passed")
+    return True
+
+
+def test_statistics():
+    """Test 7: Statistics engine with top states."""
+    print("\n" + "=" * 60)
+    print("TEST 7: Statistics Engine")
+    print("=" * 60)
+    
+    engine = StateForecastingEngine()
+    stats_engine = StateForecastingStatisticsEngine()
+    
+    prob_matrix = create_test_transition_matrix(n=16)
+    result = engine.compute(prob_matrix)
+    stats = stats_engine.analyze(result)
+    
+    # Check statistics
+    assert stats.convergence_steps == result.convergence_steps
+    assert stats.dominant_state == int(result.stationary_distribution.idxmax())
+    assert stats.dominant_probability == result.stationary_distribution.max()
+    assert stats.stationary_entropy >= 0
+    
+    # Check top states
+    assert len(stats.top_states) == 5
+    assert sum(stats.top_states.values()) > 0
+    
+    print(f"  Dominant state: {stats.dominant_state}")
+    print(f"  Dominant prob: {stats.dominant_probability:.4f}")
+    print(f"  Stationary entropy: {stats.stationary_entropy:.3f} bits")
+    print(f"  Top states: {stats.top_states}")
+    print("  ✓ Statistics test passed")
+    return True
+
+
+def test_validator():
+    """Test 8: Validator."""
+    print("\n" + "=" * 60)
+    print("TEST 8: Validator")
+    print("=" * 60)
+    
+    engine = StateForecastingEngine()
+    stats_engine = StateForecastingStatisticsEngine()
+    
+    prob_matrix = create_test_transition_matrix(n=16)
+    result = engine.compute(prob_matrix)
+    stats = stats_engine.analyze(result)
+    
+    passed = run_validation(result, stats)
+    assert passed
+    
+    print("  ✓ Validator test passed")
+    return True
+
+
+def test_pipeline():
+    """Test 9: Full pipeline."""
+    print("\n" + "=" * 60)
+    print("TEST 9: Full Pipeline")
+    print("=" * 60)
+    
+    # Create DataFrame with transition matrix (16x16)
+    prob_matrix = create_test_transition_matrix(n=16)
+    
+    research = StateForecastingResearch(
+        convergence_threshold=1e-6,
+        max_steps=200,
+        norm_type="fro"
+    )
+    result = research.run_dataframe(prob_matrix, dataset_id="pipeline_test")
+    
+    assert result.status == "completed"
+    assert "one_step_forecast" in result.artifacts
+    assert "three_step_forecast" in result.artifacts
+    assert "five_step_forecast" in result.artifacts
+    assert "stationary_distribution" in result.artifacts
+    assert "state_forecasting_report" in result.artifacts
+    assert "stationary_report" in result.artifacts
+    assert result.statistics.get("validation_passed") == True
+    
+    print(f"  Convergence steps: {result.statistics.get('convergence_steps')}")
+    print(f"  Dominant state: {result.statistics.get('dominant_state')}")
+    print(f"  Dominant prob: {result.statistics.get('dominant_probability'):.4f}")
+    print("  ✓ Full pipeline test passed")
+    return True
+
+
+def test_pipeline_with_states():
+    """Test 10: Pipeline with state column."""
+    print("\n" + "=" * 60)
+    print("TEST 10: Pipeline with State Column")
+    print("=" * 60)
+    
+    # Create DataFrame with state column
+    np.random.seed(42)
+    states = np.random.randint(0, 16, 1000)
+    df = pd.DataFrame({"state": states})
+    
+    research = StateForecastingResearch()
+    result = research.run_dataframe(df, dataset_id="state_pipeline_test")
+    
+    assert result.status == "completed"
+    assert "one_step_forecast" in result.artifacts
+    assert "three_step_forecast" in result.artifacts
+    assert "five_step_forecast" in result.artifacts
+    assert "stationary_distribution" in result.artifacts
+    assert result.statistics.get("validation_passed") == True
+    
+    print(f"  Convergence steps: {result.statistics.get('convergence_steps')}")
+    print(f"  Dominant state: {result.statistics.get('dominant_state')}")
+    print("  ✓ Pipeline with state column test passed")
+    return True
+
+
+def main():
+    """Run all tests."""
+    print("\n" + "=" * 70)
+    print("PROJECT ATLAS - MODULE 107 INTEGRATION TEST")
+    print("State Forecasting")
+    print("=" * 70)
+    
+    results = {}
+    
+    results["validation"] = test_engine_validation()
+    results["convergence_norms"] = test_engine_convergence_norms()
+    results["dimension_independence"] = test_engine_dimension_independence()
+    results["multi_step"] = test_engine_multi_step()
+    results["stationary"] = test_engine_stationary()
+    results["full_engine"] = test_engine_compute()
+    results["statistics"] = test_statistics()
+    results["validator"] = test_validator()
+    results["pipeline"] = test_pipeline()
+    results["pipeline_states"] = test_pipeline_with_states()
+    
+    print("\n" + "=" * 70)
+    print("RESULTS")
+    print("=" * 70)
+    
+    for name, ok in results.items():
+        print(f"  {'✓' if ok else '✗'} {name}")
+    
+    passed = sum(results.values())
+    total = len(results)
+    
+    print(f"\n  {passed}/{total} tests passed")
+    
+    if passed == total:
+        print("\n✓ Module 107 VALIDATED")
+        return 0
+    else:
+        print("\n⚠ Some tests failed")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

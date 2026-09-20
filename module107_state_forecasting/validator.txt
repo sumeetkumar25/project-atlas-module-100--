@@ -1,0 +1,122 @@
+# atlas/modules/module107_state_forecasting/validator.py
+"""
+Module 107 - State Forecasting Validator
+"""
+
+import numpy as np
+import pandas as pd
+from .engine import ForecastResult
+from .statistics import ForecastStatistics
+
+
+class StateForecastingValidator:
+    """Validator for state forecasting results."""
+    
+    def validate(
+        self,
+        result: ForecastResult,
+        statistics: ForecastStatistics
+    ) -> bool:
+        """
+        Validate results and statistics.
+        
+        Args:
+            result: ForecastResult from engine
+            statistics: ForecastStatistics from statistics engine
+            
+        Returns:
+            True if validation passes
+            
+        Raises:
+            ValueError: If validation fails
+        """
+        issues = []
+        
+        # Get dimensions from one_step matrix
+        n = result.one_step.shape[0]
+        
+        # Validate matrix shapes (should all be n x n)
+        for name, matrix in [
+            ("one_step", result.one_step),
+            ("three_step", result.three_step),
+            ("five_step", result.five_step)
+        ]:
+            if matrix.shape != (n, n):
+                issues.append(
+                    f"{name} matrix shape should be ({n},{n}), got {matrix.shape}"
+                )
+            
+            # Check rows sum to 1
+            if not matrix.empty:
+                row_sums = matrix.sum(axis=1)
+                if not np.allclose(row_sums, 1, atol=1e-10):
+                    issues.append(
+                        f"{name} matrix rows do not sum to 1"
+                    )
+        
+        # Validate stationary distribution
+        if not result.stationary_distribution.empty:
+            # Check length matches matrix dimension
+            if len(result.stationary_distribution) != n:
+                issues.append(
+                    f"Stationary distribution length {len(result.stationary_distribution)} "
+                    f"does not match matrix dimension {n}"
+                )
+            
+            # Check sum to 1
+            if not np.isclose(result.stationary_distribution.sum(), 1, atol=1e-10):
+                issues.append(
+                    f"Stationary distribution does not sum to 1: "
+                    f"{result.stationary_distribution.sum()}"
+                )
+            
+            # Check non-negative
+            if not np.all(result.stationary_distribution >= 0):
+                issues.append("Stationary distribution has negative values")
+        
+        # Validate convergence
+        if result.convergence_steps <= 0:
+            issues.append(
+                f"Convergence steps must be positive: {result.convergence_steps}"
+            )
+        
+        # Validate statistics match result
+        if statistics.convergence_steps != result.convergence_steps:
+            issues.append(
+                f"Convergence steps mismatch: stats={statistics.convergence_steps}, "
+                f"result={result.convergence_steps}"
+            )
+        
+        if not result.stationary_distribution.empty:
+            if statistics.dominant_state != int(result.stationary_distribution.idxmax()):
+                issues.append(
+                    f"Dominant state mismatch: stats={statistics.dominant_state}, "
+                    f"result={result.stationary_distribution.idxmax()}"
+                )
+        
+        if issues:
+            raise ValueError(
+                f"State Forecasting validation failed with {len(issues)} issue(s):\n" +
+                "\n".join(f"  - {issue}" for issue in issues)
+            )
+        
+        return True
+
+
+def run_validation(result, statistics):
+    """Run validation with user-friendly output."""
+    validator = StateForecastingValidator()
+    
+    print("\n" + "=" * 60)
+    print("STATE FORECASTING VALIDATION")
+    print("=" * 60)
+    
+    try:
+        validator.validate(result, statistics)
+        print("\n  ✓ All validation checks passed")
+        print("=" * 60)
+        return True
+    except ValueError as e:
+        print(e)
+        print("=" * 60)
+        return False

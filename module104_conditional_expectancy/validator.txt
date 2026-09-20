@@ -1,0 +1,119 @@
+# atlas/modules/module104_conditional_expectancy/validator.py
+"""
+Module 104 - Conditional Expectancy Validator
+"""
+
+import numpy as np
+import pandas as pd
+from .engine import ExpectancyResult
+from .statistics import ConditionalExpectancyStatistics
+
+
+class ConditionalExpectancyValidator:
+    """Validator for conditional expectancy results."""
+    
+    def validate(
+        self,
+        result: ExpectancyResult,
+        statistics: ConditionalExpectancyStatistics
+    ) -> bool:
+        """
+        Validate results and statistics.
+        
+        Args:
+            result: ExpectancyResult from engine
+            statistics: ConditionalExpectancyStatistics from statistics engine
+            
+        Returns:
+            True if validation passes
+            
+        Raises:
+            ValueError: If validation fails
+        """
+        issues = []
+        
+        # Validate total states
+        if result.total_states < 0:
+            issues.append(f"Total states cannot be negative: {result.total_states}")
+        
+        if result.total_states > 16:
+            issues.append(f"Too many states (max 16, got {result.total_states})")
+        
+        # Validate sample size
+        if result.sample_size <= 0:
+            issues.append(f"Invalid sample size: {result.sample_size}")
+        
+        # Validate expectancy table
+        if result.expectancy_table.empty:
+            issues.append("Expectancy table is empty")
+        else:
+            # Check required columns
+            required_cols = ["state", "samples", "mean", "median", "std", "min", "max", "win_rate"]
+            missing_cols = set(required_cols) - set(result.expectancy_table.columns)
+            if missing_cols:
+                issues.append(f"Missing columns in expectancy table: {missing_cols}")
+            
+            # Check states are in range
+            if "state" in result.expectancy_table.columns:
+                states = result.expectancy_table["state"].values
+                if not np.all((0 <= states) & (states <= 15)):
+                    issues.append("Some states outside [0, 15] range")
+            
+            # Check win rates are in [0, 1]
+            if "win_rate" in result.expectancy_table.columns:
+                win_rates = result.expectancy_table["win_rate"].values
+                if not np.all((0 <= win_rates) & (win_rates <= 1)):
+                    issues.append("Some win rates outside [0, 1]")
+            
+            # Check best state exists in table
+            if result.best_state >= 0:
+                if result.best_state not in result.expectancy_table["state"].values:
+                    issues.append(
+                        f"Best state {result.best_state} not found in expectancy table"
+                    )
+        
+        # Validate statistics match result
+        if result.total_states != statistics.total_states:
+            issues.append(
+                f"Total states mismatch: stats={statistics.total_states}, "
+                f"result={result.total_states}"
+            )
+        
+        if result.sample_size != statistics.sample_size:
+            issues.append(
+                f"Sample size mismatch: stats={statistics.sample_size}, "
+                f"result={result.sample_size}"
+            )
+        
+        if result.best_state != statistics.best_state:
+            issues.append(
+                f"Best state mismatch: stats={statistics.best_state}, "
+                f"result={result.best_state}"
+            )
+        
+        if issues:
+            raise ValueError(
+                f"Conditional Expectancy validation failed with {len(issues)} issue(s):\n" +
+                "\n".join(f"  - {issue}" for issue in issues)
+            )
+        
+        return True
+
+
+def run_validation(result, statistics):
+    """Run validation with user-friendly output."""
+    validator = ConditionalExpectancyValidator()
+    
+    print("\n" + "=" * 60)
+    print("CONDITIONAL EXPECTANCY VALIDATION")
+    print("=" * 60)
+    
+    try:
+        validator.validate(result, statistics)
+        print("\n  ✓ All validation checks passed")
+        print("=" * 60)
+        return True
+    except ValueError as e:
+        print(e)
+        print("=" * 60)
+        return False

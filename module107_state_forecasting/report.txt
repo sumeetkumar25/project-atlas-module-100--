@@ -1,0 +1,150 @@
+# atlas/modules/module107_state_forecasting/report.py
+"""
+Module 107 - State Forecasting Report
+"""
+
+from datetime import datetime
+import pandas as pd
+import numpy as np
+
+
+class StateForecastingReport:
+    """Report generator for state forecasting results."""
+    
+    @staticmethod
+    def generate(statistics, metadata=None, dataset_name="Unknown") -> str:
+        """
+        Generate a formatted report.
+        
+        Args:
+            statistics: ForecastStatistics
+            metadata: Optional metadata dict
+            dataset_name: Name of the dataset
+            
+        Returns:
+            Formatted report string
+        """
+        lines = []
+        
+        lines.append("=" * 55)
+        lines.append("MODULE 107")
+        lines.append("STATE FORECASTING")
+        lines.append("=" * 55)
+        lines.append(f"\nDataset: {dataset_name}")
+        
+        # Overview
+        lines.append("\n" + "-" * 45)
+        lines.append("OVERVIEW")
+        lines.append("-" * 45)
+        lines.append(f"  Sample Size: {statistics.sample_size:,}")
+        lines.append(f"  Convergence Steps: {statistics.convergence_steps}")
+        
+        # Stationary Distribution
+        lines.append("\n" + "-" * 45)
+        lines.append("STATIONARY DISTRIBUTION")
+        lines.append("-" * 45)
+        lines.append(f"  Dominant State: {statistics.dominant_state}")
+        lines.append(f"  Dominant Probability: {statistics.dominant_probability:.4f}")
+        lines.append(f"  Entropy: {statistics.stationary_entropy:.3f} bits")
+        
+        # Top 5 States
+        if statistics.top_states:
+            lines.append("\n  Top 5 States:")
+            for state, prob in statistics.top_states.items():
+                lines.append(f"    State {state}: {prob:.4f}")
+        
+        # Interpretation
+        lines.append("\n" + "-" * 45)
+        lines.append("INTERPRETATION")
+        lines.append("-" * 45)
+        
+        if statistics.convergence_steps < 10:
+            lines.append("  Market converges quickly to stationary distribution")
+        elif statistics.convergence_steps < 30:
+            lines.append("  Market converges moderately to stationary distribution")
+        else:
+            lines.append("  Market converges slowly to stationary distribution")
+        
+        if statistics.stationary_entropy < 1.0:
+            lines.append("  Stationary distribution is concentrated (few dominant states)")
+        elif statistics.stationary_entropy < 2.0:
+            lines.append("  Stationary distribution is moderately spread")
+        else:
+            lines.append("  Stationary distribution is highly spread (many states likely)")
+        
+        # Validation
+        lines.append("\n" + "-" * 45)
+        lines.append("VALIDATION")
+        lines.append("-" * 45)
+        lines.append("  Status: PASSED")
+        
+        # Footer
+        lines.append(f"\n  Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        lines.append("\n" + "=" * 55)
+        lines.append("END OF REPORT")
+        lines.append("=" * 55)
+        
+        return "\n".join(lines)
+    
+    @staticmethod
+    def generate_stationary_report(stationary: pd.Series, top_n: int = 10) -> str:
+        """
+        Generate a detailed stationary distribution report.
+        
+        Args:
+            stationary: Stationary distribution Series
+            top_n: Number of top states to display
+            
+        Returns:
+            Formatted stationary distribution report
+        """
+        lines = []
+        lines.append("\n" + "=" * 70)
+        lines.append("STATIONARY DISTRIBUTION")
+        lines.append("=" * 70)
+        
+        # Sort by probability descending
+        sorted_stationary = stationary.sort_values(ascending=False)
+        
+        lines.append(
+            f"\n{'State':<8} {'Probability':<14} {'Cumulative':<14} {'Interpretation':<20}"
+        )
+        lines.append("-" * 60)
+        
+        cumulative = 0
+        for state, prob in sorted_stationary.head(top_n).items():
+            cumulative += prob
+            interpretation = ""
+            if prob > 0.1:
+                interpretation = "High probability"
+            elif prob > 0.05:
+                interpretation = "Moderate probability"
+            elif prob > 0.01:
+                interpretation = "Low probability"
+            else:
+                interpretation = "Very low probability"
+            
+            lines.append(
+                f"{state:<8} {prob:<14.4f} {cumulative:<14.4f} {interpretation:<20}"
+            )
+        
+        # Summary
+        lines.append("\n" + "-" * 60)
+        lines.append("SUMMARY")
+        lines.append("-" * 60)
+        lines.append(f"  Total States: {len(stationary)}")
+        lines.append(f"  States with >1% probability: {(stationary > 0.01).sum()}")
+        lines.append(f"  States with >5% probability: {(stationary > 0.05).sum()}")
+        lines.append(f"  States with >10% probability: {(stationary > 0.10).sum()}")
+        
+        lines.append("\n" + "=" * 70)
+        return "\n".join(lines)
+    
+    @staticmethod
+    def save(report: str, filepath: str):
+        """Save report to file."""
+        from pathlib import Path
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(report)

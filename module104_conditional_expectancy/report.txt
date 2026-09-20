@@ -1,0 +1,133 @@
+# atlas/modules/module104_conditional_expectancy/report.py
+"""
+Module 104 - Conditional Expectancy Report
+"""
+
+from datetime import datetime
+import pandas as pd
+
+
+class ConditionalExpectancyReport:
+    """Report generator for conditional expectancy results."""
+    
+    @staticmethod
+    def generate(statistics, metadata=None, dataset_name="Unknown") -> str:
+        """
+        Generate a formatted report.
+        
+        Args:
+            statistics: ConditionalExpectancyStatistics
+            metadata: Optional metadata dict
+            dataset_name: Name of the dataset
+            
+        Returns:
+            Formatted report string
+        """
+        lines = []
+        
+        lines.append("=" * 55)
+        lines.append("MODULE 104")
+        lines.append("CONDITIONAL EXPECTANCY")
+        lines.append("=" * 55)
+        lines.append(f"\nDataset: {dataset_name}")
+        
+        # Parameters
+        lines.append("\n" + "-" * 45)
+        lines.append("PARAMETERS")
+        lines.append("-" * 45)
+        lines.append(f"  Future Horizon: {statistics.future_horizon} Bars")
+        lines.append(f"  Sample Size: {statistics.sample_size:,}")
+        
+        # Results Summary
+        lines.append("\n" + "-" * 45)
+        lines.append("RESULTS SUMMARY")
+        lines.append("-" * 45)
+        lines.append(f"  States Evaluated: {statistics.total_states}/16")
+        lines.append(f"  Positive States: {statistics.positive_states}")
+        lines.append(f"  Negative States: {statistics.negative_states}")
+        
+        # Best State
+        if statistics.best_state >= 0:
+            lines.append(f"\n  Best State: {statistics.best_state}")
+            lines.append(f"    Average Return: {statistics.best_expectancy:.2f}%")
+            lines.append(f"    Overall Avg: {statistics.average_expectancy:.2f}%")
+        
+        # Validation
+        lines.append("\n" + "-" * 45)
+        lines.append("VALIDATION")
+        lines.append("-" * 45)
+        lines.append("  Status: PASSED")
+        
+        # Footer
+        lines.append(f"\n  Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        lines.append("\n" + "=" * 55)
+        lines.append("END OF REPORT")
+        lines.append("=" * 55)
+        
+        return "\n".join(lines)
+    
+    @staticmethod
+    def generate_state_report(table: pd.DataFrame, top_n: int = 10) -> str:
+        """
+        Generate a detailed state report.
+        
+        Args:
+            table: DataFrame with state statistics
+            top_n: Number of top states to display
+            
+        Returns:
+            Formatted state report string
+        """
+        if table.empty:
+            return "No states to report."
+        
+        lines = []
+        lines.append("\n" + "=" * 70)
+        lines.append("STATE EXPECTANCY TABLE")
+        lines.append("=" * 70)
+        
+        # Header
+        lines.append(
+            f"\n{'State':<8} {'Samples':<12} {'Mean %':<12} "
+            f"{'Median %':<12} {'Win Rate %':<12} {'Sharpe':<10}"
+        )
+        lines.append("-" * 70)
+        
+        # Show top N states
+        display_table = table.head(top_n)
+        
+        for _, row in display_table.iterrows():
+            state = row['state']
+            samples = row['samples']
+            mean = row['mean'] * 100
+            median = row['median'] * 100
+            win_rate = row['win_rate'] * 100
+            sharpe = row['mean'] / (row['std'] + 1e-12)
+            
+            lines.append(
+                f"{state:<8} {samples:<12} {mean:<12.2f} "
+                f"{median:<12.2f} {win_rate:<12.1f} {sharpe:<10.2f}"
+            )
+        
+        # Summary statistics
+        lines.append("\n" + "-" * 70)
+        lines.append("SUMMARY")
+        lines.append("-" * 70)
+        lines.append(f"  Total States: {len(table)}")
+        lines.append(f"  Average Mean Return: {table['mean'].mean() * 100:.2f}%")
+        lines.append(f"  Best Mean Return: {table['mean'].max() * 100:.2f}%")
+        lines.append(f"  Worst Mean Return: {table['mean'].min() * 100:.2f}%")
+        lines.append(f"  States with Positive Returns: {(table['mean'] > 0).sum()}")
+        lines.append(f"  States with Negative Returns: {(table['mean'] <= 0).sum()}")
+        
+        lines.append("\n" + "=" * 70)
+        return "\n".join(lines)
+    
+    @staticmethod
+    def save(report: str, filepath: str):
+        """Save report to file."""
+        from pathlib import Path
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(report)

@@ -1,0 +1,300 @@
+"""
+Module 107
+State Forecasting
+
+Forecasts future state distributions using Markov chain analysis.
+
+Pipeline: load transition matrix → compute forecasts → stationary distribution → convergence → statistics → validation → report → export
+"""
+
+from typing import Optional, Dict, Any, Literal
+import pandas as pd
+import numpy as np
+
+from atlas.core.base_research_module import BaseResearchModule
+from atlas.framework.registry import AtlasRegistry
+
+from .engine import StateForecastingEngine
+from .statistics import StateForecastingStatisticsEngine
+from .validator import run_validation
+from .report import StateForecastingReport
+
+
+class StateForecastingResearch(BaseResearchModule):
+    """Main research module for state forecasting."""
+    
+    MODULE_OUTPUT = "module107"
+    METADATA = StateForecastingStatisticsEngine.METADATA
+    
+    def __init__(
+        self,
+        registry: Optional[AtlasRegistry] = None,
+        convergence_threshold: float = 1e-5,
+        max_steps: int = 100,
+        norm_type: Literal["inf", "fro", "1", "2"] = "inf"
+    ):
+        """
+        Initialize the state forecasting module.
+        
+        Args:
+            registry: Optional Atlas registry
+            convergence_threshold: Threshold for convergence detection
+            max_steps: Maximum number of steps to check for convergence
+            norm_type: Type of matrix norm to use for convergence detection
+                - "inf": Infinity norm (maximum absolute row sum) - default
+                - "fro": Frobenius norm (Euclidean norm for matrices)
+                - "1": L1 norm (maximum absolute column sum)
+                - "2": L2 norm (spectral norm)
+        """
+        super().__init__(
+            module_name="State Forecasting",
+            module_version=self.METADATA["version"],
+        )
+        
+        self.registry = registry or AtlasRegistry()
+        self.engine = StateForecastingEngine(
+            convergence_threshold=convergence_threshold,
+            max_steps=max_steps,
+            norm_type=norm_type
+        )
+        self.stats_engine = StateForecastingStatisticsEngine()
+        self.result_data = None
+        self.statistics = None
+        self.stationary_report = None
+    
+    def _register_pipeline_steps(self):
+        """Register pipeline steps."""
+        self.pipeline_steps = [
+            ("state_forecasting", self._compute_forecast),
+            ("statistics", self._compute_statistics),
+            ("validate", self._validate),
+            ("export", self._export_results),
+        ]
+    
+    def _prepare_data(self) -> Dict[str, Any]:
+        """
+        Prepare data for state forecasting.
+
+        The Atlas state space contains 16 theoretical states (0-15),
+        but forecasting is based only on states actually observed in
+        the dataset.
+
+        Unobserved states have no empirical transition probabilities
+        and are therefore excluded from the forecasting matrix rather
+        than being assigned artificial probabilities.
+        """
+        # Check if a transition probability matrix was supplied directly
+        is_square = self.df.shape[0] == self.df.shape[1]
+
+        if is_square:
+            row_sums = self.df.sum(axis=1)
+            is_prob_matrix = np.allclose(
+                row_sums.values,
+                1.0,
+                atol=1e-8
+            )
+
+            if is_prob_matrix:
+                observed_states = list(self.df.index)
+
+                return {
+                    "probability_matrix": self.df.astype(float),
+                    "state_labels": observed_states,
+                    "sample_size": 0,
+                }
+
+        # Otherwise reconstruct the empirical transition matrix
+        if "state" not in self.df.columns:
+            raise ValueError(
+                "DataFrame must contain either a transition probability "
+                "matrix or a 'state' column"
+            )
+
+        states = pd.Series(self.df["state"]).dropna()
+
+        if states.empty:
+            raise ValueError("State column contains no valid observations")
+
+        # Preserve actual state labels
+        observed_states = sorted(
+            pd.unique(states.astype(int))
+        )
+
+        # Validate state range
+        invalid_states = [
+            s for s in observed_states
+            if s < 0 or s > 15
+        ]
+
+        if invalid_states:
+            raise ValueError(
+                f"Invalid state values outside 0-15: {invalid_states}"
+            )
+
+        # Build empirical transition counts
+        counts = pd.DataFrame(
+            0,
+            index=observed_states,
+            columns=observed_states,
+            dtype=int
+        )
+
+        state_values = states.astype(int).to_numpy()
+
+        for i in range(len(state_values) - 1):
+            current_state = state_values[i]
+            next_state = state_values[i + 1]
+
+            counts.loc[current_state, next_state] += 1
+
+        # Every observed state should have at least one outgoing
+        # transition except potentially the final observation.
+        row_totals = counts.sum(axis=1)
+
+        valid_states = row_totals[row_totals > 0].index.tolist()
+
+        if not valid_states:
+            raise ValueError(
+                "No valid state transitions were observed"
+            )
+
+        # Restrict to states with empirical outgoing transitions.
+        counts = counts.loc[valid_states, valid_states]
+
+        # Convert to probabilities
+        prob_matrix = counts.div(
+            counts.sum(axis=1),
+            axis=0
+        )
+
+        return {
+            "probability_matrix": prob_matrix.astype(float),
+            "state_labels": valid_states,
+            "sample_size": len(states),
+        }
+    
+    def _compute_forecast(self) -> Dict[str, Any]:
+        """Step 1: Compute state forecasts."""
+        self.logger.info("Step 1: Computing state forecasts")
+        
+        prepared = self._prepare_data()
+        
+        self.result_data = self.engine.compute(
+            probability_matrix=prepared["probability_matrix"],
+            state_labels=prepared["state_labels"]
+        )
+        
+        # Set sample size
+        self.result_data.sample_size = prepared["sample_size"]
+        
+        self.logger.metric(
+            "Convergence Steps",
+            str(self.result_data.convergence_steps)
+        )
+        self.logger.metric(
+            "Dominant State",
+            str(self.result_data.stationary_distribution.idxmax())
+        )
+        self.logger.metric(
+            "Stationary Entropy",
+            f"{self._calculate_entropy(self.result_data.stationary_distribution):.3f} bits"
+        )
+        self.logger.success("State forecasts computed")
+        
+        # Generate stationary report
+        self.stationary_report = StateForecastingReport.generate_stationary_report(
+            self.result_data.stationary_distribution
+        )
+        
+        return {
+            "convergence_steps": self.result_data.convergence_steps,
+            "dominant_state": int(self.result_data.stationary_distribution.idxmax()),
+            "sample_size": self.result_data.sample_size,
+        }
+    
+    def _calculate_entropy(self, stationary: pd.Series) -> float:
+        """Calculate entropy of stationary distribution."""
+        probs = stationary[stationary > 0].values
+        if len(probs) == 0:
+            return 0.0
+        return -np.sum(probs * np.log2(probs))
+    
+    def _compute_statistics(self) -> Dict[str, Any]:
+        """Step 2: Compute statistics."""
+        self.logger.info("Step 2: Computing statistics")
+        self.statistics = self.stats_engine.analyze(self.result_data)
+        
+        self.logger.metric(
+            "Dominant State",
+            f"{self.statistics.dominant_state} "
+            f"({self.statistics.dominant_probability:.3f})"
+        )
+        self.logger.metric(
+            "Stationary Entropy",
+            f"{self.statistics.stationary_entropy:.3f} bits"
+        )
+        self.logger.success("Statistics computed")
+        
+        return self.stats_engine.summary_dict(self.statistics)
+    
+    def _validate(self) -> Dict[str, Any]:
+        """Step 3: Validation."""
+        self.logger.info("Step 3: Validation")
+        passed = run_validation(self.result_data, self.statistics)
+        self.logger.success("Validation complete")
+        return {"validation_passed": passed}
+    
+    def _export_results(self) -> Dict[str, Any]:
+        """Step 4: Export."""
+        self.logger.info("Step 4: Export")
+        
+        # Store forecast matrices
+        self.result.artifacts["one_step_forecast"] = self.result_data.one_step
+        self.result.artifacts["three_step_forecast"] = self.result_data.three_step
+        self.result.artifacts["five_step_forecast"] = self.result_data.five_step
+        self.result.artifacts["stationary_distribution"] = self.result_data.stationary_distribution
+        
+        # Store main report
+        main_report = StateForecastingReport.generate(
+            self.statistics,
+            metadata=self.METADATA,
+            dataset_name=self.result.dataset_identifier,
+        )
+        self.result.artifacts["state_forecasting_report"] = main_report
+        
+        # Store stationary report
+        self.result.artifacts["stationary_report"] = self.stationary_report
+        
+        # Store detailed results as dict
+        self.result.artifacts["detailed_results"] = {
+            "one_step": self.result_data.one_step.to_dict(),
+            "three_step": self.result_data.three_step.to_dict(),
+            "five_step": self.result_data.five_step.to_dict(),
+            "stationary_distribution": self.result_data.stationary_distribution.to_dict(),
+            "convergence_steps": self.result_data.convergence_steps,
+            "sample_size": self.result_data.sample_size
+        }
+        
+        self.logger.metric("Artifacts", str(len(self.result.artifacts)))
+        self.logger.success("Export complete")
+        
+        return {
+            "export_status": "complete",
+            "artifact_count": len(self.result.artifacts),
+        }
+    
+    def compute(self) -> Dict[str, Any]:
+        """Run the full computation pipeline."""
+        self.logger.section("State Forecasting Pipeline")
+        results = self.execute_pipeline()
+        self.result.status = "completed"
+        self.logger.success("Module 107 complete")
+        return results
+    
+    def run(self, filepath: str, output_dir=None):
+        """Run module on file."""
+        return super().run(filepath, output_dir)
+    
+    def run_dataframe(self, df, dataset_id="in_memory", output_dir=None):
+        """Run module on DataFrame."""
+        return super().run_dataframe(df, dataset_id, output_dir)

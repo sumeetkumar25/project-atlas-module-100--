@@ -1,0 +1,332 @@
+"""
+Module 107 - State Forecasting
+
+Forecasts future state distributions using Markov chain analysis.
+
+Pipeline:
+  1. Take transition probability matrix
+  2. Compute multi-step forecasts (1, 3, 5 steps ahead)
+  3. Calculate stationary distribution
+  4. Determine convergence rate
+
+State labels are preserved throughout the calculation so Atlas states
+such as [1, 5, 9, 13] are not silently converted to [0, 1, 2, 3].
+"""
+
+import numpy as np
+import pandas as pd
+from dataclasses import dataclass
+from typing import Optional, Dict, Any, Literal, Sequence
+
+
+@dataclass
+class ForecastResult:
+    """Results from state forecasting analysis."""
+    one_step: pd.DataFrame
+    three_step: pd.DataFrame
+    five_step: pd.DataFrame
+    stationary_distribution: pd.Series
+    convergence_steps: int
+    sample_size: int
+
+    def __post_init__(self):
+        """
+        Ensure forecast matrices are square.
+
+        State labels are intentionally preserved. The previous
+        implementation replaced them with range(n), which could
+        corrupt Atlas state identity.
+        """
+        for df in [self.one_step, self.three_step, self.five_step]:
+            if not df.empty:
+                if df.shape[0] != df.shape[1]:
+                    raise ValueError(
+                        f"Forecast matrix must be square, got {df.shape}"
+                    )
+
+                if len(df.index) != len(df.columns):
+                    raise ValueError(
+                        "Forecast matrix index/columns dimensions do not match"
+                    )
+
+
+class StateForecastingEngine:
+    """Core engine for state forecasting analysis."""
+
+    def __init__(
+        self,
+        convergence_threshold: float = 1e-5,
+        max_steps: int = 100,
+        norm_type: Literal["inf", "fro", "1", "2"] = "inf"
+    ):
+        self.convergence_threshold = convergence_threshold
+        self.max_steps = max_steps
+        self.norm_type = norm_type
+
+    def _validate_transition_matrix(self, P: np.ndarray) -> None:
+        """
+        Validate that P is a valid transition probability matrix.
+        """
+
+        if P.ndim != 2:
+            raise ValueError(
+                f"Transition matrix must be 2-dimensional, got {P.ndim}D"
+            )
+
+        if P.shape[0] != P.shape[1]:
+            raise ValueError(
+                f"Matrix must be square, got {P.shape}"
+            )
+
+        if P.shape[0] == 0:
+            raise ValueError("Transition matrix cannot be empty")
+
+        if not np.all(np.isfinite(P)):
+            raise ValueError(
+                "Transition matrix contains non-finite values"
+            )
+
+        if not np.all(P >= 0):
+            raise ValueError(
+                "Transition matrix contains negative values"
+            )
+
+        row_sums = P.sum(axis=1)
+
+        if not np.allclose(row_sums, 1.0, atol=1e-8):
+            invalid_rows = np.where(
+                ~np.isclose(row_sums, 1.0, atol=1e-8)
+            )[0]
+
+            raise ValueError(
+                f"Rows {invalid_rows} do not sum to 1. "
+                f"Row sums: {row_sums[invalid_rows]}"
+            )
+
+    def _validate_state_labels(
+        self,
+        state_labels: Optional[Sequence[Any]],
+        n: int
+    ) -> list:
+        """
+        Validate and normalize state labels.
+
+        If labels are not supplied, positional labels 0..n-1 are used.
+        """
+
+        if state_labels is None:
+            return list(range(n))
+
+        labels = list(state_labels)
+
+        if len(labels) != n:
+            raise ValueError(
+                f"Number of state labels ({len(labels)}) does not match "
+                f"transition matrix dimension ({n})"
+            )
+
+        if len(set(labels)) != len(labels):
+            raise ValueError(
+                f"State labels must be unique, got {labels}"
+            )
+
+        return labels
+
+    def compute_multi_step(
+        self,
+        P: np.ndarray,
+        steps: int,
+        state_labels: Optional[Sequence[Any]] = None
+    ) -> pd.DataFrame:
+        """
+        Compute multi-step transition probabilities.
+
+        Args:
+            P: Transition probability matrix (n x n)
+            steps: Number of steps ahead
+            state_labels: Actual Atlas state labels
+
+        Returns:
+            DataFrame with multi-step transition probabilities.
+        """
+
+        if steps < 1:
+            raise ValueError(
+                f"steps must be >= 1, got {steps}"
+            )
+
+        if steps == 1:
+            Pk = P
+        else:
+            Pk = np.linalg.matrix_power(P, steps)
+
+        n = Pk.shape[0]
+
+        labels = self._validate_state_labels(
+            state_labels,
+            n
+        )
+
+        return pd.DataFrame(
+            Pk,
+            index=labels,
+            columns=labels
+        )
+
+    def compute_stationary_distribution(
+        self,
+        P: np.ndarray,
+        state_labels: Optional[Sequence[Any]] = None
+    ) -> pd.Series:
+        """
+        Compute stationary distribution π such that πP = π.
+        """
+
+        n = P.shape[0]
+
+        labels = self._validate_state_labels(
+            state_labels,
+            n
+        )
+
+        eigvals, eigvecs = np.linalg.eig(P.T)
+
+        idx = np.argmin(np.abs(eigvals - 1))
+
+        stationary = np.real(eigvecs[:, idx])
+
+        # Handle eigenvector sign ambiguity.
+        if stationary.sum() < 0:
+            stationary = -stationary
+
+        stationary = np.maximum(stationary, 0)
+
+        total = stationary.sum()
+
+        if total <= 0:
+            raise ValueError(
+                "Unable to construct a valid stationary distribution"
+            )
+
+        stationary = stationary / total
+
+        return pd.Series(
+            stationary,
+            index=labels,
+            dtype=float
+        )
+
+    def compute_convergence(self, P: np.ndarray) -> int:
+        """
+        Determine when P^k ≈ P^(k+1).
+        """
+
+        norm_order_map = {
+            "inf": np.inf,
+            "fro": "fro",
+            "1": 1,
+            "2": 2
+        }
+
+        norm_order = norm_order_map.get(
+            self.norm_type,
+            np.inf
+        )
+
+        for k in range(1, self.max_steps):
+            Pk = np.linalg.matrix_power(P, k)
+            Pk1 = np.linalg.matrix_power(P, k + 1)
+
+            diff = np.linalg.norm(
+                Pk - Pk1,
+                ord=norm_order
+            )
+
+            if diff < self.convergence_threshold:
+                return k
+
+        return self.max_steps
+
+    def compute(
+        self,
+        probability_matrix: pd.DataFrame,
+        state_labels: Optional[Sequence[Any]] = None
+    ) -> ForecastResult:
+        """
+        Main computation method.
+
+        Args:
+            probability_matrix:
+                Transition probability matrix (n x n).
+
+            state_labels:
+                Actual state labels corresponding to matrix rows/columns.
+                If omitted, positional labels 0..n-1 are used.
+
+        Returns:
+            ForecastResult with all computed statistics.
+        """
+
+        if probability_matrix.empty:
+            raise ValueError(
+                "Probability matrix is empty"
+            )
+
+        if not isinstance(probability_matrix, pd.DataFrame):
+            probability_matrix = pd.DataFrame(
+                probability_matrix
+            )
+
+        P = probability_matrix.astype(float).values
+
+        self._validate_transition_matrix(P)
+
+        n = P.shape[0]
+
+        labels = self._validate_state_labels(
+            state_labels,
+            n
+        )
+
+        # If labels were not explicitly provided, preserve DataFrame labels
+        # when they are valid and unique.
+        if state_labels is None:
+            if (
+                len(probability_matrix.index) == n
+                and len(set(probability_matrix.index)) == n
+            ):
+                labels = list(probability_matrix.index)
+
+        one_step = self.compute_multi_step(
+            P,
+            1,
+            state_labels=labels
+        )
+
+        three_step = self.compute_multi_step(
+            P,
+            3,
+            state_labels=labels
+        )
+
+        five_step = self.compute_multi_step(
+            P,
+            5,
+            state_labels=labels
+        )
+
+        stationary = self.compute_stationary_distribution(
+            P,
+            state_labels=labels
+        )
+
+        convergence_steps = self.compute_convergence(P)
+
+        return ForecastResult(
+            one_step=one_step,
+            three_step=three_step,
+            five_step=five_step,
+            stationary_distribution=stationary,
+            convergence_steps=convergence_steps,
+            sample_size=0
+        )

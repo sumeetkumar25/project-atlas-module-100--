@@ -1,0 +1,9 @@
+# atlas/modules/module105_state_persistence/__init__.py
+"""
+Module 105
+State Persistence Analysis
+"""
+
+from .module import StatePersistenceResearch
+
+__all__ = ["StatePersistenceResearch"]

@@ -1,0 +1,86 @@
+"""
+Module 106 - State Transition Statistics
+
+Provides statistical analysis and classification of transition results.
+"""
+
+from dataclasses import dataclass, asdict
+import numpy as np
+import pandas as pd
+from .engine import TransitionResult
+
+
+@dataclass
+class TransitionStatistics:
+    """High-level statistics from state transition analysis."""
+    self_transition_rate: float
+    entropy: float
+    deterministic_states: int
+    random_states: int
+    sample_size: int
+    total_transitions: int
+
+
+class StateTransitionStatisticsEngine:
+    """Engine for generating high-level statistics."""
+    
+    METADATA = {
+        "module": 106,
+        "name": "State Transition Matrix",
+        "version": "1.0.0",
+        "description": "Analyzes how market states transition between states",
+        "depends_on": ["103"],
+    }
+    
+    def analyze(self, result: TransitionResult) -> TransitionStatistics:
+        """
+        Analyze results and generate high-level statistics.
+        
+        Args:
+            result: TransitionResult from engine
+            
+        Returns:
+            TransitionStatistics
+        """
+        prob = result.transition_probabilities
+        
+        if prob.empty:
+            return TransitionStatistics(
+                self_transition_rate=0.0,
+                entropy=0.0,
+                deterministic_states=0,
+                random_states=0,
+                sample_size=result.sample_size,
+                total_transitions=0
+            )
+        
+        # Classification
+        # Deterministic states: max transition probability > 0.70
+        deterministic_states = np.sum(
+            prob.max(axis=1) > 0.70
+        )
+        
+        # Random states: max transition probability < 0.30
+        random_states = np.sum(
+            prob.max(axis=1) < 0.30
+        )
+        
+        # Total transitions
+        total_transitions = result.transition_counts.sum().sum()
+        
+        return TransitionStatistics(
+            self_transition_rate=result.self_transition_rate,
+            entropy=result.entropy,
+            deterministic_states=int(deterministic_states),
+            random_states=int(random_states),
+            sample_size=result.sample_size,
+            total_transitions=int(total_transitions)
+        )
+    
+    def summary_dataframe(self, stats: TransitionStatistics) -> pd.DataFrame:
+        """Convert statistics to DataFrame."""
+        return pd.DataFrame([asdict(stats)])
+    
+    def summary_dict(self, stats: TransitionStatistics) -> dict:
+        """Convert statistics to dictionary."""
+        return asdict(stats)

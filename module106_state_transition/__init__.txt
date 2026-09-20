@@ -1,0 +1,9 @@
+# atlas/modules/module106_state_transition/__init__.py
+"""
+Module 106
+State Transition Matrix
+"""
+
+from .module import StateTransitionResearch
+
+__all__ = ["StateTransitionResearch"]

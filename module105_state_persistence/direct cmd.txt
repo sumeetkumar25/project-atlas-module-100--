@@ -1,0 +1,1 @@
+python -m atlas.modules.module105_state_persistence.test_module

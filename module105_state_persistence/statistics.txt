@@ -1,0 +1,85 @@
+"""
+Module 105 - State Persistence Statistics
+
+Provides statistical analysis and classification of persistence results.
+"""
+
+from dataclasses import dataclass, asdict
+import numpy as np
+import pandas as pd
+from .engine import PersistenceResult
+
+
+@dataclass
+class PersistenceStatistics:
+    """High-level statistics from state persistence analysis."""
+    total_states: int
+    average_duration: float
+    median_duration: float
+    longest_duration: int
+    shortest_duration: int
+    persistent_states: int
+    transient_states: int
+    sample_size: int
+
+
+class StatePersistenceStatisticsEngine:
+    """Engine for generating high-level statistics."""
+    
+    METADATA = {
+        "module": 105,
+        "name": "State Persistence Analysis",
+        "version": "1.0.0",
+        "description": "Analyzes how long market states persist",
+        "depends_on": ["103"],
+    }
+    
+    def analyze(self, result: PersistenceResult) -> PersistenceStatistics:
+        """
+        Analyze results and generate high-level statistics.
+        
+        Args:
+            result: PersistenceResult from engine
+            
+        Returns:
+            PersistenceStatistics
+        """
+        table = result.persistence_table
+        
+        if table.empty:
+            return PersistenceStatistics(
+                total_states=0,
+                average_duration=0.0,
+                median_duration=0.0,
+                longest_duration=0,
+                shortest_duration=0,
+                persistent_states=0,
+                transient_states=0,
+                sample_size=result.sample_size
+            )
+        
+        # Classification logic
+        # Persistent states: mean duration >= 8 bars
+        persistent_states = np.sum(table["mean_duration"] >= 8)
+        
+        # Transient states: mean duration < 4 bars
+        transient_states = np.sum(table["mean_duration"] < 4)
+        
+        return PersistenceStatistics(
+            total_states=len(table),
+            average_duration=result.average_duration,
+            median_duration=result.median_duration,
+            longest_duration=result.longest_duration,
+            shortest_duration=result.shortest_duration,
+            persistent_states=int(persistent_states),
+            transient_states=int(transient_states),
+            sample_size=result.sample_size
+        )
+    
+    def summary_dataframe(self, stats: PersistenceStatistics) -> pd.DataFrame:
+        """Convert statistics to DataFrame."""
+        return pd.DataFrame([asdict(stats)])
+    
+    def summary_dict(self, stats: PersistenceStatistics) -> dict:
+        """Convert statistics to dictionary."""
+        return asdict(stats)

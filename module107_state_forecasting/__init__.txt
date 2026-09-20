@@ -1,0 +1,9 @@
+# atlas/modules/module107_state_forecasting/__init__.py
+"""
+Module 107
+State Forecasting
+"""
+
+from .module import StateForecastingResearch
+
+__all__ = ["StateForecastingResearch"]

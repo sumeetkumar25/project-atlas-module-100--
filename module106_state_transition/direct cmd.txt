@@ -1,0 +1,1 @@
+python -m atlas.modules.module106_state_transition.test_module

@@ -1,0 +1,303 @@
+# atlas/modules/module106_state_transition/test_module.py
+"""
+Module 106 - Integration Test
+
+Tests state transition engine, statistics, validator, report, and pipeline.
+"""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+
+import numpy as np
+import pandas as pd
+
+from atlas.modules.module106_state_transition.engine import StateTransitionEngine
+from atlas.modules.module106_state_transition.statistics import StateTransitionStatisticsEngine
+from atlas.modules.module106_state_transition.validator import run_validation
+from atlas.modules.module106_state_transition.module import StateTransitionResearch
+
+
+def create_test_data(n=1000, seed=42):
+    """
+    Create synthetic test data with state transitions.
+    
+    Args:
+        n: Number of samples
+        seed: Random seed for reproducibility
+        
+    Returns:
+        DataFrame with states
+    """
+    np.random.seed(seed)
+    
+    # Create states with some persistence
+    states = []
+    current_state = np.random.randint(0, 16)
+    
+    for _ in range(n):
+        # 70% chance to stay in same state, 30% to change
+        if np.random.random() < 0.7:
+            states.append(current_state)
+        else:
+            current_state = np.random.randint(0, 16)
+            states.append(current_state)
+    
+    df = pd.DataFrame({
+        "state": states
+    })
+    
+    return df
+
+
+def test_engine_count_matrix():
+    """Test 1: Count matrix building."""
+    print("\n" + "=" * 60)
+    print("TEST 1: Count Matrix Building")
+    print("=" * 60)
+    
+    engine = StateTransitionEngine()
+    
+    # Test with known sequence
+    states = np.array([4, 4, 4, 7, 7, 2, 2, 13, 13, 13, 5])
+    
+    counts = engine.build_count_matrix(states)
+    
+    # Check shape
+    assert counts.shape == (16, 16)
+    
+    # Check specific transitions
+    assert counts.iloc[4, 4] == 2  # 4->4
+    assert counts.iloc[4, 7] == 1  # 4->7
+    assert counts.iloc[7, 7] == 1  # 7->7
+    assert counts.iloc[7, 2] == 1  # 7->2
+    assert counts.iloc[2, 2] == 1  # 2->2
+    assert counts.iloc[2, 13] == 1  # 2->13
+    assert counts.iloc[13, 13] == 2  # 13->13
+    assert counts.iloc[13, 5] == 1  # 13->5
+    
+    print("  Count matrix built successfully")
+    print(f"  Total transitions: {counts.sum().sum()}")
+    print("  ✓ Count matrix test passed")
+    return True
+
+
+def test_engine_probability_matrix():
+    """Test 2: Probability matrix building."""
+    print("\n" + "=" * 60)
+    print("TEST 2: Probability Matrix Building")
+    print("=" * 60)
+    
+    engine = StateTransitionEngine()
+    
+    states = np.array([4, 4, 4, 7, 7, 2, 2, 13, 13, 13, 5])
+    counts = engine.build_count_matrix(states)
+    prob = engine.build_probability_matrix(counts)
+    
+    # Check shape
+    assert prob.shape == (16, 16)
+    
+    # Check rows sum to 1 for states with transitions
+    row_sums = prob.sum(axis=1)
+    has_transitions = counts.sum(axis=1) > 0
+    assert np.allclose(row_sums[has_transitions], 1)
+    
+    # Check specific probabilities
+    # State 4: 2 transitions to 4, 1 to 7 → p(4→4)=2/3, p(4→7)=1/3
+    assert np.isclose(prob.iloc[4, 4], 2/3)
+    assert np.isclose(prob.iloc[4, 7], 1/3)
+    
+    # State 7: 1 to 7, 1 to 2 → p(7→7)=1/2, p(7→2)=1/2
+    assert np.isclose(prob.iloc[7, 7], 0.5)
+    assert np.isclose(prob.iloc[7, 2], 0.5)
+    
+    print("  Probability matrix built successfully")
+    print(f"  Row sums for state 4: {prob.iloc[4].sum():.3f}")
+    print(f"  Row sums for state 7: {prob.iloc[7].sum():.3f}")
+    print("  ✓ Probability matrix test passed")
+    return True
+
+
+def test_engine_self_transition():
+    """Test 3: Self-transition rate calculation."""
+    print("\n" + "=" * 60)
+    print("TEST 3: Self-Transition Rate")
+    print("=" * 60)
+    
+    engine = StateTransitionEngine()
+    
+    states = np.array([4, 4, 4, 7, 7, 2, 2, 13, 13, 13, 5])
+    counts = engine.build_count_matrix(states)
+    self_rate = engine.calculate_self_transition_rate(counts)
+    
+    # Total transitions = 10 (11 states → 10 transitions)
+    # Self-transitions: 4→4 (2), 7→7 (1), 2→2 (1), 13→13 (2) = 6
+    # Rate = 6/10 = 0.6
+    assert np.isclose(self_rate, 0.6)
+    
+    print(f"  Self-transition rate: {self_rate:.3f}")
+    print("  ✓ Self-transition test passed")
+    return True
+
+
+def test_engine_entropy():
+    """Test 4: Entropy calculation."""
+    print("\n" + "=" * 60)
+    print("TEST 4: Transition Entropy")
+    print("=" * 60)
+    
+    engine = StateTransitionEngine()
+    
+    states = np.array([4, 4, 4, 7, 7, 2, 2, 13, 13, 13, 5])
+    counts = engine.build_count_matrix(states)
+    prob = engine.build_probability_matrix(counts)
+    entropy = engine.calculate_entropy(prob)
+    
+    # Entropy should be between 0 and 4
+    assert 0 <= entropy <= 4
+    
+    # For this simple sequence, entropy should be relatively low
+    assert entropy < 2.0
+    
+    print(f"  Entropy: {entropy:.3f} bits")
+    print("  ✓ Entropy test passed")
+    return True
+
+
+def test_engine_compute():
+    """Test 5: Full engine computation."""
+    print("\n" + "=" * 60)
+    print("TEST 5: Full Engine Computation")
+    print("=" * 60)
+    
+    engine = StateTransitionEngine()
+    
+    states = np.array([4, 4, 4, 7, 7, 2, 2, 13, 13, 13, 5])
+    result = engine.compute(states)
+    
+    # Check results
+    assert result.transition_counts.shape == (16, 16)
+    assert result.transition_probabilities.shape == (16, 16)
+    assert 0 <= result.self_transition_rate <= 1
+    assert result.entropy >= 0
+    assert result.sample_size == 11
+    
+    print(f"  Self-transition rate: {result.self_transition_rate:.3f}")
+    print(f"  Entropy: {result.entropy:.3f} bits")
+    print(f"  Sample size: {result.sample_size}")
+    print("  ✓ Full engine test passed")
+    return True
+
+
+def test_statistics():
+    """Test 6: Statistics engine."""
+    print("\n" + "=" * 60)
+    print("TEST 6: Statistics Engine")
+    print("=" * 60)
+    
+    engine = StateTransitionEngine()
+    stats_engine = StateTransitionStatisticsEngine()
+    
+    states = np.array([4, 4, 4, 7, 7, 2, 2, 13, 13, 13, 5])
+    result = engine.compute(states)
+    stats = stats_engine.analyze(result)
+    
+    # Check statistics
+    assert stats.self_transition_rate == result.self_transition_rate
+    assert stats.entropy == result.entropy
+    assert stats.sample_size == result.sample_size
+    assert stats.total_transitions == 10
+    
+    print(f"  Self-transition rate: {stats.self_transition_rate:.3f}")
+    print(f"  Entropy: {stats.entropy:.3f} bits")
+    print(f"  Deterministic states: {stats.deterministic_states}")
+    print(f"  Random states: {stats.random_states}")
+    print("  ✓ Statistics test passed")
+    return True
+
+
+def test_validator():
+    """Test 7: Validator."""
+    print("\n" + "=" * 60)
+    print("TEST 7: Validator")
+    print("=" * 60)
+    
+    engine = StateTransitionEngine()
+    stats_engine = StateTransitionStatisticsEngine()
+    
+    states = np.array([4, 4, 4, 7, 7, 2, 2, 13, 13, 13, 5])
+    result = engine.compute(states)
+    stats = stats_engine.analyze(result)
+    
+    passed = run_validation(result, stats)
+    assert passed
+    
+    print("  ✓ Validator test passed")
+    return True
+
+
+def test_pipeline():
+    """Test 8: Full pipeline."""
+    print("\n" + "=" * 60)
+    print("TEST 8: Full Pipeline")
+    print("=" * 60)
+    
+    df = create_test_data(n=300)
+    research = StateTransitionResearch()
+    result = research.run_dataframe(df, dataset_id="pipeline_test")
+    
+    assert result.status == "completed"
+    assert "transition_counts" in result.artifacts
+    assert "transition_probabilities" in result.artifacts
+    assert "state_transition_report" in result.artifacts
+    assert "transition_report" in result.artifacts
+    assert result.statistics.get("validation_passed") == True
+    
+    print(f"  Self-transition rate: {result.statistics.get('self_transition_rate'):.3f}")
+    print(f"  Entropy: {result.statistics.get('entropy'):.3f} bits")
+    print(f"  Deterministic states: {result.statistics.get('deterministic_states')}")
+    print("  ✓ Full pipeline test passed")
+    return True
+
+
+def main():
+    """Run all tests."""
+    print("\n" + "=" * 70)
+    print("PROJECT ATLAS - MODULE 106 INTEGRATION TEST")
+    print("State Transition Matrix")
+    print("=" * 70)
+    
+    results = {}
+    
+    results["count_matrix"] = test_engine_count_matrix()
+    results["probability_matrix"] = test_engine_probability_matrix()
+    results["self_transition"] = test_engine_self_transition()
+    results["entropy"] = test_engine_entropy()
+    results["full_engine"] = test_engine_compute()
+    results["statistics"] = test_statistics()
+    results["validator"] = test_validator()
+    results["pipeline"] = test_pipeline()
+    
+    print("\n" + "=" * 70)
+    print("RESULTS")
+    print("=" * 70)
+    
+    for name, ok in results.items():
+        print(f"  {'✓' if ok else '✗'} {name}")
+    
+    passed = sum(results.values())
+    total = len(results)
+    
+    print(f"\n  {passed}/{total} tests passed")
+    
+    if passed == total:
+        print("\n✓ Module 106 VALIDATED")
+        return 0
+    else:
+        print("\n⚠ Some tests failed")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

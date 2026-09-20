@@ -1,0 +1,293 @@
+# atlas/modules/module105_state_persistence/test_module.py
+"""
+Module 105 - Integration Test
+
+Tests state persistence engine, statistics, validator, report, and pipeline.
+"""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+
+import numpy as np
+import pandas as pd
+
+from atlas.modules.module105_state_persistence.engine import StatePersistenceEngine
+from atlas.modules.module105_state_persistence.statistics import StatePersistenceStatisticsEngine
+from atlas.modules.module105_state_persistence.validator import run_validation
+from atlas.modules.module105_state_persistence.module import StatePersistenceResearch
+
+
+def create_test_data(n=1000, seed=42):
+    """
+    Create synthetic test data with state persistence.
+    
+    Args:
+        n: Number of samples
+        seed: Random seed for reproducibility
+        
+    Returns:
+        DataFrame with states
+    """
+    np.random.seed(seed)
+    
+    # Create states with some persistence
+    states = []
+    current_state = np.random.randint(0, 16)
+    
+    for _ in range(n):
+        # 70% chance to stay in same state, 30% to change
+        if np.random.random() < 0.7:
+            states.append(current_state)
+        else:
+            current_state = np.random.randint(0, 16)
+            states.append(current_state)
+    
+    df = pd.DataFrame({
+        "state": states
+    })
+    
+    return df
+
+
+def test_engine_detect_sequences():
+    """Test 1: Sequence detection."""
+    print("\n" + "=" * 60)
+    print("TEST 1: Sequence Detection")
+    print("=" * 60)
+    
+    engine = StatePersistenceEngine()
+    
+    # Test with known sequence
+    states = np.array([4, 4, 4, 4, 7, 7, 2, 2, 2, 13, 13, 13, 13, 13, 5, 5, 5, 5, 5])
+    
+    sequence_df = engine.detect_sequences(states)
+    
+    # Check results
+    assert len(sequence_df) == 5  # 5 sequences
+    assert sequence_df.iloc[0]["state"] == 4
+    assert sequence_df.iloc[0]["duration"] == 4
+    assert sequence_df.iloc[1]["state"] == 7
+    assert sequence_df.iloc[1]["duration"] == 2
+    assert sequence_df.iloc[2]["state"] == 2
+    assert sequence_df.iloc[2]["duration"] == 3
+    assert sequence_df.iloc[3]["state"] == 13
+    assert sequence_df.iloc[3]["duration"] == 5
+    assert sequence_df.iloc[4]["state"] == 5
+    assert sequence_df.iloc[4]["duration"] == 5
+    
+    print("  Sequence detection results:")
+    for _, row in sequence_df.iterrows():
+        print(f"    State {row['state']}: {row['duration']} bars")
+    print("  ✓ Sequence detection test passed")
+    return True
+
+
+def test_engine_aggregate_statistics():
+    """Test 2: Aggregate statistics."""
+    print("\n" + "=" * 60)
+    print("TEST 2: Aggregate Statistics")
+    print("=" * 60)
+    
+    engine = StatePersistenceEngine()
+    
+    # Create test sequences
+    states = np.array([4, 4, 4, 4, 7, 7, 2, 2, 2, 13, 13, 13, 13, 13, 5, 5, 5, 5, 5])
+    sequence_df = engine.detect_sequences(states)
+    summary = engine.aggregate_statistics(sequence_df)
+    
+    # Test specific assertions
+    assert summary.loc[summary.state == 4, "mean_duration"].iloc[0] == 4
+    assert summary.loc[summary.state == 7, "mean_duration"].iloc[0] == 2
+    assert summary.loc[summary.state == 2, "mean_duration"].iloc[0] == 3
+    assert summary.loc[summary.state == 13, "mean_duration"].iloc[0] == 5
+    assert summary.loc[summary.state == 5, "mean_duration"].iloc[0] == 5
+    
+    # Check all states are present
+    expected_states = [2, 4, 5, 7, 13]
+    assert set(summary["state"].values) == set(expected_states)
+    
+    print("  Aggregate statistics:")
+    for _, row in summary.iterrows():
+        print(f"    State {row['state']}: mean={row['mean_duration']:.2f}, "
+              f"sequences={row['sequences']}, max={row['max_duration']}")
+    print("  ✓ Aggregate statistics test passed")
+    return True
+
+
+def test_engine_compute():
+    """Test 3: Full engine computation."""
+    print("\n" + "=" * 60)
+    print("TEST 3: Full Engine Computation")
+    print("=" * 60)
+    
+    engine = StatePersistenceEngine()
+    
+    # Create test data with known pattern
+    states = np.array([4, 4, 4, 4, 7, 7, 2, 2, 2, 13, 13, 13, 13, 13])
+    
+    result = engine.compute(states)
+    
+    # Check results
+    assert result.total_sequences == 4
+    assert result.sample_size == 14
+    assert result.average_duration == 3.5  # (4+2+3+5)/4
+    assert result.median_duration == 3.5
+    assert result.longest_duration == 5
+    assert result.shortest_duration == 2
+    assert not result.persistence_table.empty
+    assert len(result.persistence_table) == 4  # 4 unique states
+    
+    print(f"  Total Sequences: {result.total_sequences}")
+    print(f"  Average Duration: {result.average_duration:.2f}")
+    print(f"  Longest Duration: {result.longest_duration}")
+    print(f"  Shortest Duration: {result.shortest_duration}")
+    print("  ✓ Full engine test passed")
+    return True
+
+
+def test_statistics():
+    """Test 4: Statistics engine."""
+    print("\n" + "=" * 60)
+    print("TEST 4: Statistics Engine")
+    print("=" * 60)
+    
+    engine = StatePersistenceEngine()
+    stats_engine = StatePersistenceStatisticsEngine()
+    
+    states = np.array([4, 4, 4, 4, 7, 7, 2, 2, 2, 13, 13, 13, 13, 13])
+    
+    result = engine.compute(states)
+    stats = stats_engine.analyze(result)
+    
+    # Check statistics
+    assert stats.total_states == 4
+    assert stats.average_duration == 3.5
+    assert stats.median_duration == 3.5
+    assert stats.longest_duration == 5
+    assert stats.shortest_duration == 2
+    assert stats.sample_size == 14
+    
+    print(f"  Total States: {stats.total_states}")
+    print(f"  Average Duration: {stats.average_duration:.2f}")
+    print(f"  Persistent States: {stats.persistent_states}")
+    print(f"  Transient States: {stats.transient_states}")
+    print("  ✓ Statistics test passed")
+    return True
+
+
+def test_validator():
+    """Test 5: Validator."""
+    print("\n" + "=" * 60)
+    print("TEST 5: Validator")
+    print("=" * 60)
+    
+    engine = StatePersistenceEngine()
+    stats_engine = StatePersistenceStatisticsEngine()
+    
+    states = np.array([4, 4, 4, 4, 7, 7, 2, 2, 2, 13, 13, 13, 13, 13])
+    
+    result = engine.compute(states)
+    stats = stats_engine.analyze(result)
+    
+    passed = run_validation(result, stats)
+    assert passed
+    
+    print("  ✓ Validator test passed")
+    return True
+
+
+def test_pipeline():
+    """Test 6: Full pipeline."""
+    print("\n" + "=" * 60)
+    print("TEST 6: Full Pipeline")
+    print("=" * 60)
+    
+    df = create_test_data(n=300)
+    research = StatePersistenceResearch()
+    result = research.run_dataframe(df, dataset_id="pipeline_test")
+    
+    assert result.status == "completed"
+    assert "persistence_table" in result.artifacts
+    assert "state_persistence_report" in result.artifacts
+    assert "state_report" in result.artifacts
+    assert result.statistics.get("validation_passed") == True
+    
+    print(f"  Total Sequences: {result.statistics.get('total_sequences')}")
+    print(f"  Average Duration: {result.statistics.get('average_duration'):.2f}")
+    print(f"  Persistent States: {result.statistics.get('persistent_states')}")
+    print("  ✓ Full pipeline test passed")
+    return True
+
+
+def test_edge_cases():
+    """Test 7: Edge cases."""
+    print("\n" + "=" * 60)
+    print("TEST 7: Edge Cases")
+    print("=" * 60)
+    
+    engine = StatePersistenceEngine()
+    
+    # Test single state
+    states = np.array([5, 5, 5, 5, 5])
+    result = engine.compute(states)
+    
+    assert result.total_sequences == 1
+    assert result.longest_duration == 5
+    assert result.shortest_duration == 5
+    assert len(result.persistence_table) == 1
+    
+    # Test alternating states
+    states = np.array([1, 2, 1, 2, 1, 2])
+    result = engine.compute(states)
+    
+    assert result.total_sequences == 6
+    assert result.longest_duration == 1
+    assert result.shortest_duration == 1
+    
+    print(f"  Single state sequence: {result.total_sequences} sequence, "
+          f"duration={result.longest_duration}")
+    print("  ✓ Edge cases test passed")
+    return True
+
+
+def main():
+    """Run all tests."""
+    print("\n" + "=" * 70)
+    print("PROJECT ATLAS - MODULE 105 INTEGRATION TEST")
+    print("State Persistence Analysis")
+    print("=" * 70)
+    
+    results = {}
+    
+    results["detect_sequences"] = test_engine_detect_sequences()
+    results["aggregate_stats"] = test_engine_aggregate_statistics()
+    results["full_engine"] = test_engine_compute()
+    results["statistics"] = test_statistics()
+    results["validator"] = test_validator()
+    results["pipeline"] = test_pipeline()
+    results["edge_cases"] = test_edge_cases()
+    
+    print("\n" + "=" * 70)
+    print("RESULTS")
+    print("=" * 70)
+    
+    for name, ok in results.items():
+        print(f"  {'✓' if ok else '✗'} {name}")
+    
+    passed = sum(results.values())
+    total = len(results)
+    
+    print(f"\n  {passed}/{total} tests passed")
+    
+    if passed == total:
+        print("\n✓ Module 105 VALIDATED")
+        return 0
+    else:
+        print("\n⚠ Some tests failed")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

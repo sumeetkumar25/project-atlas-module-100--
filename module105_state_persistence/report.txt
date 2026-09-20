@@ -1,0 +1,131 @@
+# atlas/modules/module105_state_persistence/report.py
+"""
+Module 105 - State Persistence Report
+"""
+
+from datetime import datetime
+import pandas as pd
+
+
+class StatePersistenceReport:
+    """Report generator for state persistence results."""
+    
+    @staticmethod
+    def generate(statistics, metadata=None, dataset_name="Unknown") -> str:
+        """
+        Generate a formatted report.
+        
+        Args:
+            statistics: PersistenceStatistics
+            metadata: Optional metadata dict
+            dataset_name: Name of the dataset
+            
+        Returns:
+            Formatted report string
+        """
+        lines = []
+        
+        lines.append("=" * 55)
+        lines.append("MODULE 105")
+        lines.append("STATE PERSISTENCE ANALYSIS")
+        lines.append("=" * 55)
+        lines.append(f"\nDataset: {dataset_name}")
+        
+        # Parameters
+        lines.append("\n" + "-" * 45)
+        lines.append("OVERVIEW")
+        lines.append("-" * 45)
+        lines.append(f"  States Present: {statistics.total_states}/16")
+        lines.append(f"  Sample Size: {statistics.sample_size:,}")
+        
+        # Duration Statistics
+        lines.append("\n" + "-" * 45)
+        lines.append("DURATION STATISTICS")
+        lines.append("-" * 45)
+        lines.append(f"  Average Duration: {statistics.average_duration:.2f} bars")
+        lines.append(f"  Median Duration: {statistics.median_duration:.2f} bars")
+        lines.append(f"  Longest Duration: {statistics.longest_duration} bars")
+        lines.append(f"  Shortest Duration: {statistics.shortest_duration} bars")
+        
+        # Classification
+        lines.append("\n" + "-" * 45)
+        lines.append("STATE CLASSIFICATION")
+        lines.append("-" * 45)
+        lines.append(f"  Persistent States (mean >= 8): {statistics.persistent_states}")
+        lines.append(f"  Transient States (mean < 4): {statistics.transient_states}")
+        
+        # Validation
+        lines.append("\n" + "-" * 45)
+        lines.append("VALIDATION")
+        lines.append("-" * 45)
+        lines.append("  Status: PASSED")
+        
+        # Footer
+        lines.append(f"\n  Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        lines.append("\n" + "=" * 55)
+        lines.append("END OF REPORT")
+        lines.append("=" * 55)
+        
+        return "\n".join(lines)
+    
+    @staticmethod
+    def generate_state_report(table: pd.DataFrame) -> str:
+        """
+        Generate a detailed state report.
+        
+        Args:
+            table: DataFrame with per-state persistence statistics
+            
+        Returns:
+            Formatted state report string
+        """
+        if table.empty:
+            return "No states to report."
+        
+        lines = []
+        lines.append("\n" + "=" * 70)
+        lines.append("STATE PERSISTENCE TABLE")
+        lines.append("=" * 70)
+        
+        # Header
+        lines.append(
+            f"\n{'State':<8} {'Sequences':<12} {'Mean':<12} "
+            f"{'Median':<12} {'Max':<12} {'Min':<12} {'Std':<12}"
+        )
+        lines.append("-" * 80)
+        
+        for _, row in table.iterrows():
+            state = row['state']
+            sequences = row['sequences']
+            mean = row['mean_duration']
+            median = row['median_duration']
+            max_dur = row['max_duration']
+            min_dur = row['min_duration']
+            std = row['std_duration']
+            
+            # Add classification marker
+            marker = ""
+            if mean >= 8:
+                marker = "P"  # Persistent
+            elif mean < 4:
+                marker = "T"  # Transient
+            
+            lines.append(
+                f"{state:<8} {sequences:<12} {mean:<12.2f} "
+                f"{median:<12.2f} {max_dur:<12} {min_dur:<12} {std:<12.2f} {marker}"
+            )
+        
+        lines.append("\n" + "=" * 70)
+        lines.append("Legend: P = Persistent (mean >= 8), T = Transient (mean < 4)")
+        lines.append("=" * 70)
+        
+        return "\n".join(lines)
+    
+    @staticmethod
+    def save(report: str, filepath: str):
+        """Save report to file."""
+        from pathlib import Path
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(report)

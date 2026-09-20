@@ -1,0 +1,176 @@
+# atlas/modules/module106_state_transition/engine.py
+"""
+Module 106 - State Transition Matrix
+
+Analyzes how market states transition from one state to another.
+
+Pipeline:
+  1. Build transition count matrix (16x16)
+  2. Convert to probability matrix
+  3. Calculate self-transition rate
+  4. Calculate transition entropy
+  5. Classify states as deterministic or random
+"""
+
+import numpy as np
+import pandas as pd
+from dataclasses import dataclass
+from typing import Optional, Dict, Any
+
+
+@dataclass
+class TransitionResult:
+    """Results from state transition analysis."""
+    transition_counts: pd.DataFrame
+    transition_probabilities: pd.DataFrame
+    self_transition_rate: float
+    entropy: float
+    sample_size: int
+    
+    def __post_init__(self):
+        """Ensure matrices are properly formatted."""
+        if not self.transition_counts.empty:
+            self.transition_counts.index = range(16)
+            self.transition_counts.columns = range(16)
+        
+        if not self.transition_probabilities.empty:
+            self.transition_probabilities.index = range(16)
+            self.transition_probabilities.columns = range(16)
+
+
+class StateTransitionEngine:
+    """Core engine for state transition analysis."""
+
+    def __init__(self):
+        """Initialize the state transition engine."""
+        pass
+
+    def build_count_matrix(self, states: np.ndarray) -> pd.DataFrame:
+        """
+        Build transition count matrix from state sequence.
+        
+        Args:
+            states: Array of market states (0-15)
+            
+        Returns:
+            DataFrame with transition counts (16x16)
+        """
+        # Initialize 16x16 matrix
+        matrix = np.zeros((16, 16), dtype=int)
+        
+        # Count transitions
+        for i in range(len(states) - 1):
+            current = int(states[i])
+            nxt = int(states[i + 1])
+            matrix[current, nxt] += 1
+        
+        # Convert to DataFrame
+        counts = pd.DataFrame(
+            matrix,
+            index=range(16),
+            columns=range(16)
+        )
+        
+        return counts
+
+    def build_probability_matrix(self, counts: pd.DataFrame) -> pd.DataFrame:
+        """
+        Convert count matrix to probability matrix.
+        
+        Args:
+            counts: DataFrame with transition counts
+            
+        Returns:
+            DataFrame with transition probabilities
+        """
+        # Divide each row by its sum
+        prob = counts.div(
+            counts.sum(axis=1),
+            axis=0
+        ).fillna(0)
+        
+        return prob
+
+    def calculate_self_transition_rate(self, counts: pd.DataFrame) -> float:
+        """
+        Calculate the self-transition rate (trace / sum).
+        
+        Args:
+            counts: DataFrame with transition counts
+            
+        Returns:
+            Self-transition rate (0-1)
+        """
+        total_transitions = counts.sum().sum()
+        
+        if total_transitions == 0:
+            return 0.0
+        
+        # Sum of diagonal elements
+        trace = np.trace(counts.values)
+        
+        return trace / total_transitions
+
+    def calculate_entropy(self, prob: pd.DataFrame) -> float:
+        """
+        Calculate transition entropy.
+        
+        Lower entropy = more predictable transitions
+        Higher entropy = more random transitions
+        
+        Args:
+            prob: DataFrame with transition probabilities
+            
+        Returns:
+            Entropy value (bits)
+        """
+        total_entropy = 0.0
+        num_rows = 0
+        
+        for _, row in prob.iterrows():
+            # Get non-zero probabilities
+            row_probs = row[row > 0].values
+            
+            if len(row_probs) > 0:
+                # Calculate entropy for this row
+                row_entropy = -np.sum(row_probs * np.log2(row_probs))
+                total_entropy += row_entropy
+                num_rows += 1
+        
+        # Average entropy across all states
+        if num_rows == 0:
+            return 0.0
+        
+        return total_entropy / num_rows
+
+    def compute(self, states: np.ndarray) -> TransitionResult:
+        """
+        Main computation method.
+        
+        Args:
+            states: Array of market states (0-15)
+            
+        Returns:
+            TransitionResult with all computed statistics
+        """
+        # Validate input
+        if len(states) == 0:
+            raise ValueError("States array is empty")
+        
+        # Build count matrix
+        counts = self.build_count_matrix(states)
+        
+        # Build probability matrix
+        prob = self.build_probability_matrix(counts)
+        
+        # Calculate metrics
+        self_transition_rate = self.calculate_self_transition_rate(counts)
+        entropy = self.calculate_entropy(prob)
+        
+        return TransitionResult(
+            transition_counts=counts,
+            transition_probabilities=prob,
+            self_transition_rate=self_transition_rate,
+            entropy=entropy,
+            sample_size=len(states)
+        )

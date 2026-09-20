@@ -1,0 +1,90 @@
+"""
+Module 107 - State Forecasting Statistics
+
+Provides statistical analysis and classification of forecast results.
+"""
+
+from dataclasses import dataclass, asdict
+import numpy as np
+import pandas as pd
+from .engine import ForecastResult
+
+
+@dataclass
+class ForecastStatistics:
+    """High-level statistics from state forecasting analysis."""
+    convergence_steps: int
+    dominant_state: int
+    dominant_probability: float
+    stationary_entropy: float
+    sample_size: int
+    top_states: dict  # Top 5 states with their probabilities
+
+
+class StateForecastingStatisticsEngine:
+    """Engine for generating high-level statistics."""
+    
+    METADATA = {
+        "module": 107,
+        "name": "State Forecasting",
+        "version": "1.0.0",
+        "description": "Forecasts future state distributions using Markov chain analysis",
+        "depends_on": ["103"],
+    }
+    
+    def analyze(self, result: ForecastResult) -> ForecastStatistics:
+        """
+        Analyze results and generate high-level statistics.
+        
+        Args:
+            result: ForecastResult from engine
+            
+        Returns:
+            ForecastStatistics
+        """
+        stationary = result.stationary_distribution
+        
+        if stationary.empty:
+            return ForecastStatistics(
+                convergence_steps=0,
+                dominant_state=-1,
+                dominant_probability=0.0,
+                stationary_entropy=0.0,
+                sample_size=result.sample_size,
+                top_states={}
+            )
+        
+        # Sort stationary distribution
+        sorted_stationary = stationary.sort_values(ascending=False)
+        
+        # Dominant state (highest probability in stationary distribution)
+        dominant_state = int(sorted_stationary.index[0])
+        dominant_probability = float(sorted_stationary.iloc[0])
+        
+        # Top 5 states
+        top_states = {
+            int(state): float(prob)
+            for state, prob in sorted_stationary.head(5).items()
+        }
+        
+        # Stationary distribution entropy
+        # Remove zero probabilities for log calculation
+        probs = stationary[stationary > 0].values
+        stationary_entropy = -np.sum(probs * np.log2(probs))
+        
+        return ForecastStatistics(
+            convergence_steps=result.convergence_steps,
+            dominant_state=dominant_state,
+            dominant_probability=dominant_probability,
+            stationary_entropy=stationary_entropy,
+            sample_size=result.sample_size,
+            top_states=top_states
+        )
+    
+    def summary_dataframe(self, stats: ForecastStatistics) -> pd.DataFrame:
+        """Convert statistics to DataFrame."""
+        return pd.DataFrame([asdict(stats)])
+    
+    def summary_dict(self, stats: ForecastStatistics) -> dict:
+        """Convert statistics to dictionary."""
+        return asdict(stats)

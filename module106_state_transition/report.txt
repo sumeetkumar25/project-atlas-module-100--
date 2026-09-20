@@ -1,0 +1,152 @@
+# atlas/modules/module106_state_transition/report.py
+"""
+Module 106 - State Transition Report
+"""
+
+from datetime import datetime
+import pandas as pd
+import numpy as np
+
+
+class StateTransitionReport:
+    """Report generator for state transition results."""
+    
+    @staticmethod
+    def generate(statistics, metadata=None, dataset_name="Unknown") -> str:
+        """
+        Generate a formatted report.
+        
+        Args:
+            statistics: TransitionStatistics
+            metadata: Optional metadata dict
+            dataset_name: Name of the dataset
+            
+        Returns:
+            Formatted report string
+        """
+        lines = []
+        
+        lines.append("=" * 55)
+        lines.append("MODULE 106")
+        lines.append("STATE TRANSITION MATRIX")
+        lines.append("=" * 55)
+        lines.append(f"\nDataset: {dataset_name}")
+        
+        # Overview
+        lines.append("\n" + "-" * 45)
+        lines.append("OVERVIEW")
+        lines.append("-" * 45)
+        lines.append(f"  Sample Size: {statistics.sample_size:,}")
+        lines.append(f"  Total Transitions: {statistics.total_transitions:,}")
+        
+        # Transition Metrics
+        lines.append("\n" + "-" * 45)
+        lines.append("TRANSITION METRICS")
+        lines.append("-" * 45)
+        lines.append(f"  Self-Transition Rate: {statistics.self_transition_rate:.3f}")
+        lines.append(f"  Transition Entropy: {statistics.entropy:.3f} bits")
+        
+        # State Classification
+        lines.append("\n" + "-" * 45)
+        lines.append("STATE CLASSIFICATION")
+        lines.append("-" * 45)
+        lines.append(f"  Deterministic States (>70%): {statistics.deterministic_states}")
+        lines.append(f"  Random States (<30%): {statistics.random_states}")
+        
+        # Interpretation
+        lines.append("\n" + "-" * 45)
+        lines.append("INTERPRETATION")
+        lines.append("-" * 45)
+        
+        if statistics.self_transition_rate > 0.70:
+            lines.append("  Market is highly persistent")
+        elif statistics.self_transition_rate > 0.50:
+            lines.append("  Market shows moderate persistence")
+        else:
+            lines.append("  Market is highly transitional")
+        
+        if statistics.entropy < 1.0:
+            lines.append("  Transitions are highly predictable")
+        elif statistics.entropy < 2.0:
+            lines.append("  Transitions are moderately predictable")
+        else:
+            lines.append("  Transitions are close to random")
+        
+        # Validation
+        lines.append("\n" + "-" * 45)
+        lines.append("VALIDATION")
+        lines.append("-" * 45)
+        lines.append("  Status: PASSED")
+        
+        # Footer
+        lines.append(f"\n  Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        lines.append("\n" + "=" * 55)
+        lines.append("END OF REPORT")
+        lines.append("=" * 55)
+        
+        return "\n".join(lines)
+    
+    @staticmethod
+    def generate_transition_table(prob: pd.DataFrame, top_n: int = 5) -> str:
+        """
+        Generate a formatted transition probability table.
+        
+        Args:
+            prob: DataFrame with transition probabilities
+            top_n: Number of top transitions to show
+            
+        Returns:
+            Formatted transition table string
+        """
+        lines = []
+        lines.append("\n" + "=" * 70)
+        lines.append("TRANSITION PROBABILITY MATRIX (Top Transitions)")
+        lines.append("=" * 70)
+        
+        # Find top N transitions
+        transitions = []
+        for i in range(16):
+            for j in range(16):
+                p = prob.iloc[i, j]
+                if p > 0:
+                    transitions.append({
+                        "from": i,
+                        "to": j,
+                        "prob": p
+                    })
+        
+        # Sort by probability descending
+        transitions.sort(key=lambda x: x["prob"], reverse=True)
+        
+        # Show top N
+        lines.append(
+            f"\n{'From':<8} {'To':<8} {'Probability':<12} {'Interpretation':<20}"
+        )
+        lines.append("-" * 50)
+        
+        for t in transitions[:top_n]:
+            interpret = ""
+            if t["from"] == t["to"]:
+                interpret = "Self-transition"
+            elif t["prob"] > 0.5:
+                interpret = "Strong transition"
+            elif t["prob"] > 0.3:
+                interpret = "Moderate transition"
+            else:
+                interpret = "Weak transition"
+            
+            lines.append(
+                f"{t['from']:<8} {t['to']:<8} {t['prob']:<12.3f} {interpret:<20}"
+            )
+        
+        lines.append("\n" + "=" * 70)
+        return "\n".join(lines)
+    
+    @staticmethod
+    def save(report: str, filepath: str):
+        """Save report to file."""
+        from pathlib import Path
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(report)

@@ -1,0 +1,133 @@
+# atlas/modules/module105_state_persistence/validator.py
+"""
+Module 105 - State Persistence Validator
+"""
+
+import numpy as np
+import pandas as pd
+from .engine import PersistenceResult
+from .statistics import PersistenceStatistics
+
+
+class StatePersistenceValidator:
+    """Validator for state persistence results."""
+    
+    def validate(
+        self,
+        result: PersistenceResult,
+        statistics: PersistenceStatistics
+    ) -> bool:
+        """
+        Validate results and statistics.
+        
+        Args:
+            result: PersistenceResult from engine
+            statistics: PersistenceStatistics from statistics engine
+            
+        Returns:
+            True if validation passes
+            
+        Raises:
+            ValueError: If validation fails
+        """
+        issues = []
+        
+        # Validate total sequences
+        if result.total_sequences <= 0:
+            issues.append(f"Total sequences must be > 0: {result.total_sequences}")
+        
+        # Validate sample size
+        if result.sample_size <= 0:
+            issues.append(f"Invalid sample size: {result.sample_size}")
+        
+        # Validate duration metrics
+        if result.longest_duration < result.shortest_duration:
+            issues.append(
+                f"Longest duration ({result.longest_duration}) cannot be less than "
+                f"shortest duration ({result.shortest_duration})"
+            )
+        
+        # Validate persistence table
+        if result.persistence_table.empty:
+            issues.append("Persistence table is empty")
+        else:
+            # Check required columns
+            required_cols = ["state", "sequences", "mean_duration", "median_duration", 
+                           "max_duration", "min_duration", "std_duration"]
+            missing_cols = set(required_cols) - set(result.persistence_table.columns)
+            if missing_cols:
+                issues.append(f"Missing columns in persistence table: {missing_cols}")
+            
+            # Check states are in range
+            if "state" in result.persistence_table.columns:
+                states = result.persistence_table["state"].values
+                if not np.all((0 <= states) & (states <= 15)):
+                    issues.append("Some states outside [0, 15] range")
+            
+            # Check mean durations are positive
+            if "mean_duration" in result.persistence_table.columns:
+                if not np.all(result.persistence_table["mean_duration"] > 0):
+                    issues.append("Some mean durations are <= 0")
+            
+            # Check mean durations are finite
+            if "mean_duration" in result.persistence_table.columns:
+                if not np.all(np.isfinite(result.persistence_table["mean_duration"])):
+                    issues.append("Some mean durations are not finite")
+        
+        # Validate statistics match result
+        if result.average_duration != statistics.average_duration:
+            issues.append(
+                f"Average duration mismatch: stats={statistics.average_duration}, "
+                f"result={result.average_duration}"
+            )
+        
+        if result.median_duration != statistics.median_duration:
+            issues.append(
+                f"Median duration mismatch: stats={statistics.median_duration}, "
+                f"result={result.median_duration}"
+            )
+        
+        if result.longest_duration != statistics.longest_duration:
+            issues.append(
+                f"Longest duration mismatch: stats={statistics.longest_duration}, "
+                f"result={result.longest_duration}"
+            )
+        
+        if result.shortest_duration != statistics.shortest_duration:
+            issues.append(
+                f"Shortest duration mismatch: stats={statistics.shortest_duration}, "
+                f"result={result.shortest_duration}"
+            )
+        
+        if result.sample_size != statistics.sample_size:
+            issues.append(
+                f"Sample size mismatch: stats={statistics.sample_size}, "
+                f"result={result.sample_size}"
+            )
+        
+        if issues:
+            raise ValueError(
+                f"State Persistence validation failed with {len(issues)} issue(s):\n" +
+                "\n".join(f"  - {issue}" for issue in issues)
+            )
+        
+        return True
+
+
+def run_validation(result, statistics):
+    """Run validation with user-friendly output."""
+    validator = StatePersistenceValidator()
+    
+    print("\n" + "=" * 60)
+    print("STATE PERSISTENCE VALIDATION")
+    print("=" * 60)
+    
+    try:
+        validator.validate(result, statistics)
+        print("\n  ✓ All validation checks passed")
+        print("=" * 60)
+        return True
+    except ValueError as e:
+        print(e)
+        print("=" * 60)
+        return False

@@ -1,0 +1,163 @@
+# atlas/modules/module105_state_persistence/engine.py
+"""
+Module 105 - State Persistence Analysis
+
+Analyzes how long market states persist before transitioning to other states.
+
+Pipeline:
+  1. Detect continuous state runs (sequences)
+  2. Calculate duration of each sequence
+  3. Aggregate statistics per state
+  4. Calculate global persistence metrics
+"""
+
+import numpy as np
+import pandas as pd
+from dataclasses import dataclass
+from typing import Optional, List, Dict, Any
+
+
+@dataclass
+class PersistenceResult:
+    """Results from state persistence analysis."""
+    persistence_table: pd.DataFrame
+    average_duration: float
+    median_duration: float
+    longest_duration: int
+    shortest_duration: int
+    total_sequences: int
+    sample_size: int
+    
+    def __post_init__(self):
+        """Ensure table is sorted after initialization."""
+        if not self.persistence_table.empty:
+            self.persistence_table = self.persistence_table.sort_values(
+                "state"
+            ).reset_index(drop=True)
+
+
+class StatePersistenceEngine:
+    """Core engine for state persistence analysis."""
+
+    def __init__(self):
+        """Initialize the state persistence engine."""
+        pass
+
+    def detect_sequences(self, states: np.ndarray) -> pd.DataFrame:
+        """
+        Detect continuous state runs and calculate durations.
+        
+        Args:
+            states: Array of market states (0-15)
+            
+        Returns:
+            DataFrame with 'state' and 'duration' columns
+        """
+        if len(states) == 0:
+            return pd.DataFrame(columns=["state", "duration"])
+        
+        durations = []
+        
+        # Initialize with first state
+        current_state = states[0]
+        count = 1
+        
+        # Iterate through remaining states
+        for value in states[1:]:
+            if value == current_state:
+                count += 1
+            else:
+                durations.append({
+                    "state": current_state,
+                    "duration": count
+                })
+                current_state = value
+                count = 1
+        
+        # Append the last sequence
+        durations.append({
+            "state": current_state,
+            "duration": count
+        })
+        
+        return pd.DataFrame(durations)
+
+    def aggregate_statistics(self, sequence_df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Aggregate statistics per state.
+        
+        Args:
+            sequence_df: DataFrame with 'state' and 'duration' columns
+            
+        Returns:
+            DataFrame with per-state statistics
+        """
+        if sequence_df.empty:
+            return pd.DataFrame()
+        
+        summary = (
+            sequence_df
+            .groupby("state")
+            .agg(
+                sequences=("duration", "count"),
+                mean_duration=("duration", "mean"),
+                median_duration=("duration", "median"),
+                max_duration=("duration", "max"),
+                min_duration=("duration", "min"),
+                std_duration=("duration", "std")
+            )
+            .reset_index()
+        )
+        
+        return summary
+
+    def compute(self, states: np.ndarray) -> PersistenceResult:
+        """
+        Main computation method.
+        
+        Args:
+            states: Array of market states (0-15)
+            
+        Returns:
+            PersistenceResult with all computed statistics
+        """
+        # Validate input
+        if len(states) == 0:
+            raise ValueError("States array is empty")
+        
+        # Detect sequences
+        sequence_df = self.detect_sequences(states)
+        
+        if sequence_df.empty:
+            # Return empty result
+            return PersistenceResult(
+                persistence_table=pd.DataFrame(),
+                average_duration=0.0,
+                median_duration=0.0,
+                longest_duration=0,
+                shortest_duration=0,
+                total_sequences=0,
+                sample_size=len(states)
+            )
+        
+        # Aggregate statistics per state
+        summary = self.aggregate_statistics(sequence_df)
+        
+        # Calculate global statistics
+        durations = sequence_df["duration"].values
+        
+        average_duration = float(np.mean(durations))
+        median_duration = float(np.median(durations))
+        longest_duration = int(np.max(durations))
+        shortest_duration = int(np.min(durations))
+        total_sequences = len(sequence_df)
+        
+        return PersistenceResult(
+            persistence_table=summary,
+            average_duration=average_duration,
+            median_duration=median_duration,
+            longest_duration=longest_duration,
+            shortest_duration=shortest_duration,
+            total_sequences=total_sequences,
+            sample_size=len(states)
+        )
