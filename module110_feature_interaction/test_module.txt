@@ -1,0 +1,638 @@
+"""
+Module 110 - Integration Test
+
+Tests feature interaction engine, statistics, validator, report, and pipeline.
+"""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+
+import numpy as np
+import pandas as pd
+
+from atlas.modules.module110_feature_interaction.engine import FeatureInteractionEngine
+from atlas.modules.module110_feature_interaction.statistics import FeatureInteractionStatisticsEngine
+from atlas.modules.module110_feature_interaction.validator import run_validation
+from atlas.modules.module110_feature_interaction.module import FeatureInteractionResearch
+from atlas.modules.module110_feature_interaction.exporter import FeatureInteractionExporter
+
+
+def create_test_data(n=500, seed=42):
+    """Create synthetic test data with interactions."""
+    np.random.seed(seed)
+    
+    # Create features with known interactions
+    x1 = np.random.randn(n)
+    x2 = np.random.randn(n)
+    x3 = np.random.randn(n)
+    x4 = np.random.randn(n)  # Noise
+    
+    # Target with interactions: x1*x2 and x1*x3
+    y = (
+        0.5 * x1 * x2 + 
+        0.3 * x1 * x3 + 
+        0.1 * x2 * x3 +
+        0.1 * x1 +
+        0.1 * x2 +
+        np.random.randn(n) * 0.2
+    )
+    
+    # Discretize for classification
+    y_binary = (y > np.median(y)).astype(int)
+    
+    df = pd.DataFrame({
+        'feature1': x1,
+        'feature2': x2,
+        'feature3': x3,
+        'feature4': x4,
+        'future_breakout': y_binary
+    })
+    
+    return df
+
+
+def test_module108_target_adapter_integration():
+    """
+    Regression test:
+
+    Module 108 breakout_5
+        ->
+    target adapter
+        ->
+    Module 110 future_breakout
+    """
+
+    print("\n" + "=" * 60)
+    print("TEST: Module 108 → Module 110 Target Integration")
+    print("=" * 60)
+
+    n = 300
+
+    rng = np.random.default_rng(42)
+
+    features = pd.DataFrame({
+        "feature1": rng.normal(size=n),
+        "feature2": rng.normal(size=n),
+        "feature3": rng.normal(size=n),
+    })
+
+    breakout_targets = pd.DataFrame({
+        "breakout_5": rng.choice(
+            [-1, 0, 1],
+            size=n
+        ),
+        "breakout_10": rng.choice(
+            [-1, 0, 1],
+            size=n
+        ),
+    })
+
+    research = FeatureInteractionResearch(
+        target_column="future_breakout",
+        target_horizon=5,
+        n_bootstrap=2,
+        n_folds=2,
+    )
+
+    # Simulate the same dependency objects supplied by Atlas.
+    research.df = features
+    research.feature_df = breakout_targets
+
+    prepared = research._prepare_data()
+
+    prepared_df = prepared["df"]
+
+    assert "future_breakout" in prepared_df.columns
+
+    assert np.array_equal(
+        prepared_df["future_breakout"].to_numpy(),
+        breakout_targets["breakout_5"].to_numpy()
+    )
+
+    assert "breakout_5" not in (
+        research.engine.detect_features(
+            prepared_df
+        )
+    )
+
+    print(
+        "  ✓ Module 108 breakout_5 correctly "
+        "attached as future_breakout"
+    )
+
+    print(
+        "  ✓ breakout_5 excluded from predictors"
+    )
+
+    return True
+
+
+def test_feature_names_with_underscores():
+    """
+    Regression test ensuring interaction pairs remain unambiguous
+    when feature names contain underscores.
+    """
+
+    print("\n" + "=" * 60)
+    print("TEST: Feature Names Containing Underscores")
+    print("=" * 60)
+
+    n = 200
+
+    rng = np.random.default_rng(42)
+
+    df = pd.DataFrame({
+        "return_15m": rng.normal(size=n),
+        "volatility_1h": rng.normal(size=n),
+        "rsi_14": rng.normal(size=n),
+        "future_breakout": rng.choice(
+            [-1, 0, 1],
+            size=n
+        ),
+    })
+
+    engine = FeatureInteractionEngine(
+        n_folds=2,
+        n_bootstrap=1,
+    )
+
+    result = engine.compute(df)
+
+    assert not result.interaction_scores.empty
+
+    for pair in result.interaction_scores.index:
+        parts = pair.split("||")
+
+        assert len(parts) == 2
+
+    assert (
+        "return_15m||volatility_1h"
+        in result.interaction_scores.index
+    )
+
+    print(
+        "  ✓ Underscore-containing feature names "
+        "remain correctly represented"
+    )
+
+    return True
+
+
+def test_breakout_target_is_classification():
+    """
+    Verify Module 110 accepts the Module 108 target convention:
+        -1 = DOWN
+         0 = NO BREAKOUT
+        +1 = UP
+    """
+
+    print("\n" + "=" * 60)
+    print("TEST: Breakout Classification Target")
+    print("=" * 60)
+
+    n = 300
+
+    rng = np.random.default_rng(42)
+
+    df = pd.DataFrame({
+        "feature_a": rng.normal(size=n),
+        "feature_b": rng.normal(size=n),
+        "future_breakout": rng.choice(
+            [-1, 0, 1],
+            size=n
+        ),
+    })
+
+    engine = FeatureInteractionEngine(
+        n_folds=2,
+        n_bootstrap=1,
+    )
+
+    X, y, features = engine.prepare_data(df)
+
+    assert set(np.unique(y)).issubset(
+        {-1, 0, 1}
+    )
+
+    result = engine.compute(df)
+
+    assert not result.interaction_scores.empty
+
+    print(
+        "  ✓ -1/0/+1 breakout classification "
+        "processed successfully"
+    )
+
+    return True
+
+
+def test_future_breakout_columns_excluded():
+    """Test that Module 108 breakout_* columns cannot become features."""
+    print("\n" + "=" * 60)
+    print("TEST: Future Breakout Columns Excluded")
+    print("=" * 60)
+
+    df = create_test_data()
+
+    # Simulate Module 108 future-derived targets.
+    df["breakout_5"] = np.random.randint(-1, 2, len(df))
+    df["breakout_10"] = np.random.randint(-1, 2, len(df))
+    df["breakout_20"] = np.random.randint(-1, 2, len(df))
+
+    engine = FeatureInteractionEngine(
+        target_column="future_breakout"
+    )
+
+    features = engine.detect_features(df)
+
+    assert "breakout_5" not in features
+    assert "breakout_10" not in features
+    assert "breakout_20" not in features
+
+    assert "feature1" in features
+    assert "feature2" in features
+    assert "feature3" in features
+
+    print(f"  Detected features: {features}")
+    print("  ✓ Future breakout exclusion test passed")
+
+    return True
+
+
+def test_future_breakout_explicit_feature_rejected():
+    """Test that explicitly supplied breakout_* features are rejected."""
+    print("\n" + "=" * 60)
+    print("TEST: Explicit Future Breakout Leakage Rejected")
+    print("=" * 60)
+
+    df = create_test_data()
+
+    df["breakout_5"] = np.random.randint(-1, 2, len(df))
+
+    engine = FeatureInteractionEngine(
+        target_column="future_breakout",
+        feature_columns=[
+            "feature1",
+            "feature2",
+            "breakout_5",
+        ]
+    )
+
+    try:
+        engine.prepare_data(df)
+
+    except ValueError as e:
+        message = str(e)
+
+        assert "Future-derived Module 108 target columns" in message
+        assert "breakout_5" in message
+
+        print("  ✓ Explicit future breakout leakage rejected")
+        return True
+
+    raise AssertionError(
+        "Module 110 accepted breakout_5 as a predictor"
+    )
+
+
+def test_interaction_generation():
+    """Test 1: Interaction generation."""
+    print("\n" + "=" * 60)
+    print("TEST 1: Interaction Generation")
+    print("=" * 60)
+    
+    engine = FeatureInteractionEngine(target_column='future_breakout')
+    features = ['a', 'b', 'c', 'd']
+    pairs = engine.generate_pairs(features)
+    
+    expected_pairs = [('a', 'b'), ('a', 'c'), ('a', 'd'), ('b', 'c'), ('b', 'd'), ('c', 'd')]
+    
+    assert len(pairs) == 6
+    assert set(pairs) == set(expected_pairs)
+    
+    print(f"  Generated {len(pairs)} pairs")
+    print("  ✓ Interaction generation test passed")
+    return True
+
+
+def test_engine_normalization():
+    """Test 2: Score normalization."""
+    print("\n" + "=" * 60)
+    print("TEST 2: Score Normalization")
+    print("=" * 60)
+    
+    engine = FeatureInteractionEngine()
+    
+    scores = pd.Series([10, 20, 30, 40, 50])
+    normalized = engine.normalize_scores(scores)
+    
+    assert np.isclose(normalized.min(), 0)
+    assert np.isclose(normalized.max(), 1)
+    assert np.all((0 <= normalized) & (normalized <= 1))
+    
+    scores = pd.Series([5, 5, 5, 5, 5])
+    normalized = engine.normalize_scores(scores)
+    assert np.all(normalized == 0)
+    
+    print("  ✓ Normalization test passed")
+    return True
+
+
+def test_engine_mutual_information():
+    """Test 3: Mutual Information interaction."""
+    print("\n" + "=" * 60)
+    print("TEST 3: Mutual Information Interaction")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeatureInteractionEngine(target_column='future_breakout')
+    X, y, features = engine.prepare_data(df)
+    pairs = engine.generate_pairs(features)
+    
+    mi_scores = engine.compute_mutual_information_interaction(X, y, pairs)
+    
+    assert len(mi_scores) == len(pairs)
+    assert not mi_scores.isna().any()
+    assert mi_scores.min() >= 0
+    
+    # Known interaction should have high score
+    assert mi_scores['feature1||feature2'] > 0
+    
+    print(f"  MI interaction scores: {len(mi_scores)} pairs")
+    print("  ✓ Mutual Information test passed")
+    return True
+
+
+def test_engine_interaction_permutation():
+    """Test 4: Interaction Permutation."""
+    print("\n" + "=" * 60)
+    print("TEST 4: Interaction Permutation")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeatureInteractionEngine(target_column='future_breakout', n_folds=2)
+    X, y, features = engine.prepare_data(df)
+    pairs = engine.generate_pairs(features)
+    
+    perm_scores = engine.compute_interaction_permutation(X, y, pairs)
+    
+    assert len(perm_scores) == len(pairs)
+    assert not perm_scores.isna().any()
+    assert perm_scores.min() >= 0
+    
+    print(f"  Permutation scores: {len(perm_scores)} pairs")
+    print("  ✓ Interaction Permutation test passed")
+    return True
+
+
+def test_engine_anova():
+    """Test 5: Two-way ANOVA screening."""
+    print("\n" + "=" * 60)
+    print("TEST 5: Two-way ANOVA Screening")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeatureInteractionEngine(target_column='future_breakout')
+    X, y, features = engine.prepare_data(df)
+    pairs = engine.generate_pairs(features)
+    
+    anova_scores = engine.compute_two_way_anova(X, y, pairs)
+    
+    assert len(anova_scores) == len(pairs)
+    assert not anova_scores.isna().any()
+    assert anova_scores.min() >= 0
+    
+    print(f"  ANOVA scores: {len(anova_scores)} pairs")
+    print("  ✓ Two-way ANOVA test passed")
+    return True
+
+
+def test_engine_gb_importance():
+    """Test 6: Gradient Boosting interaction importance."""
+    print("\n" + "=" * 60)
+    print("TEST 6: Gradient Boosting Interaction Importance")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeatureInteractionEngine(target_column='future_breakout', n_folds=2)
+    X, y, features = engine.prepare_data(df)
+    pairs = engine.generate_pairs(features)
+    
+    gb_scores = engine.compute_gb_interaction_importance(X, y, pairs)
+    
+    assert len(gb_scores) == len(pairs)
+    assert not gb_scores.isna().any()
+    assert gb_scores.min() >= 0
+    
+    print(f"  GB scores: {len(gb_scores)} pairs")
+    print("  ✓ Gradient Boosting test passed")
+    return True
+
+
+def test_engine_ranking():
+    """Test 7: Ranking and combination."""
+    print("\n" + "=" * 60)
+    print("TEST 7: Ranking and Combination")
+    print("=" * 60)
+    
+    engine = FeatureInteractionEngine()
+    
+    scores_dict = {
+        'method1': pd.Series([0.8, 0.6, 0.4, 0.2], index=['A||B', 'A||C', 'B||C', 'C||D']),
+        'method2': pd.Series([0.7, 0.5, 0.3, 0.1], index=['A||B', 'A||C', 'B||C', 'C||D']),
+        'method3': pd.Series([0.9, 0.4, 0.6, 0.2], index=['A||B', 'A||C', 'B||C', 'C||D'])
+    }
+    
+    combined = engine.combine_scores(scores_dict)
+    
+    assert 'interaction_score' in combined.columns
+    assert len(combined) == 4
+    assert not combined.isna().any().any()
+    assert np.all((0 <= combined['interaction_score']) & (combined['interaction_score'] <= 1))
+    assert combined.index[0] == 'A||B'
+    
+    print("  ✓ Ranking test passed")
+    return True
+
+
+def test_statistics():
+    """Test 8: Statistics engine."""
+    print("\n" + "=" * 60)
+    print("TEST 8: Statistics Engine")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeatureInteractionEngine(target_column='future_breakout')
+    stats_engine = FeatureInteractionStatisticsEngine()
+    
+    result = engine.compute(df)
+    stats = stats_engine.analyze(result)
+    
+    assert stats.total_pairs == result.statistics['total_pairs']
+    assert stats.top_pair == result.statistics['top_pair']
+    assert stats.top_score == result.statistics['top_score']
+    assert stats.top_stability == result.statistics['top_stability']
+    assert stats.interaction_entropy >= 0
+    assert len(stats.top_10_pairs) > 0
+    assert stats.method_agreement == result.statistics['method_agreement']
+    assert stats.n_bootstrap == result.statistics['n_bootstrap']
+    assert stats.n_folds == result.statistics['n_folds']
+    
+    print(f"  Total pairs: {stats.total_pairs}")
+    print(f"  Top pair: {stats.top_pair}")
+    print(f"  Top stability: {stats.top_stability:.1%}")
+    print("  ✓ Statistics test passed")
+    return True
+
+
+def test_validator():
+    """Test 9: Validator."""
+    print("\n" + "=" * 60)
+    print("TEST 9: Validator")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeatureInteractionEngine(target_column='future_breakout')
+    stats_engine = FeatureInteractionStatisticsEngine()
+    
+    result = engine.compute(df)
+    stats = stats_engine.analyze(result)
+    
+    passed = run_validation(result, stats)
+    assert passed
+    
+    print("  ✓ Validator test passed")
+    return True
+
+
+def test_pipeline():
+    """Test 10: Full pipeline."""
+    print("\n" + "=" * 60)
+    print("TEST 10: Full Pipeline")
+    print("=" * 60)
+    
+    df = create_test_data()
+    
+    research = FeatureInteractionResearch(
+        target_column='future_breakout',
+        n_bootstrap=20,
+        n_folds=3
+    )
+    
+    result = research.run_dataframe(df, dataset_id="pipeline_test")
+    
+    assert result.status == "completed"
+    assert "interaction_scores" in result.artifacts
+    assert "interaction_matrix" in result.artifacts
+    assert "stability_scores" in result.artifacts
+    assert "feature_interaction_report" in result.artifacts
+    assert "matrix_report" in result.artifacts
+    assert result.statistics.get("validation_passed") == True
+    
+    print(f"  Total pairs: {result.statistics.get('total_pairs')}")
+    print(f"  Top pair: {result.statistics.get('top_pair')}")
+    print("  ✓ Full pipeline test passed")
+    return True
+
+
+def test_exporter():
+    """Test 11: Exporter."""
+    print("\n" + "=" * 60)
+    print("TEST 11: Exporter")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeatureInteractionEngine(target_column='future_breakout')
+    result = engine.compute(df)
+    
+    import tempfile
+    import os
+    
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        
+        FeatureInteractionExporter.export_scores(
+            result.interaction_scores,
+            tmp_path / "scores.csv"
+        )
+        assert (tmp_path / "scores.csv").exists()
+        
+        FeatureInteractionExporter.export_matrix(
+            result.interaction_matrix,
+            tmp_path / "matrix.csv"
+        )
+        assert (tmp_path / "matrix.csv").exists()
+        
+        FeatureInteractionExporter.export_statistics(
+            result.statistics,
+            tmp_path / "stats.csv"
+        )
+        assert (tmp_path / "stats.csv").exists()
+        
+        FeatureInteractionExporter.export_detailed_results(
+            result,
+            tmp_path / "detailed.json"
+        )
+        assert (tmp_path / "detailed.json").exists()
+    
+    print("  ✓ Exporter test passed")
+    return True
+
+
+def main():
+    """Run all tests."""
+    print("\n" + "=" * 70)
+    print("PROJECT ATLAS - MODULE 110 INTEGRATION TEST")
+    print("Feature Interaction")
+    print("=" * 70)
+    
+    results = {}
+    
+    # Basic functionality tests
+    results["interaction_generation"] = test_interaction_generation()
+    results["normalization"] = test_engine_normalization()
+    results["mutual_information"] = test_engine_mutual_information()
+    results["interaction_permutation"] = test_engine_interaction_permutation()
+    results["anova"] = test_engine_anova()
+    results["gb_importance"] = test_engine_gb_importance()
+    results["ranking"] = test_engine_ranking()
+    
+    # Module 108 integration tests
+    results["module108_target_adapter"] = test_module108_target_adapter_integration()
+    results["underscore_feature_names"] = test_feature_names_with_underscores()
+    results["breakout_classification"] = test_breakout_target_is_classification()
+    
+    # Future breakout leakage prevention tests
+    results["future_breakout_exclusion"] = test_future_breakout_columns_excluded()
+    results["future_breakout_leakage_rejection"] = test_future_breakout_explicit_feature_rejected()
+    
+    # Statistics, validator, pipeline, exporter
+    results["statistics"] = test_statistics()
+    results["validator"] = test_validator()
+    results["pipeline"] = test_pipeline()
+    results["exporter"] = test_exporter()
+    
+    print("\n" + "=" * 70)
+    print("RESULTS")
+    print("=" * 70)
+    
+    for name, ok in results.items():
+        print(f"  {'✓' if ok else '✗'} {name}")
+    
+    passed = sum(results.values())
+    total = len(results)
+    
+    print(f"\n  {passed}/{total} tests passed")
+    
+    if passed == total:
+        print("\n✓ Module 110 VALIDATED")
+        return 0
+    else:
+        print("\n⚠ Some tests failed")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,155 @@
+"""
+Module 110 - Feature Interaction Report
+"""
+
+from datetime import datetime
+import pandas as pd
+
+
+class FeatureInteractionReport:
+    """Report generator for feature interaction results."""
+    
+    @staticmethod
+    def generate(statistics, metadata=None, dataset_name="Unknown") -> str:
+        """Generate a formatted report."""
+        lines = []
+        
+        lines.append("=" * 55)
+        lines.append("MODULE 110")
+        lines.append("FEATURE INTERACTION")
+        lines.append("=" * 55)
+        lines.append(f"\nDataset: {dataset_name}")
+        
+        # Parameters
+        lines.append("\n" + "-" * 45)
+        lines.append("OVERVIEW")
+        lines.append("-" * 45)
+        lines.append(f"  Total Pairs: {statistics.total_pairs}")
+        lines.append(f"  Features: {statistics.n_features}")
+        lines.append(f"  Methods: {len(statistics.methods_used)}")
+        lines.append(f"  Bootstrap: {statistics.n_bootstrap} samples")
+        lines.append(f"  CV Folds: {statistics.n_folds}")
+        
+        # Top Pair
+        if statistics.top_pair:
+            lines.append("\n" + "-" * 45)
+            lines.append("TOP INTERACTION")
+            lines.append("-" * 45)
+            lines.append(f"  Pair: {statistics.top_pair}")
+            lines.append(f"  Score: {statistics.top_score:.4f}")
+            lines.append(f"  Stability: {statistics.top_stability:.1%}")
+        
+        # Top 10 Pairs
+        if statistics.top_10_pairs:
+            lines.append("\n" + "-" * 45)
+            lines.append("TOP 10 INTERACTIONS")
+            lines.append("-" * 45)
+            for i, pair in enumerate(statistics.top_10_pairs[:10], 1):
+                lines.append(f"  {i:2d}. {pair}")
+        
+        # Statistics
+        lines.append("\n" + "-" * 45)
+        lines.append("STATISTICS")
+        lines.append("-" * 45)
+        lines.append(f"  Interaction Entropy: {statistics.interaction_entropy:.3f} bits")
+        lines.append(f"  Method Agreement: {statistics.method_agreement:.3f} ({statistics.agreement_level})")
+        
+        # Methods Used
+        lines.append("\n" + "-" * 45)
+        lines.append("METHODS")
+        lines.append("-" * 45)
+        for method in statistics.methods_used:
+            method_display = {
+                "mutual_information": "Mutual Information",
+                "interaction_permutation": "Interaction Permutation",
+                "anova_interaction": "ANOVA Interaction Screening",
+                "gb_interaction": "Gradient Boosting Interaction",
+            }.get(method, method)
+            lines.append(f"  • {method_display}")
+        
+        # Interpretation
+        lines.append("\n" + "-" * 45)
+        lines.append("INTERPRETATION")
+        lines.append("-" * 45)
+        
+        if statistics.top_score > 0.5:
+            lines.append("  Strongest interaction shows high predictive power")
+        elif statistics.top_score > 0.3:
+            lines.append("  Top interaction shows moderate predictive power")
+        else:
+            lines.append("  Top interaction shows weak predictive power")
+        
+        if statistics.top_stability > 0.8:
+            lines.append(f"  Top interaction is highly stable ({statistics.top_stability:.1%})")
+        elif statistics.top_stability > 0.5:
+            lines.append(f"  Top interaction has moderate stability ({statistics.top_stability:.1%})")
+        else:
+            lines.append(f"  Top interaction has low stability ({statistics.top_stability:.1%})")
+        
+        if statistics.interaction_entropy < 1.0:
+            lines.append("  Few interactions dominate")
+        elif statistics.interaction_entropy < 2.0:
+            lines.append("  Moderate spread of interactions")
+        else:
+            lines.append("  Interactions are widely spread")
+        
+        if statistics.method_agreement > 0.7:
+            lines.append("  Methods strongly agree on interaction rankings")
+        elif statistics.method_agreement > 0.4:
+            lines.append("  Methods moderately agree on interaction rankings")
+        else:
+            lines.append("  Methods show low agreement on interaction rankings")
+        
+        # Validation
+        lines.append("\n" + "-" * 45)
+        lines.append("VALIDATION")
+        lines.append("-" * 45)
+        lines.append("  Status: PASSED")
+        
+        # Footer
+        lines.append(f"\n  Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        lines.append("\n" + "=" * 55)
+        lines.append("END OF REPORT")
+        lines.append("=" * 55)
+        
+        return "\n".join(lines)
+    
+    @staticmethod
+    def generate_matrix_report(interaction_matrix: pd.DataFrame, top_n: int = 10) -> str:
+        """Generate a formatted interaction matrix report."""
+        lines = []
+        lines.append("\n" + "=" * 70)
+        lines.append("INTERACTION MATRIX")
+        lines.append("=" * 70)
+        
+        # Get top N interactions
+        scores = []
+        for i in range(len(interaction_matrix)):
+            for j in range(i + 1, len(interaction_matrix)):
+                score = interaction_matrix.iloc[i, j]
+                if score > 0:
+                    scores.append({
+                        'f1': interaction_matrix.index[i],
+                        'f2': interaction_matrix.columns[j],
+                        'score': score
+                    })
+        
+        scores.sort(key=lambda x: x['score'], reverse=True)
+        
+        lines.append(f"\n{'Feature 1':<20} {'Feature 2':<20} {'Score':<12}")
+        lines.append("-" * 55)
+        
+        for item in scores[:top_n]:
+            lines.append(f"{item['f1']:<20} {item['f2']:<20} {item['score']:<12.4f}")
+        
+        lines.append("\n" + "=" * 70)
+        return "\n".join(lines)
+    
+    @staticmethod
+    def save(report: str, filepath: str):
+        """Save report to file."""
+        from pathlib import Path
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(report)

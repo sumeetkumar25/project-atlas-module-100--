@@ -1,0 +1,566 @@
+#!/usr/bin/env python3
+"""
+Module 109 Integration Test Bot
+
+Tests feature importance engine, statistics, validator, report, and pipeline.
+"""
+
+import sys
+from pathlib import Path
+
+# Adjust path to find the atlas module (assumes this script is in tests/integration/)
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+
+import numpy as np
+import pandas as pd
+
+# Module imports (must exist in the project)
+from atlas.modules.module109_feature_importance.engine import FeatureImportanceEngine
+from atlas.modules.module109_feature_importance.statistics import FeatureImportanceStatisticsEngine
+from atlas.modules.module109_feature_importance.validator import run_validation
+from atlas.modules.module109_feature_importance.module import FeatureImportanceResearch
+
+
+# ----------------------------------------------------------------------
+# Test Data Generator
+# ----------------------------------------------------------------------
+def create_test_data(n=1000, seed=42):
+    """Create synthetic test data with features and target."""
+    np.random.seed(seed)
+
+    state = np.random.randint(0, 16, n)
+    persistence = np.random.randn(n) * 0.5 + state * 0.1
+    volatility = np.random.randn(n) * 0.8 + np.sin(state) * 0.05
+    noise = np.random.randn(n) * 1.0
+
+    target_prob = 1 / (1 + np.exp(-(
+        0.3 * (state - 7.5) / 7.5 +
+        0.2 * persistence +
+        0.1 * volatility +
+        0.01 * noise
+    )))
+    target = (np.random.random(n) < target_prob).astype(int)
+
+    return pd.DataFrame({
+        'state': state,
+        'persistence': persistence,
+        'volatility': volatility,
+        'noise': noise,
+        'future_breakout': target
+    })
+
+
+# ----------------------------------------------------------------------
+# Individual Tests
+# ----------------------------------------------------------------------
+def test_engine_feature_detection():
+    """Test 1: Feature detection (state excluded by default)."""
+    print("\n" + "=" * 60)
+    print("TEST 1: Feature Detection (state excluded by default)")
+    print("=" * 60)
+
+    df = create_test_data()
+    engine = FeatureImportanceEngine(target_column='future_breakout', include_state=False)
+    features = engine.detect_features(df)
+
+    assert len(features) > 0
+    assert 'future_breakout' not in features
+    assert 'state' not in features
+
+    print(f"  Detected features: {features}")
+    print("  ✓ Feature detection (exclude state) test passed")
+    return True
+
+
+def test_engine_feature_detection_with_state():
+    """Test 2: Feature detection with state included."""
+    print("\n" + "=" * 60)
+    print("TEST 2: Feature Detection with state included")
+    print("=" * 60)
+
+    df = create_test_data()
+    engine = FeatureImportanceEngine(target_column='future_breakout', include_state=True)
+    features = engine.detect_features(df)
+
+    assert 'state' in features
+
+    print("  ✓ State inclusion test passed")
+    return True
+
+
+def test_engine_correlation_filtering():
+    """Test 3: Correlation filtering (backward compatible)."""
+    print("\n" + "=" * 60)
+    print("TEST 3: Correlation Filtering")
+    print("=" * 60)
+
+    engine = FeatureImportanceEngine(correlation_threshold=0.9)
+
+    X = pd.DataFrame({
+        'feature1': np.random.randn(100),
+        'feature2': np.random.randn(100) * 0.5,
+        'feature3': np.random.randn(100) * 0.5,
+    })
+    X['feature1_corr'] = X['feature1'] * 0.98 + np.random.randn(100) * 0.02
+    X['feature1_high_corr'] = X['feature1'] * 0.99 + np.random.randn(100) * 0.01
+
+    X_filtered, selected = engine.remove_correlated_features(X, threshold=0.9)
+
+    assert len(selected) < len(X.columns)
+    assert 'feature1' in selected or 'feature1_corr' in selected or 'feature1_high_corr' in selected
+
+    print(f"  Generic mode: Original {len(X.columns)} → Selected {len(selected)} features")
+    print("  ✓ Correlation filtering test passed")
+    return True
+
+
+def test_engine_correlation_filtering_research():
+    """Test 4: Correlation filtering (research mode with y)."""
+    print("\n" + "=" * 60)
+    print("TEST 4: Correlation Filtering (Research Mode)")
+    print("=" * 60)
+
+    engine = FeatureImportanceEngine(correlation_threshold=0.9)
+
+    X = pd.DataFrame({
+        'feature1': np.random.randn(100),
+        'feature2': np.random.randn(100) * 0.5,
+        'feature3': np.random.randn(100) * 0.5,
+    })
+    X['feature1_corr'] = X['feature1'] * 0.98 + np.random.randn(100) * 0.02
+    X['feature1_high_corr'] = X['feature1'] * 0.99 + np.random.randn(100) * 0.01
+
+    y = (X['feature1'] > 0).astype(int)
+
+    X_filtered, selected = engine.remove_correlated_features(X, y, threshold=0.9)
+
+    assert len(selected) < len(X.columns)
+
+    print(f"  Research mode: Original {len(X.columns)} → Selected {len(selected)} features")
+    print("  ✓ Correlation filtering research mode test passed")
+    return True
+
+
+def test_engine_freedman_diaconis():
+    """Test 5: Freedman-Diaconis binning."""
+    print("\n" + "=" * 60)
+    print("TEST 5: Freedman-Diaconis Binning")
+    print("=" * 60)
+
+    engine = FeatureImportanceEngine()
+
+    data = np.random.randn(1000)
+    bins = engine.freedman_diaconis_bins(data)
+    assert bins > 0
+    assert bins <= 50
+
+    data = np.random.uniform(0, 1, 1000)
+    bins = engine.freedman_diaconis_bins(data)
+    assert bins > 0
+    assert bins <= 50
+
+    data = np.ones(100)
+    bins = engine.freedman_diaconis_bins(data)
+    assert bins > 0
+
+    print(f"  Normal distribution bins: {bins}")
+    print("  ✓ Freedman-Diaconis test passed")
+    return True
+
+
+def test_engine_bootstrap_stability():
+    """Test 6: Bootstrap stability."""
+    print("\n" + "=" * 60)
+    print("TEST 6: Bootstrap Stability")
+    print("=" * 60)
+
+    engine = FeatureImportanceEngine(n_bootstrap=20, include_state=False)
+    df = create_test_data(n=500)
+    X, y, _ = engine.prepare_data(df)
+
+    stability_scores, top_stability = engine.compute_bootstrap_stability(X, y, n_bootstrap=20)
+
+    assert np.all((0 <= stability_scores) & (stability_scores <= 1))
+    assert 0 <= top_stability <= 1
+
+    print(f"  Top feature stability: {top_stability:.1%}")
+    print("  ✓ Bootstrap stability test passed")
+    return True
+
+
+def test_engine_permutation_importance():
+    """Test 7: Permutation importance (Ensemble + CV)."""
+    print("\n" + "=" * 60)
+    print("TEST 7: Permutation Importance (Ensemble + CV)")
+    print("=" * 60)
+
+    engine = FeatureImportanceEngine(n_permutations=5, n_folds=3, include_state=False)
+    df = create_test_data(n=300)
+    X, y, features = engine.prepare_data(df)
+
+    perm_scores = engine.compute_permutation_importance(X, y)
+
+    assert len(perm_scores) == len(features)
+    assert not perm_scores.isna().any()
+    assert np.isfinite(perm_scores).all()
+
+    # Signal feature (persistence) should outperform pure noise
+    assert perm_scores["persistence"] > perm_scores["noise"]
+
+    # Test stability across runs with fixed seed
+    engine2 = FeatureImportanceEngine(n_permutations=5, n_folds=3, random_state=42, include_state=False)
+    perm_scores2 = engine2.compute_permutation_importance(X, y)
+    assert np.allclose(perm_scores.values, perm_scores2.values, atol=0.01)
+
+    print(f"  Permutation importance (persistence): {perm_scores['persistence']:.4f}")
+    print(f"  Permutation importance (noise): {perm_scores['noise']:.4f}")
+    print("  ✓ Permutation importance test passed")
+    return True
+
+
+def test_engine_mutual_information():
+    """Test 8: Mutual Information."""
+    print("\n" + "=" * 60)
+    print("TEST 8: Mutual Information")
+    print("=" * 60)
+
+    df = create_test_data()
+    engine = FeatureImportanceEngine(target_column='future_breakout', include_state=False)
+
+    X, y, features = engine.prepare_data(df)
+    mi_scores = engine.compute_mutual_information(X, y)
+
+    assert len(mi_scores) == len(features)
+    assert not mi_scores.isna().any()
+    assert np.isfinite(mi_scores).all()
+    assert mi_scores['persistence'] > mi_scores['noise']
+
+    print(f"  Mutual information (persistence): {mi_scores['persistence']:.4f}")
+    print("  ✓ Mutual information test passed")
+    return True
+
+
+def test_engine_information_gain():
+    """Test 9: Information Gain."""
+    print("\n" + "=" * 60)
+    print("TEST 9: Information Gain")
+    print("=" * 60)
+
+    df = create_test_data()
+    engine = FeatureImportanceEngine(target_column='future_breakout', include_state=False)
+
+    X, y, features = engine.prepare_data(df)
+    ig_scores = engine.compute_information_gain(X, y)
+
+    assert len(ig_scores) == len(features)
+    assert not ig_scores.isna().any()
+    assert np.isfinite(ig_scores).all()
+    assert ig_scores.min() >= 0
+    assert ig_scores['persistence'] > ig_scores['noise']
+
+    print(f"  Information gain (persistence): {ig_scores['persistence']:.4f}")
+    print("  ✓ Information gain test passed")
+    return True
+
+
+def test_engine_chi_square():
+    """Test 10: Chi-Square."""
+    print("\n" + "=" * 60)
+    print("TEST 10: Chi-Square")
+    print("=" * 60)
+
+    df = create_test_data()
+    engine = FeatureImportanceEngine(target_column='future_breakout', include_state=False)
+
+    X, y, features = engine.prepare_data(df)
+    chi2_scores = engine.compute_chi_square(X, y)
+
+    assert len(chi2_scores) == len(features)
+    assert not chi2_scores.isna().any()
+    assert np.isfinite(chi2_scores).all()
+    assert chi2_scores.min() >= 0
+    assert chi2_scores['persistence'] > chi2_scores['noise']
+
+    print(f"  Chi-square (persistence): {chi2_scores['persistence']:.4f}")
+    print("  ✓ Chi-square test passed")
+    return True
+
+
+def test_engine_f_score():
+    """Test 11: ANOVA F-score."""
+    print("\n" + "=" * 60)
+    print("TEST 11: ANOVA F-score")
+    print("=" * 60)
+
+    df = create_test_data()
+    engine = FeatureImportanceEngine(target_column='future_breakout', include_state=False)
+
+    X, y, features = engine.prepare_data(df)
+    f_scores = engine.compute_f_score(X, y)
+
+    assert len(f_scores) == len(features)
+    assert not f_scores.isna().any()
+    assert np.isfinite(f_scores).all()
+    assert f_scores.min() >= 0
+    assert f_scores['persistence'] > f_scores['noise']
+
+    print(f"  F-score (persistence): {f_scores['persistence']:.4f}")
+    print("  ✓ F-score test passed")
+    return True
+
+
+def test_engine_normalization():
+    """Test 12: Score normalization."""
+    print("\n" + "=" * 60)
+    print("TEST 12: Score Normalization")
+    print("=" * 60)
+
+    engine = FeatureImportanceEngine()
+
+    scores = pd.Series([10, 20, 30, 40, 50])
+    normalized = engine.normalize_scores(scores)
+    assert np.isclose(normalized.min(), 0)
+    assert np.isclose(normalized.max(), 1)
+    assert np.all((0 <= normalized) & (normalized <= 1))
+
+    scores = pd.Series([5, 5, 5, 5, 5])
+    normalized = engine.normalize_scores(scores)
+    assert np.all(normalized == 0)
+
+    print("  ✓ Normalization test passed")
+    return True
+
+
+def test_engine_combine():
+    """Test 13: Score combination."""
+    print("\n" + "=" * 60)
+    print("TEST 13: Score Combination")
+    print("=" * 60)
+
+    engine = FeatureImportanceEngine()
+
+    scores_dict = {
+        'method1': pd.Series([0.8, 0.6, 0.4, 0.2], index=['A', 'B', 'C', 'D']),
+        'method2': pd.Series([0.7, 0.5, 0.3, 0.1], index=['A', 'B', 'C', 'D']),
+        'method3': pd.Series([0.9, 0.4, 0.6, 0.2], index=['A', 'B', 'C', 'D'])
+    }
+
+    combined = engine.combine_scores(scores_dict)
+
+    assert 'importance' in combined.columns
+    assert len(combined) == 4
+    assert not combined.isna().any().any()
+    assert np.all((0 <= combined['importance']) & (combined['importance'] <= 1))
+    assert combined.index[0] == 'A'
+
+    print(f"  Combined importance: {combined['importance'].to_dict()}")
+    print("  ✓ Score combination test passed")
+    return True
+
+
+def test_engine_compute():
+    """Test 14: Full engine computation."""
+    print("\n" + "=" * 60)
+    print("TEST 14: Full Engine Computation")
+    print("=" * 60)
+
+    df = create_test_data(n=500)
+    engine = FeatureImportanceEngine(target_column='future_breakout', n_bootstrap=20, include_state=False)
+
+    result = engine.compute(df)
+
+    assert not result.feature_importance.empty
+    assert not result.method_scores.empty
+    assert not result.feature_ranking.empty
+    assert not result.stability_scores.empty
+    assert len(result.top_features) > 0
+    assert 0 <= result.method_agreement <= 1
+
+    assert 'state' not in result.feature_ranking.index
+    assert result.statistics['total_features'] > 0
+    assert result.statistics['top_feature'] is not None
+    assert result.statistics['top_stability'] >= 0
+
+    print(f"  Top feature: {result.statistics['top_feature']}")
+    print(f"  Top importance: {result.statistics['top_importance']:.4f}")
+    print(f"  Top stability: {result.statistics['top_stability']:.1%}")
+    print(f"  Method agreement: {result.method_agreement:.3f}")
+    print("  ✓ Full engine test passed")
+    return True
+
+
+def test_statistics():
+    """Test 15: Statistics engine."""
+    print("\n" + "=" * 60)
+    print("TEST 15: Statistics Engine")
+    print("=" * 60)
+
+    df = create_test_data(n=500)
+    engine = FeatureImportanceEngine(target_column='future_breakout', n_bootstrap=20, include_state=False)
+    stats_engine = FeatureImportanceStatisticsEngine()
+
+    result = engine.compute(df)
+    stats = stats_engine.analyze(result)
+
+    assert stats.total_features == result.statistics['total_features']
+    assert stats.top_feature == result.statistics['top_feature']
+    assert stats.top_importance == result.statistics['top_importance']
+    assert stats.top_stability == result.statistics['top_stability']
+    assert stats.average_importance >= 0
+    assert stats.importance_entropy >= 0
+    assert len(stats.top_5_features) > 0
+    assert stats.method_agreement == result.method_agreement
+
+    print(f"  Top feature: {stats.top_feature}")
+    print(f"  Top importance: {stats.top_importance:.4f}")
+    print(f"  Top stability: {stats.top_stability:.1%}")
+    print("  ✓ Statistics test passed")
+    return True
+
+
+def test_validator():
+    """Test 16: Validator."""
+    print("\n" + "=" * 60)
+    print("TEST 16: Validator")
+    print("=" * 60)
+
+    df = create_test_data(n=500)
+    engine = FeatureImportanceEngine(target_column='future_breakout', n_bootstrap=20, include_state=False)
+    stats_engine = FeatureImportanceStatisticsEngine()
+
+    result = engine.compute(df)
+    stats = stats_engine.analyze(result)
+
+    passed = run_validation(result, stats)
+    assert passed
+
+    print("  ✓ Validator test passed")
+    return True
+
+
+def test_pipeline():
+    """Test 17: Full pipeline."""
+    print("\n" + "=" * 60)
+    print("TEST 17: Full Pipeline")
+    print("=" * 60)
+
+    df = create_test_data(n=300)
+
+    research = FeatureImportanceResearch(
+        target_column='future_breakout',
+        n_permutations=5,
+        n_bootstrap=20,
+        n_folds=3,
+        include_state=False
+    )
+
+    result = research.run_dataframe(df, dataset_id="pipeline_test")
+
+    assert result.status == "completed"
+    assert "feature_importance" in result.artifacts
+    assert "method_scores" in result.artifacts
+    assert "feature_ranking" in result.artifacts
+    assert "stability_scores" in result.artifacts
+    assert "feature_importance_report" in result.artifacts
+    assert "ranking_report" in result.artifacts
+    assert "stability_report" in result.artifacts
+    assert result.statistics.get("validation_passed") == True
+
+    print(f"  Total features: {result.statistics.get('total_features')}")
+    print(f"  Top feature: {result.statistics.get('top_feature')}")
+    print(f"  Method agreement: {result.statistics.get('method_agreement'):.3f}")
+    print("  ✓ Full pipeline test passed")
+    return True
+
+
+def test_research_include_state_api():
+    """Test 18: include_state propagates through research module."""
+    print("\n" + "=" * 60)
+    print("TEST 18: include_state API Propagation")
+    print("=" * 60)
+
+    research_excluded = FeatureImportanceResearch(
+        target_column='future_breakout',
+        include_state=False
+    )
+    assert research_excluded.engine.include_state is False
+
+    research_included = FeatureImportanceResearch(
+        target_column='future_breakout',
+        include_state=True
+    )
+    assert research_included.engine.include_state is True
+
+    print("  ✓ include_state API propagation test passed")
+    return True
+
+
+# ----------------------------------------------------------------------
+# Test Runner
+# ----------------------------------------------------------------------
+def run_all_tests():
+    """Run all integration tests and return a summary."""
+    test_functions = [
+        test_engine_feature_detection,
+        test_engine_feature_detection_with_state,
+        test_engine_correlation_filtering,
+        test_engine_correlation_filtering_research,
+        test_engine_freedman_diaconis,
+        test_engine_bootstrap_stability,
+        test_engine_permutation_importance,
+        test_engine_mutual_information,
+        test_engine_information_gain,
+        test_engine_chi_square,
+        test_engine_f_score,
+        test_engine_normalization,
+        test_engine_combination,
+        test_engine_compute,
+        test_statistics,
+        test_validator,
+        test_pipeline,
+        test_research_include_state_api,
+    ]
+
+    results = {}
+    for test_fn in test_functions:
+        try:
+            results[test_fn.__name__] = test_fn()
+        except Exception as e:
+            print(f"\n❌ Test {test_fn.__name__} failed with exception:")
+            print(f"   {e}")
+            results[test_fn.__name__] = False
+
+    return results
+
+
+def main():
+    """Entry point."""
+    print("\n" + "=" * 70)
+    print("PROJECT ATLAS - MODULE 109 INTEGRATION TEST BOT")
+    print("Feature Importance v2")
+    print("=" * 70)
+
+    results = run_all_tests()
+
+    print("\n" + "=" * 70)
+    print("TEST SUMMARY")
+    print("=" * 70)
+
+    for name, ok in results.items():
+        print(f"  {'✅' if ok else '❌'} {name}")
+
+    passed = sum(results.values())
+    total = len(results)
+
+    print(f"\n  {passed}/{total} tests passed")
+
+    if passed == total:
+        print("\n✅ Module 109 v2 VALIDATED – All tests passed.")
+        return 0
+    else:
+        print("\n❌ Some tests failed – check logs above.")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

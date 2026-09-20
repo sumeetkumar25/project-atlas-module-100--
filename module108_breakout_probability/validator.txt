@@ -1,0 +1,414 @@
+"""
+Validator for Module 108 - Breakout Probability.
+"""
+
+import numpy as np
+
+
+def run_validation(
+    result,
+    stats,
+) -> bool:
+    """
+    Validate Module 108 results.
+
+    Validation covers:
+
+        1. Result structure
+        2. State coverage
+        3. Probability validity
+        4. Probability sums
+        5. Confidence intervals
+        6. Sample counts
+        7. Row-level breakout targets
+    """
+
+    issues = []
+    warnings = []
+
+    # ==============================================================
+    # 1. Basic result structure
+    # ==============================================================
+
+    if result.state_probabilities.empty:
+
+        issues.append(
+            "state_probabilities DataFrame is empty"
+        )
+
+    if result.state_statistics.empty:
+
+        issues.append(
+            "state_statistics DataFrame is empty"
+        )
+
+    if result.targets.empty:
+
+        issues.append(
+            "targets DataFrame is empty"
+        )
+
+    # ==============================================================
+    # 2. Validate target columns
+    # ==============================================================
+
+    expected_target_columns = {
+        f"breakout_{h}"
+        for h in result.horizons
+    }
+
+    actual_target_columns = set(
+        result.targets.columns
+    )
+
+    missing_target_columns = (
+        expected_target_columns
+        - actual_target_columns
+    )
+
+    if missing_target_columns:
+
+        issues.append(
+            "Missing breakout target columns: "
+            f"{sorted(missing_target_columns)}"
+        )
+
+    # ==============================================================
+    # 3. Validate target values
+    # ==============================================================
+
+    allowed_target_values = {
+        -99,
+        -1,
+        0,
+        1,
+    }
+
+    for horizon in result.horizons:
+
+        column = (
+            f"breakout_{horizon}"
+        )
+
+        if column not in result.targets:
+            continue
+
+        values = (
+            result.targets[column]
+            .dropna()
+            .to_numpy()
+        )
+
+        invalid_values = set(
+            values
+        ) - allowed_target_values
+
+        if invalid_values:
+
+            issues.append(
+                f"{column}: invalid target values "
+                f"{sorted(invalid_values)}"
+            )
+
+    # ==============================================================
+    # 4. State coverage
+    # ==============================================================
+
+    states_in_probs = set(
+        result.state_probabilities[
+            "state"
+        ]
+    )
+
+    expected_states = set(
+        range(16)
+    )
+
+    missing_states = (
+        expected_states
+        - states_in_probs
+    )
+
+    if missing_states:
+
+        warnings.append(
+            "Missing states in probabilities: "
+            f"{sorted(missing_states)}"
+        )
+
+    # ==============================================================
+    # 5. Probability validation
+    # ==============================================================
+
+    for _, row in (
+        result.state_probabilities.iterrows()
+    ):
+
+        state = int(
+            row["state"]
+        )
+
+        for h in result.horizons:
+
+            samples = int(
+                row[f"samples_{h}"]
+            )
+
+            up_prob = float(
+                row[f"up_prob_{h}"]
+            )
+
+            down_prob = float(
+                row[f"down_prob_{h}"]
+            )
+
+            no_breakout_prob = float(
+                row[
+                    f"no_breakout_prob_{h}"
+                ]
+            )
+
+            probabilities = (
+                up_prob,
+                down_prob,
+                no_breakout_prob,
+            )
+
+            # ------------------------------------------------------
+            # All probabilities must be finite.
+            # ------------------------------------------------------
+
+            if not all(
+                np.isfinite(p)
+                for p in probabilities
+            ):
+
+                issues.append(
+                    f"State {state}, horizon {h}: "
+                    "Non-finite probability"
+                )
+
+                continue
+
+            # ------------------------------------------------------
+            # No negative probabilities.
+            # ------------------------------------------------------
+
+            if any(
+                p < 0
+                for p in probabilities
+            ):
+
+                issues.append(
+                    f"State {state}, horizon {h}: "
+                    "Negative probability"
+                )
+
+            # ------------------------------------------------------
+            # Only sampled observations must form a complete
+            # empirical probability distribution.
+            # ------------------------------------------------------
+
+            if samples > 0:
+
+                prob_sum = sum(
+                    probabilities
+                )
+
+                if not np.isclose(
+                    prob_sum,
+                    1.0,
+                    atol=1e-8,
+                ):
+
+                    issues.append(
+                        f"State {state}, horizon {h}: "
+                        f"Probability sum={prob_sum}"
+                    )
+
+    # ==============================================================
+    # 6. Confidence intervals
+    # ==============================================================
+
+    for _, row in (
+        result.state_probabilities.iterrows()
+    ):
+
+        state = int(
+            row["state"]
+        )
+
+        for h in result.horizons:
+
+            samples = int(
+                row[f"samples_{h}"]
+            )
+
+            if samples <= 0:
+                continue
+
+            lower = float(
+                row[f"conf_lower_{h}"]
+            )
+
+            upper = float(
+                row[f"conf_upper_{h}"]
+            )
+
+            if not (
+                np.isfinite(lower)
+                and np.isfinite(upper)
+            ):
+
+                issues.append(
+                    f"State {state}, horizon {h}: "
+                    "Non-finite confidence interval"
+                )
+
+                continue
+
+            if lower > upper:
+
+                issues.append(
+                    f"State {state}, horizon {h}: "
+                    "Lower CI > upper CI"
+                )
+
+            if lower < 0 or upper > 1:
+
+                issues.append(
+                    f"State {state}, horizon {h}: "
+                    f"CI outside [0,1]: "
+                    f"({lower}, {upper})"
+                )
+
+    # ==============================================================
+    # 7. Count consistency
+    # ==============================================================
+
+    for _, row in (
+        result.state_probabilities.iterrows()
+    ):
+
+        state = int(
+            row["state"]
+        )
+
+        for h in result.horizons:
+
+            samples = int(
+                row[f"samples_{h}"]
+            )
+
+            up_count = int(
+                row[f"up_count_{h}"]
+            )
+
+            down_count = int(
+                row[f"down_count_{h}"]
+            )
+
+            no_count = int(
+                row[
+                    f"no_breakout_count_{h}"
+                ]
+            )
+
+            if samples < 0:
+
+                issues.append(
+                    f"State {state}, horizon {h}: "
+                    "Negative sample count"
+                )
+
+                continue
+
+            if (
+                up_count
+                + down_count
+                + no_count
+                != samples
+            ):
+
+                issues.append(
+                    f"State {state}, horizon {h}: "
+                    "Outcome counts do not equal samples"
+                )
+
+    # ==============================================================
+    # 8. Statistics validation
+    # ==============================================================
+
+    if (
+        hasattr(
+            stats,
+            "states_with_samples",
+        )
+        and stats.states_with_samples == 0
+    ):
+
+        warnings.append(
+            "No states have samples"
+        )
+
+    # ==============================================================
+    # 9. Report
+    # ==============================================================
+
+    if issues:
+
+        print(
+            "\n"
+            + "=" * 60
+        )
+
+        print(
+            "VALIDATION FAILED"
+        )
+
+        print(
+            "=" * 60
+        )
+
+        for issue in issues:
+
+            print(
+                f"  ✗ {issue}"
+            )
+
+        print(
+            "=" * 60
+        )
+
+        return False
+
+    if warnings:
+
+        print(
+            "\n"
+            + "=" * 60
+        )
+
+        print(
+            "VALIDATION WARNINGS"
+        )
+
+        print(
+            "=" * 60
+        )
+
+        for warning in warnings:
+
+            print(
+                f"  ⚠ {warning}"
+            )
+
+        print(
+            "=" * 60
+        )
+
+    print(
+        "\n  ✓ All validations passed"
+    )
+
+    return True

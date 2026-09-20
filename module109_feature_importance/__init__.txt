@@ -1,0 +1,9 @@
+# atlas/modules/module109_feature_importance/__init__.py
+"""
+Module 109
+Feature Importance
+"""
+
+from .module import FeatureImportanceResearch
+
+__all__ = ["FeatureImportanceResearch"]

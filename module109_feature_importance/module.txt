@@ -1,0 +1,366 @@
+"""
+Module 109
+Feature Importance
+
+Evaluates which features contain information about future market behavior.
+
+Pipeline: load data → detect features → compute importance methods → 
+          bootstrap stability → combine scores → statistics → validation → report → export
+
+Dependencies:
+    - Module 100: Data ingestion/loading
+    - Module 102: Data preprocessing/cleaning
+    - Module 035: Feature engineering (returns, volatility, momentum)
+    - Module 037: Technical indicators (RSI, MACD, etc.)
+    - Module 108: Breakout probability targets
+"""
+
+from typing import Optional, Dict, Any, List
+import pandas as pd
+import numpy as np
+
+from atlas.core.base_research_module import BaseResearchModule
+from atlas.framework.registry import AtlasRegistry
+
+from .engine import FeatureImportanceEngine
+from .statistics import FeatureImportanceStatisticsEngine
+from .validator import run_validation
+from .report import FeatureImportanceReport
+from .target_adapter import attach_breakout_target
+
+
+class FeatureImportanceResearch(BaseResearchModule):
+    """
+    Main research module for feature importance analysis.
+    
+    This module analyzes which features contain predictive information
+    about future breakout events. It depends on upstream modules for:
+        - Data loading (100)
+        - Data preprocessing (102)
+        - Feature generation (035, 037)
+        - Target generation (108)
+    """
+    
+    MODULE_OUTPUT = "module109"
+    METADATA = {
+        **FeatureImportanceStatisticsEngine.METADATA,
+        "depends_on": ["100", "102", "035", "037", "108"],
+        "description": "Feature importance analysis for breakout prediction",
+        "upstream_features": [
+            "returns",
+            "volatility", 
+            "momentum",
+            "rsi",
+            "macd",
+            "bbands",
+            "state"
+        ],
+        "target_source": "108",
+        "methods": [
+            "mutual_information",
+            "permutation_importance",
+            "information_gain",
+            "f_score",
+            "chi_square"
+        ]
+    }
+    
+    def __init__(
+        self,
+        registry: Optional[AtlasRegistry] = None,
+        target_column: str = "future_breakout",
+        feature_columns: Optional[List[str]] = None,
+        target_horizon: int = 5,
+        n_permutations: int = 10,
+        n_bootstrap: int = 100,
+        n_folds: int = 5,
+        correlation_threshold: float = 0.95,
+        random_state: int = 42,
+        include_state: bool = False
+    ):
+        """
+        Initialize the feature importance module.
+        
+        Args:
+            registry: Optional Atlas registry for dependency resolution
+            target_column: Name of the target column (provided by Module 108)
+            feature_columns: List of feature columns to analyze (from Modules 035, 037)
+            target_horizon: Which Module 108 breakout horizon to use (e.g., 5 for breakout_5)
+            n_permutations: Number of permutations for permutation importance
+            n_bootstrap: Number of bootstrap samples for stability analysis
+            n_folds: Number of folds for cross-validated permutation importance
+            correlation_threshold: Threshold for removing highly correlated features
+            random_state: Random seed for reproducibility
+            include_state: Whether to include Module 103 state as a feature
+        """
+        if target_horizon <= 0:
+            raise ValueError("target_horizon must be a positive integer")
+        
+        super().__init__(
+            module_name="Feature Importance",
+            module_version=self.METADATA["version"],
+        )
+        
+        self.registry = registry or AtlasRegistry()
+        self.target_horizon = target_horizon
+        self.engine = FeatureImportanceEngine(
+            target_column=target_column,
+            feature_columns=feature_columns,
+            n_permutations=n_permutations,
+            n_bootstrap=n_bootstrap,
+            n_folds=n_folds,
+            correlation_threshold=correlation_threshold,
+            random_state=random_state,
+            include_state=include_state
+        )
+        self.stats_engine = FeatureImportanceStatisticsEngine()
+        self.result_data = None
+        self.statistics = None
+        self.ranking_report = None
+        self.stability_report = None
+    
+    def _register_pipeline_steps(self):
+        """Register pipeline steps for execution."""
+        self.pipeline_steps = [
+            ("feature_importance", self._compute_importance),
+            ("statistics", self._compute_statistics),
+            ("validate", self._validate),
+            ("export", self._export_results),
+        ]
+    
+    def _prepare_data(self) -> Dict[str, Any]:
+        """
+        Prepare data for analysis.
+        
+        This method handles the dependency injection from upstream modules:
+            1. Features from Modules 035 and 037 are expected to be in self.df
+            2. Targets from Module 108 are expected in self.feature_df
+            3. The target_adapter attaches the breakout target as future_breakout
+        
+        Returns:
+            Dict with prepared DataFrame
+        """
+        df = self.df.copy()
+        
+        # Attach breakout target from Module 108 if available
+        if self.feature_df is not None:
+            df = attach_breakout_target(
+                df=df,
+                breakout_targets=self.feature_df,
+                horizon=self.target_horizon,
+                target_column=self.engine.target_column,
+            )
+        
+        return {"df": df}
+    
+    def _compute_importance(self) -> Dict[str, Any]:
+        """
+        Step 1: Compute feature importance using all methods.
+        
+        This method:
+            1. Prepares data with target from Module 108
+            2. Detects features from Modules 035 and 037 (excluding breakout_*)
+            3. Computes all importance methods
+            4. Combines scores using weighted ranking
+            5. Computes bootstrap stability
+        """
+        self.logger.info("Step 1: Computing feature importance")
+        prepared = self._prepare_data()
+        self.result_data = self.engine.compute(df=prepared["df"])
+        
+        # Log key metrics
+        self.logger.metric("Total Features", str(self.result_data.statistics['total_features']))
+        self.logger.metric("Top Feature", self.result_data.statistics['top_feature'])
+        self.logger.metric("Top Importance", f"{self.result_data.statistics['top_importance']:.4f}")
+        self.logger.metric("Top Stability", f"{self.result_data.statistics['top_stability']:.1%}")
+        self.logger.metric("Method Agreement", f"{self.result_data.statistics['method_agreement']:.3f}")
+        self.logger.success("Feature importance computed")
+        
+        # Generate reports
+        self.ranking_report = FeatureImportanceReport.generate_ranking_report(
+            self.result_data.feature_importance
+        )
+        self.stability_report = FeatureImportanceReport.generate_stability_report(
+            self.result_data.stability_scores
+        )
+        
+        return {
+            "total_features": self.result_data.statistics['total_features'],
+            "top_feature": self.result_data.statistics['top_feature'],
+            "top_importance": self.result_data.statistics['top_importance'],
+            "top_stability": self.result_data.statistics['top_stability'],
+            "method_agreement": self.result_data.statistics['method_agreement'],
+        }
+    
+    def _compute_statistics(self) -> Dict[str, Any]:
+        """
+        Step 2: Compute statistics on the feature importance results.
+        
+        This includes:
+            - Feature rankings
+            - Importance entropy
+            - Method agreement
+            - Top features with stability scores
+        """
+        self.logger.info("Step 2: Computing statistics")
+        self.statistics = self.stats_engine.analyze(self.result_data)
+        self.logger.metric("Top 5 Features", ", ".join(self.statistics.top_5_features[:3]) + "...")
+        self.logger.metric("Importance Entropy", f"{self.statistics.importance_entropy:.3f} bits")
+        self.logger.success("Statistics computed")
+        return self.stats_engine.summary_dict(self.statistics)
+    
+    def _validate(self) -> Dict[str, Any]:
+        """
+        Step 3: Validate results.
+        
+        Checks:
+            - No feature leakage from breakout_* columns
+            - All importance scores are valid
+            - Method agreement is reasonable
+            - Bootstrap stability is computed
+        """
+        self.logger.info("Step 3: Validation")
+        passed = run_validation(self.result_data, self.statistics)
+        self.logger.success("Validation complete")
+        return {"validation_passed": passed}
+    
+    def _export_results(self) -> Dict[str, Any]:
+        """
+        Step 4: Export all results and artifacts.
+        
+        Artifacts include:
+            - Feature importance scores (DataFrame)
+            - Method scores (DataFrame)
+            - Feature ranking with stability (DataFrame)
+            - Stability scores (DataFrame)
+            - Reports (HTML/Text)
+            - Detailed results (JSON)
+        """
+        self.logger.info("Step 4: Export")
+        
+        # Core artifacts
+        self.result.artifacts["feature_importance"] = self.result_data.feature_importance
+        self.result.artifacts["method_scores"] = self.result_data.method_scores
+        self.result.artifacts["feature_ranking"] = self.result_data.feature_ranking
+        self.result.artifacts["stability_scores"] = self.result_data.stability_scores
+        
+        # Reports
+        main_report = FeatureImportanceReport.generate(
+            self.statistics,
+            metadata=self.METADATA,
+            dataset_name=self.result.dataset_identifier,
+        )
+        self.result.artifacts["feature_importance_report"] = main_report
+        self.result.artifacts["ranking_report"] = self.ranking_report
+        self.result.artifacts["stability_report"] = self.stability_report
+        
+        # Detailed results for downstream modules
+        self.result.artifacts["detailed_results"] = {
+            "feature_importance": self.result_data.feature_importance.to_dict(orient="records"),
+            "method_scores": self.result_data.method_scores.to_dict(orient="records"),
+            "feature_ranking": self.result_data.feature_ranking.to_dict(orient="records"),
+            "stability_scores": self.result_data.stability_scores.to_dict(),
+            "statistics": self.result_data.statistics,
+            "top_features": self.result_data.top_features,
+            "method_agreement": self.result_data.method_agreement,
+            "top_feature_stability": self.result_data.top_feature_stability
+        }
+        
+        self.logger.metric("Artifacts", str(len(self.result.artifacts)))
+        self.logger.success("Export complete")
+        
+        return {
+            "export_status": "complete",
+            "artifact_count": len(self.result.artifacts),
+        }
+    
+    def compute(self) -> Dict[str, Any]:
+        """
+        Execute the full feature importance pipeline.
+        
+        Returns:
+            Dictionary with pipeline results and artifacts
+        """
+        self.logger.section("Feature Importance Pipeline")
+        self.logger.info(f"Target horizon: {self.target_horizon}")
+        self.logger.info(f"Dependencies: {self.METADATA['depends_on']}")
+        
+        results = self.execute_pipeline()
+        self.result.status = "completed"
+        
+        self.logger.success("Module 109 complete")
+        self.logger.info(f"Total features analyzed: {self.result_data.statistics['total_features']}")
+        self.logger.info(f"Top feature: {self.result_data.statistics['top_feature']}")
+        
+        return results
+    
+    def run(self, filepath: str, output_dir=None):
+        """
+        Run the module on a file.
+        
+        Args:
+            filepath: Path to input data file
+            output_dir: Optional output directory
+        """
+        return super().run(filepath, output_dir)
+    
+    def run_dataframe(self, df, dataset_id="in_memory", output_dir=None):
+        """
+        Run the module on a DataFrame.
+        
+        Args:
+            df: Input DataFrame with features from Modules 035, 037
+            dataset_id: Identifier for the dataset
+            output_dir: Optional output directory
+            
+        Returns:
+            Result object with artifacts
+        """
+        return super().run_dataframe(df, dataset_id, output_dir)
+    
+    def get_dependency_summary(self) -> Dict[str, Any]:
+        """
+        Get a summary of module dependencies.
+        
+        Returns:
+            Dictionary with dependency information
+        """
+        return {
+            "module": "109",
+            "name": "Feature Importance",
+            "depends_on": self.METADATA["depends_on"],
+            "upstream_features": self.METADATA.get("upstream_features", []),
+            "target_source": self.METADATA.get("target_source", "108"),
+            "methods": self.METADATA.get("methods", [])
+        }
+
+
+# Convenience function for quick feature importance analysis
+def quick_importance_analysis(
+    df: pd.DataFrame,
+    target_column: str = "future_breakout",
+    target_horizon: int = 5,
+    include_state: bool = False,
+    **kwargs
+) -> FeatureImportanceResearch:
+    """
+    Quick convenience function for running feature importance analysis.
+    
+    Args:
+        df: DataFrame with features and target
+        target_column: Name of target column
+        target_horizon: Horizon for breakout target
+        include_state: Whether to include state as a feature
+        **kwargs: Additional arguments for FeatureImportanceResearch
+        
+    Returns:
+        FeatureImportanceResearch instance with results
+    """
+    module = FeatureImportanceResearch(
+        target_column=target_column,
+        target_horizon=target_horizon,
+        include_state=include_state,
+        **kwargs
+    )
+    module.run_dataframe(df, dataset_id="quick_analysis")
+    return module

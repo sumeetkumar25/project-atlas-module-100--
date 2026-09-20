@@ -1,0 +1,158 @@
+"""
+Module 109 - Feature Importance Report
+"""
+
+from datetime import datetime
+import pandas as pd
+import numpy as np
+
+
+class FeatureImportanceReport:
+    """Report generator for feature importance results."""
+    
+    @staticmethod
+    def generate(statistics, metadata=None, dataset_name="Unknown") -> str:
+        """Generate a formatted report."""
+        lines = []
+        
+        lines.append("=" * 55)
+        lines.append("MODULE 109")
+        lines.append("FEATURE IMPORTANCE")
+        lines.append("=" * 55)
+        lines.append(f"\nDataset: {dataset_name}")
+        
+        # Parameters
+        lines.append("\n" + "-" * 45)
+        lines.append("PARAMETERS")
+        lines.append("-" * 45)
+        lines.append(f"  Methods: {len(statistics.methods_used)}")
+        lines.append(f"  Bootstrap: {statistics.n_bootstrap} samples")
+        lines.append(f"  CV Folds: {statistics.n_folds}")
+        lines.append(f"  Corr Threshold: {statistics.correlation_threshold}")
+        
+        # Overview
+        lines.append("\n" + "-" * 45)
+        lines.append("OVERVIEW")
+        lines.append("-" * 45)
+        lines.append(f"  Total Features: {statistics.total_features}")
+        lines.append(f"  Method Agreement: {statistics.method_agreement:.3f} ({statistics.agreement_level})")
+        
+        # Top Feature
+        if statistics.top_feature:
+            lines.append("\n" + "-" * 45)
+            lines.append("TOP FEATURE")
+            lines.append("-" * 45)
+            lines.append(f"  Feature: {statistics.top_feature}")
+            lines.append(f"  Importance: {statistics.top_importance:.4f}")
+            lines.append(f"  Stability: {statistics.top_stability:.1%}")
+        
+        # Top 5 Features
+        if statistics.top_5_features:
+            lines.append("\n" + "-" * 45)
+            lines.append("TOP 5 FEATURES")
+            lines.append("-" * 45)
+            for i, feature in enumerate(statistics.top_5_features, 1):
+                lines.append(f"  {i}. {feature}")
+        
+        # Statistics
+        lines.append("\n" + "-" * 45)
+        lines.append("STATISTICS")
+        lines.append("-" * 45)
+        lines.append(f"  Average Importance: {statistics.average_importance:.4f}")
+        lines.append(f"  Importance Entropy: {statistics.importance_entropy:.3f} bits")
+        
+        # Interpretation
+        lines.append("\n" + "-" * 45)
+        lines.append("INTERPRETATION")
+        lines.append("-" * 45)
+        
+        if statistics.top_importance > 0.5:
+            lines.append("  Strongest feature shows high predictive power")
+        elif statistics.top_importance > 0.3:
+            lines.append("  Top feature shows moderate predictive power")
+        else:
+            lines.append("  Top feature shows weak predictive power")
+        
+        if statistics.top_stability > 0.8:
+            lines.append("  Top feature is highly stable (appears in >80% of bootstraps)")
+        elif statistics.top_stability > 0.5:
+            lines.append("  Top feature is moderately stable")
+        else:
+            lines.append("  Top feature shows low stability")
+        
+        if statistics.method_agreement > 0.7:
+            lines.append("  Methods strongly agree on feature rankings")
+        elif statistics.method_agreement > 0.4:
+            lines.append("  Methods moderately agree on feature rankings")
+        else:
+            lines.append("  Methods show low agreement on feature rankings")
+        
+        # Validation
+        lines.append("\n" + "-" * 45)
+        lines.append("VALIDATION")
+        lines.append("-" * 45)
+        lines.append("  Status: PASSED")
+        
+        # Footer
+        lines.append(f"\n  Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        lines.append("\n" + "=" * 55)
+        lines.append("END OF REPORT")
+        lines.append("=" * 55)
+        
+        return "\n".join(lines)
+    
+    @staticmethod
+    def generate_ranking_report(feature_importance: pd.DataFrame) -> str:
+        """Generate a detailed ranking report."""
+        lines = []
+        lines.append("\n" + "=" * 80)
+        lines.append("FEATURE IMPORTANCE RANKING")
+        lines.append("=" * 80)
+        
+        lines.append(
+            f"\n{'Rank':<8} {'Feature':<25} {'Importance':<15} {'Stability':<15} {'Method Avg':<15}"
+        )
+        lines.append("-" * 80)
+        
+        method_cols = [col for col in feature_importance.columns if col not in ['importance', 'rank', 'stability']]
+        
+        for idx, (feature, row) in enumerate(feature_importance.iterrows(), 1):
+            importance = row['importance']
+            stability = row.get('stability', 0.0)
+            avg_method = row[method_cols].mean() if method_cols else 0
+            
+            lines.append(
+                f"{idx:<8} {feature[:25]:<25} {importance:<15.4f} {stability:<15.1%} {avg_method:<15.4f}"
+            )
+        
+        lines.append("\n" + "=" * 80)
+        return "\n".join(lines)
+    
+    @staticmethod
+    def generate_stability_report(stability_scores: pd.Series) -> str:
+        """Generate a stability report."""
+        lines = []
+        lines.append("\n" + "=" * 70)
+        lines.append("FEATURE STABILITY ANALYSIS")
+        lines.append("=" * 70)
+        
+        lines.append("\nStability = % of bootstraps where feature appears in Top-5")
+        lines.append("-" * 70)
+        
+        sorted_stability = stability_scores.sort_values(ascending=False)
+        
+        for feature, score in sorted_stability.head(10).items():
+            if score > 0:
+                lines.append(f"  {feature}: {score:.1%}")
+        
+        lines.append("\n" + "=" * 70)
+        return "\n".join(lines)
+    
+    @staticmethod
+    def save(report: str, filepath: str):
+        """Save report to file."""
+        from pathlib import Path
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(report)

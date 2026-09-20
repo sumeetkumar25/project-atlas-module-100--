@@ -1,0 +1,342 @@
+"""
+Module 110
+Feature Interaction
+
+Measures interaction effects between feature pairs.
+
+Pipeline: load data → generate pairs → compute interaction methods → 
+          combine scores → statistics → validation → report → export
+"""
+
+from typing import Optional, Dict, Any, List
+import pandas as pd
+
+from atlas.core.base_research_module import BaseResearchModule
+from atlas.framework.registry import AtlasRegistry
+
+from .engine import FeatureInteractionEngine
+from .statistics import FeatureInteractionStatisticsEngine
+from .validator import run_validation
+from .report import FeatureInteractionReport
+
+from atlas.modules.module109_feature_importance.target_adapter import (
+    attach_breakout_target
+)
+
+
+class FeatureInteractionResearch(BaseResearchModule):
+    """Main research module for feature interaction analysis."""
+    
+    MODULE_OUTPUT = "module110"
+    
+    METADATA = {
+        **FeatureInteractionStatisticsEngine.METADATA,
+        
+        "module": 110,
+        "name": "Feature Interaction",
+        "version": "2.0.0",
+        
+        "depends_on": [
+            "100",
+            "102",
+            "035",
+            "037",
+            "108",
+        ],
+        
+        "description": (
+            "Research-grade analysis of pairwise feature interactions "
+            "for future breakout classification."
+        ),
+        
+        "upstream_features": [
+            "returns",
+            "volatility",
+            "momentum",
+            "rsi",
+            "macd",
+            "bbands",
+        ],
+        
+        "target_source": "108",
+        
+        "target_type": "classification",
+        
+        "target_convention": {
+            "+1": "UP breakout",
+            "0": "NO breakout",
+            "-1": "DOWN breakout",
+        },
+        
+        "methods": [
+            "mutual_information",
+            "interaction_permutation",
+            "anova_interaction",
+            "gb_interaction",
+        ],
+    }
+    
+    def __init__(
+        self,
+        registry: Optional[AtlasRegistry] = None,
+        target_column: str = "future_breakout",
+        feature_columns: Optional[List[str]] = None,
+        target_horizon: int = 5,
+        n_bootstrap: int = 50,
+        n_folds: int = 5,
+        random_state: int = 42
+    ):
+        """
+        Initialize the feature interaction module.
+        
+        Args:
+            registry: Optional Atlas registry
+            target_column: Name of the target column
+            feature_columns: List of feature columns to analyze
+            target_horizon: Lookahead horizon for breakout target
+            n_bootstrap: Number of bootstrap samples for stability
+            n_folds: Number of cross-validation folds
+            random_state: Random seed for reproducibility
+        """
+        super().__init__(
+            module_name="Feature Interaction",
+            module_version=self.METADATA["version"],
+        )
+        
+        # Validate parameters
+        if target_horizon <= 0:
+            raise ValueError("target_horizon must be a positive integer")
+        
+        if n_bootstrap < 0:
+            raise ValueError("n_bootstrap cannot be negative")
+        
+        if n_folds < 2:
+            raise ValueError("n_folds must be at least 2")
+        
+        self.registry = registry or AtlasRegistry()
+        self.target_horizon = target_horizon
+        self.n_folds = n_folds
+        
+        self.engine = FeatureInteractionEngine(
+            target_column=target_column,
+            feature_columns=feature_columns,
+            n_bootstrap=n_bootstrap,
+            n_folds=n_folds,
+            random_state=random_state
+        )
+        self.stats_engine = FeatureInteractionStatisticsEngine()
+        self.result_data = None
+        self.statistics = None
+        self.matrix_report = None
+    
+    def _register_pipeline_steps(self):
+        """Register pipeline steps."""
+        self.pipeline_steps = [
+            ("feature_interaction", self._compute_interaction),
+            ("statistics", self._compute_statistics),
+            ("validate", self._validate),
+            ("export", self._export_results),
+        ]
+    
+    def _prepare_data(self) -> Dict[str, Any]:
+        """
+        Prepare Module 110 input.
+
+        Features come from Modules 035/037 and the future breakout
+        target comes from Module 108.
+
+        Module 108 provides:
+            breakout_{target_horizon}
+
+        Module 110 consumes:
+            future_breakout
+        """
+
+        df = self.df.copy()
+
+        # ----------------------------------------------------------
+        # Attach Module 108 breakout target when available.
+        # ----------------------------------------------------------
+        if self.feature_df is not None:
+            df = attach_breakout_target(
+                df=df,
+                breakout_targets=self.feature_df,
+                horizon=self.target_horizon,
+                target_column=self.engine.target_column,
+            )
+
+        # ----------------------------------------------------------
+        # Defensive check.
+        # ----------------------------------------------------------
+        if self.engine.target_column not in df.columns:
+            raise ValueError(
+                f"Module 110 requires target column "
+                f"'{self.engine.target_column}'. "
+                f"Module 108 target was not attached."
+            )
+
+        return {"df": df}
+    
+    def _compute_interaction(self) -> Dict[str, Any]:
+        """Step 1: Compute feature interactions."""
+        self.logger.info("Step 1: Computing feature interactions")
+        
+        prepared = self._prepare_data()
+        
+        self.result_data = self.engine.compute(
+            df=prepared["df"]
+        )
+        
+        self.logger.metric(
+            "Total Pairs",
+            str(self.result_data.statistics['total_pairs'])
+        )
+        self.logger.metric(
+            "Top Pair",
+            self.result_data.statistics['top_pair']
+        )
+        self.logger.metric(
+            "Top Score",
+            f"{self.result_data.statistics['top_score']:.4f}"
+        )
+        self.logger.metric(
+            "Top Stability",
+            f"{self.result_data.statistics['top_stability']:.1%}"
+        )
+        self.logger.metric(
+            "Method Agreement",
+            f"{self.result_data.statistics['method_agreement']:.3f}"
+        )
+        self.logger.metric(
+            "Bootstrap Samples",
+            str(self.result_data.statistics['n_bootstrap'])
+        )
+        self.logger.metric(
+            "CV Folds",
+            str(self.result_data.statistics['n_folds'])
+        )
+        self.logger.success("Feature interactions computed")
+        
+        # Generate matrix report
+        self.matrix_report = FeatureInteractionReport.generate_matrix_report(
+            self.result_data.interaction_matrix
+        )
+        
+        return {
+            "total_pairs": self.result_data.statistics['total_pairs'],
+            "top_pair": self.result_data.statistics['top_pair'],
+            "top_score": self.result_data.statistics['top_score'],
+            "top_stability": self.result_data.statistics['top_stability'],
+            "method_agreement": self.result_data.statistics['method_agreement'],
+            "n_bootstrap": self.result_data.statistics['n_bootstrap'],
+            "n_folds": self.result_data.statistics['n_folds'],
+        }
+    
+    def _compute_statistics(self) -> Dict[str, Any]:
+        """Step 2: Compute statistics."""
+        self.logger.info("Step 2: Computing statistics")
+        self.statistics = self.stats_engine.analyze(self.result_data)
+        
+        self.logger.metric(
+            "Top 10 Pairs",
+            ", ".join(self.statistics.top_10_pairs[:3]) + "..."
+        )
+        self.logger.metric(
+            "Interaction Entropy",
+            f"{self.statistics.interaction_entropy:.3f} bits"
+        )
+        self.logger.metric(
+            "Agreement Level",
+            self.statistics.agreement_level
+        )
+        self.logger.success("Statistics computed")
+        
+        return self.stats_engine.summary_dict(self.statistics)
+    
+    def _validate(self) -> Dict[str, Any]:
+        """Step 3: Validation."""
+        self.logger.info("Step 3: Validation")
+        passed = run_validation(self.result_data, self.statistics)
+        self.logger.success("Validation complete")
+        return {"validation_passed": passed}
+    
+    def _export_results(self) -> Dict[str, Any]:
+        """
+        Step 4: Export.
+        
+        BaseResearchModule handles all filesystem exporting.
+        We only register artifacts here.
+        """
+        self.logger.info("Step 4: Export")
+        
+        # Register DataFrames as artifacts
+        self.result.artifacts["interaction_scores"] = self.result_data.interaction_scores
+        self.result.artifacts["interaction_matrix"] = self.result_data.interaction_matrix
+        self.result.artifacts["stability_scores"] = self.result_data.stability_scores
+        
+        # Generate and register reports
+        main_report = FeatureInteractionReport.generate(
+            self.statistics,
+            metadata=self.METADATA,
+            dataset_name=self.result.dataset_identifier,
+        )
+        self.result.artifacts["feature_interaction_report"] = main_report
+        self.result.artifacts["matrix_report"] = self.matrix_report
+        
+        # Store statistics as artifact
+        stats_df = pd.DataFrame([self.result_data.statistics])
+        self.result.artifacts["statistics"] = stats_df
+        
+        # Store top interactions as DataFrame with stability scores
+        if self.result_data.top_interactions:
+            top_df = pd.DataFrame({
+                "pair": self.result_data.top_interactions,
+                "score": (
+                    self.result_data.interaction_scores
+                    .loc[
+                        self.result_data.top_interactions,
+                        "interaction_score"
+                    ]
+                    .values
+                    if self.result_data.top_interactions
+                    else []
+                ),
+                "stability": (
+                    self.result_data.stability_scores
+                    .reindex(
+                        self.result_data.top_interactions
+                    )
+                    .values
+                    if self.result_data.top_interactions
+                    else []
+                ),
+            })
+        else:
+            top_df = pd.DataFrame(columns=["pair", "score", "stability"])
+        
+        self.result.artifacts["top_interactions"] = top_df
+        
+        self.logger.metric("Artifacts", str(len(self.result.artifacts)))
+        self.logger.success("Export complete")
+        
+        return {
+            "export_status": "complete",
+            "artifact_count": len(self.result.artifacts),
+            "top_stability": self.result_data.statistics.get("top_stability", 0.0),
+        }
+    
+    def compute(self) -> Dict[str, Any]:
+        """Run the full computation pipeline."""
+        self.logger.section("Feature Interaction Pipeline")
+        results = self.execute_pipeline()
+        self.result.status = "completed"
+        self.logger.success("Module 110 complete")
+        return results
+    
+    def run(self, filepath: str, output_dir=None):
+        """Run module on file."""
+        return super().run(filepath, output_dir)
+    
+    def run_dataframe(self, df, dataset_id="in_memory", output_dir=None):
+        """Run module on DataFrame."""
+        return super().run_dataframe(df, dataset_id, output_dir)

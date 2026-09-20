@@ -1,0 +1,50 @@
+# atlas/modules/module110_feature_interaction/exporter.py
+"""
+Module 110 - Feature Interaction Exporter
+"""
+
+import pandas as pd
+from pathlib import Path
+
+
+class FeatureInteractionExporter:
+    """Exporter for feature interaction results."""
+    
+    @staticmethod
+    def export_scores(scores: pd.DataFrame, filepath: str):
+        """Export interaction scores to CSV."""
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        scores.to_csv(path)
+    
+    @staticmethod
+    def export_matrix(matrix: pd.DataFrame, filepath: str):
+        """Export interaction matrix to CSV."""
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        matrix.to_csv(path)
+    
+    @staticmethod
+    def export_statistics(stats: dict, filepath: str):
+        """Export statistics to CSV."""
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        df = pd.DataFrame([stats])
+        df.to_csv(path, index=False)
+    
+    @staticmethod
+    def export_detailed_results(result, filepath: str):
+        """Export detailed results to JSON."""
+        import json
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        
+        detailed = {
+            'top_interactions': result.top_interactions,
+            'statistics': result.statistics,
+            'interaction_scores': result.interaction_scores.to_dict(orient='records'),
+            'interaction_matrix': result.interaction_matrix.to_dict()
+        }
+        
+        with open(path, 'w') as f:
+            json.dump(detailed, f, indent=2, default=str)

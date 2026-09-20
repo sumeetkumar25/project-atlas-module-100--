@@ -1,0 +1,1240 @@
+"""
+Module 110 - Feature Interaction Engine
+
+Measures interaction effects between pairs of features.
+
+Methods:
+  1. Mutual Information Interaction: Information shared between feature pair and target
+  2. Interaction Permutation: Out-of-sample sensitivity to joint feature permutation
+  3. Two-way ANOVA Screening: Approximate interaction effect via variance decomposition
+  4. Gradient Boosting Interaction: Out-of-sample improvement from engineered pair features
+
+Final Interaction Score: Normalized and combined using weighted average rank.
+"""
+
+import numpy as np
+import pandas as pd
+from dataclasses import dataclass
+from typing import Optional, Dict, Any, List, Tuple
+from collections import defaultdict
+from itertools import combinations
+
+from scipy.stats import f_oneway
+from sklearn.ensemble import (
+    RandomForestClassifier,
+    GradientBoostingClassifier,
+)
+from sklearn.feature_selection import mutual_info_classif
+from sklearn.model_selection import StratifiedKFold
+from sklearn.metrics import accuracy_score
+
+import warnings
+warnings.filterwarnings('ignore')
+
+
+@dataclass
+class FeatureInteractionResult:
+    """Results from feature interaction analysis."""
+    interaction_scores: pd.DataFrame
+    interaction_matrix: pd.DataFrame
+    top_interactions: List[str]
+    stability_scores: pd.Series
+    statistics: Dict[str, Any]
+
+
+class FeatureInteractionEngine:
+    """Core engine for feature interaction analysis."""
+
+    DEFAULT_WEIGHTS = {
+        "mutual_information": 0.30,
+        "interaction_permutation": 0.30,
+        "anova_interaction": 0.15,
+        "gb_interaction": 0.25,
+    }
+
+    def __init__(
+        self,
+        target_column: str = "future_breakout",
+        feature_columns: Optional[List[str]] = None,
+        n_bootstrap: int = 50,
+        n_folds: int = 5,
+        random_state: int = 42,
+        weights: Optional[Dict[str, float]] = None
+    ):
+        self.target_column = target_column
+        self.feature_columns = feature_columns
+        self.n_bootstrap = n_bootstrap
+        self.n_folds = n_folds
+        self.random_state = random_state
+        self.weights = weights or self.DEFAULT_WEIGHTS.copy()
+        self._feature_detected = False
+
+    def pair_key(self, pair: Tuple[str, str]) -> str:
+        """
+        Stable human-readable key for a feature pair.
+
+        Uses a delimiter that is unlikely to occur in Atlas feature names.
+        """
+        return "||".join(pair)
+
+    def detect_features(self, df: pd.DataFrame) -> List[str]:
+        """
+        Automatically detect predictor features.
+
+        Excludes:
+        - target column
+        - OHLCV columns
+        - timestamp/date/index columns
+        - private/internal columns
+        - Module 108 future-derived breakout_* target columns
+        """
+
+        exclude_cols = [
+            self.target_column,
+            'timestamp',
+            'date',
+            'time',
+            'index',
+            'open',
+            'high',
+            'low',
+            'close',
+            'volume'
+        ]
+
+        # Module 108 future-derived target columns must never
+        # become predictor variables in Module 110.
+        future_target_columns = [
+            col
+            for col in df.columns
+            if isinstance(col, str) and col.startswith("breakout_")
+        ]
+
+        exclude_cols.extend(future_target_columns)
+
+        features = [
+            col
+            for col in df.columns
+            if col not in exclude_cols
+            and not str(col).startswith("_")
+            and (
+                pd.api.types.is_integer_dtype(df[col])
+                or pd.api.types.is_float_dtype(df[col])
+            )
+            and df[col].nunique() > 1
+        ]
+
+        return features
+
+    def prepare_data(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, np.ndarray, List[str]]:
+        """
+        Prepare feature matrix and target for interaction analysis.
+
+        Protects against:
+        - Module 108 future-target leakage
+        - missing target
+        - invalid breakout target values
+        - infinite feature values
+        - unusable feature columns
+        """
+
+        # --------------------------------------------------------------
+        # 1. Determine candidate feature columns
+        # --------------------------------------------------------------
+
+        if self.feature_columns is None:
+            feature_columns = self.detect_features(df)
+        else:
+            feature_columns = list(self.feature_columns)
+
+        self._feature_detected = True
+
+        # --------------------------------------------------------------
+        # 2. Protect against Module 108 future-target leakage
+        # --------------------------------------------------------------
+
+        future_target_columns = {
+            col
+            for col in df.columns
+            if isinstance(col, str) and col.startswith("breakout_")
+        }
+
+        leaked_features = [
+            col
+            for col in feature_columns
+            if col in future_target_columns
+        ]
+
+        if leaked_features:
+            raise ValueError(
+                "Future-derived Module 108 target columns cannot be used "
+                f"as Module 110 predictors: {leaked_features}"
+            )
+
+        # --------------------------------------------------------------
+        # 3. Verify target exists
+        # --------------------------------------------------------------
+
+        if self.target_column not in df.columns:
+            raise ValueError(
+                f"Target column '{self.target_column}' not found"
+            )
+
+        # --------------------------------------------------------------
+        # 4. Validate target
+        #
+        # Module 108 convention:
+        #     +1 = UP breakout
+        #      0 = NO breakout
+        #     -1 = DOWN breakout
+        # --------------------------------------------------------------
+
+        target = df[self.target_column]
+
+        valid_target_mask = (
+            target.notna()
+            & target.isin([-1, 0, 1])
+        )
+
+        if valid_target_mask.sum() == 0:
+            raise ValueError(
+                f"No valid observations found for target "
+                f"'{self.target_column}'"
+            )
+
+        # --------------------------------------------------------------
+        # 5. Build X and y using only valid target rows
+        # --------------------------------------------------------------
+
+        X = df.loc[
+            valid_target_mask,
+            feature_columns
+        ].copy()
+
+        y = target.loc[
+            valid_target_mask
+        ].to_numpy()
+
+        # --------------------------------------------------------------
+        # 6. Handle invalid numeric values
+        # --------------------------------------------------------------
+
+        X = X.replace(
+            [np.inf, -np.inf],
+            np.nan
+        )
+
+        if X.isna().any().any():
+            X = X.fillna(X.mean())
+
+        # --------------------------------------------------------------
+        # 7. Remove unusable feature columns
+        # --------------------------------------------------------------
+
+        valid_columns = [
+            col
+            for col in X.columns
+            if X[col].notna().any()
+            and X[col].nunique(dropna=True) > 1
+        ]
+
+        X = X[valid_columns]
+
+        if X.empty:
+            raise ValueError(
+                "No valid feature columns remain after preprocessing"
+            )
+
+        # --------------------------------------------------------------
+        # 8. Final defensive leakage check
+        # --------------------------------------------------------------
+
+        remaining_leaks = [
+            col
+            for col in X.columns
+            if isinstance(col, str)
+            and col.startswith("breakout_")
+        ]
+
+        if remaining_leaks:
+            raise ValueError(
+                "Future-derived Module 108 target columns remain in "
+                f"Module 110 feature matrix: {remaining_leaks}"
+            )
+
+        return X, y, valid_columns
+
+    def generate_pairs(self, features: List[str]) -> List[Tuple[str, str]]:
+        return list(combinations(features, 2))
+
+    def compute_mutual_information_interaction(
+        self,
+        X: pd.DataFrame,
+        y: np.ndarray,
+        pairs: List[Tuple[str, str]]
+    ) -> pd.Series:
+        """
+        Estimate pairwise mutual-information interaction.
+
+        For each pair (f1, f2), estimate:
+
+            I([f1, f2]; Y)
+
+        and compare it with:
+
+            I(f1; Y) + I(f2; Y)
+
+        Interaction information is therefore:
+
+            I([f1, f2]; Y)
+            - I(f1; Y)
+            - I(f2; Y)
+
+        The joint feature is constructed by discretizing both continuous
+        predictors into quantile bins and encoding the resulting pair
+        into a single discrete variable.
+
+        This is necessary because:
+
+            mutual_info_classif(X[[f1, f2]], y)
+
+        returns one MI estimate per feature. Summing those values does
+        NOT estimate the mutual information of the joint feature vector.
+
+        Positive values indicate information available from the pair
+        beyond the individual feature-target relationships.
+        """
+
+        def discretize_feature(
+            series: pd.Series,
+            n_bins: int = 10
+        ) -> np.ndarray:
+            """
+            Convert a continuous feature into quantile bins.
+
+            Rank-based fallback is used when qcut cannot create enough
+            unique bins.
+            """
+
+            values = pd.to_numeric(
+                series,
+                errors="coerce"
+            ).to_numpy(dtype=float)
+
+            valid = np.isfinite(values)
+
+            if not valid.any():
+                return np.zeros(
+                    len(values),
+                    dtype=np.int64
+                )
+
+            result = np.zeros(
+                len(values),
+                dtype=np.int64
+            )
+
+            valid_values = values[valid]
+
+            try:
+                bins = pd.qcut(
+                    valid_values,
+                    q=min(
+                        n_bins,
+                        max(
+                            2,
+                            np.unique(valid_values).size
+                        )
+                    ),
+                    labels=False,
+                    duplicates="drop"
+                )
+
+                bins = np.asarray(
+                    bins,
+                    dtype=float
+                )
+
+                # qcut should not normally produce NaN for valid values,
+                # but protect against it.
+                bins = np.nan_to_num(
+                    bins,
+                    nan=0.0
+                ).astype(np.int64)
+
+            except (ValueError, TypeError):
+                # Deterministic rank-based fallback.
+                ranks = pd.Series(
+                    valid_values
+                ).rank(
+                    method="average"
+                )
+
+                bins = pd.qcut(
+                    ranks,
+                    q=min(
+                        n_bins,
+                        max(
+                            2,
+                            ranks.nunique()
+                        )
+                    ),
+                    labels=False,
+                    duplicates="drop"
+                )
+
+                bins = np.asarray(
+                    bins,
+                    dtype=float
+                )
+
+                bins = np.nan_to_num(
+                    bins,
+                    nan=0.0
+                ).astype(np.int64)
+
+            result[valid] = bins
+
+            return result
+
+        # --------------------------------------------------------------
+        # Individual feature-target mutual information
+        # --------------------------------------------------------------
+
+        mi_single: Dict[str, float] = {}
+
+        for col in X.columns:
+
+            values = X[[col]].copy()
+
+            mi = mutual_info_classif(
+                values,
+                y,
+                random_state=self.random_state
+            )[0]
+
+            mi_single[col] = max(
+                0.0,
+                float(mi)
+            )
+
+        # --------------------------------------------------------------
+        # Pairwise joint mutual information
+        # --------------------------------------------------------------
+
+        interaction_scores: Dict[str, float] = {}
+
+        for f1, f2 in pairs:
+
+            # ----------------------------------------------------------
+            # Discretize each feature independently.
+            # ----------------------------------------------------------
+
+            bins1 = discretize_feature(
+                X[f1],
+                n_bins=10
+            )
+
+            bins2 = discretize_feature(
+                X[f2],
+                n_bins=10
+            )
+
+            # ----------------------------------------------------------
+            # Encode the two-dimensional feature pair as ONE discrete
+            # variable.
+            #
+            # If:
+            #
+            #   bins1 ∈ [0, ..., n1-1]
+            #   bins2 ∈ [0, ..., n2-1]
+            #
+            # then each (bins1, bins2) combination gets a unique code.
+            # ----------------------------------------------------------
+
+            n_bins_2 = int(
+                bins2.max()
+            ) + 1
+
+            joint_code = (
+                bins1.astype(np.int64)
+                * n_bins_2
+                + bins2.astype(np.int64)
+            )
+
+            # ----------------------------------------------------------
+            # True joint MI:
+            #
+            #     I([f1,f2];Y)
+            #
+            # mutual_info_classif receives ONE discrete joint variable.
+            # ----------------------------------------------------------
+
+            joint_information = float(
+                mutual_info_classif(
+                    joint_code.reshape(-1, 1),
+                    y,
+                    discrete_features=True,
+                    random_state=self.random_state
+                )[0]
+            )
+
+            # ----------------------------------------------------------
+            # Interaction information.
+            # ----------------------------------------------------------
+
+            interaction = (
+                joint_information
+                - mi_single[f1]
+                - mi_single[f2]
+            )
+
+            # Small negative estimates are numerical/estimation noise.
+            interaction_scores[
+                self.pair_key((f1, f2))
+            ] = max(
+                0.0,
+                float(interaction)
+            )
+
+        return pd.Series(
+            interaction_scores,
+            dtype=float
+        )
+
+    def compute_interaction_permutation(
+        self,
+        X: pd.DataFrame,
+        y: np.ndarray,
+        pairs: List[Tuple[str, str]]
+    ) -> pd.Series:
+        """
+        Measure pair interaction by permutation of the two features together.
+
+        For each pair:
+            1. Train a classifier using all features.
+            2. Measure validation accuracy.
+            3. Jointly permute the two candidate features.
+            4. Measure the accuracy degradation.
+
+        This produces an out-of-sample interaction sensitivity estimate.
+        """
+
+        skf = StratifiedKFold(
+            n_splits=self.n_folds,
+            shuffle=True,
+            random_state=self.random_state
+        )
+
+        scores = defaultdict(list)
+
+        for fold_id, (train_idx, val_idx) in enumerate(skf.split(X, y)):
+
+            X_train = X.iloc[train_idx].copy()
+            X_val = X.iloc[val_idx].copy()
+
+            y_train = y[train_idx]
+            y_val = y[val_idx]
+
+            model = GradientBoostingClassifier(
+                n_estimators=100,
+                max_depth=3,
+                random_state=self.random_state
+            )
+
+            model.fit(X_train, y_train)
+
+            baseline = accuracy_score(
+                y_val,
+                model.predict(X_val)
+            )
+
+            for f1, f2 in pairs:
+
+                X_perm = X_val.copy()
+
+                rng = np.random.default_rng(
+                    self.random_state + fold_id
+                )
+
+                permutation = rng.permutation(len(X_perm))
+
+                X_perm[f1] = X_perm[f1].iloc[permutation].to_numpy()
+                X_perm[f2] = X_perm[f2].iloc[permutation].to_numpy()
+
+                perm_score = accuracy_score(
+                    y_val,
+                    model.predict(X_perm)
+                )
+
+                degradation = max(
+                    0.0,
+                    baseline - perm_score
+                )
+
+                scores[self.pair_key((f1, f2))].append(
+                    degradation
+                )
+
+        return pd.Series({
+            pair: float(np.mean(values))
+            for pair, values in scores.items()
+        })
+
+    def compute_two_way_anova(
+        self,
+        X: pd.DataFrame,
+        y: np.ndarray,
+        pairs: List[Tuple[str, str]]
+    ) -> pd.Series:
+        """
+        Approximate two-way ANOVA interaction effect.
+
+        Features are discretized into quantile bins. For each pair we
+        compare the observed cell means against an additive model:
+
+            Y ~ A + B
+
+        The remaining cell-level variation is treated as interaction
+        evidence.
+
+        This is a screening statistic, not a causal estimate.
+        """
+
+        def discretize(data: np.ndarray, n_bins: int = 5) -> np.ndarray:
+            result = pd.qcut(
+                data,
+                q=n_bins,
+                labels=False,
+                duplicates="drop"
+            )
+
+            return np.asarray(result)
+
+        interaction_scores = {}
+
+        for f1, f2 in pairs:
+
+            a = discretize(X[f1].to_numpy())
+            b = discretize(X[f2].to_numpy())
+
+            valid = (
+                pd.notna(a)
+                & pd.notna(b)
+            )
+
+            a = a[valid]
+            b = b[valid]
+            target = y[valid]
+
+            if len(target) < 20:
+                interaction_scores[self.pair_key((f1, f2))] = 0.0
+                continue
+
+            frame = pd.DataFrame({
+                "a": a,
+                "b": b,
+                "y": target
+            })
+
+            grand_mean = frame["y"].mean()
+
+            mean_a = frame.groupby("a")["y"].mean()
+            mean_b = frame.groupby("b")["y"].mean()
+
+            predicted_additive = (
+                frame["a"].map(mean_a)
+                + frame["b"].map(mean_b)
+                - grand_mean
+            )
+
+            interaction_residual = (
+                frame["y"].to_numpy()
+                - predicted_additive.to_numpy()
+            )
+
+            total_variance = np.var(
+                frame["y"].to_numpy()
+            )
+
+            if total_variance <= 1e-12:
+                score = 0.0
+            else:
+                score = (
+                    np.var(interaction_residual)
+                    / total_variance
+                )
+
+            interaction_scores[
+                self.pair_key((f1, f2))
+            ] = max(0.0, float(score))
+
+        return pd.Series(interaction_scores)
+
+    def compute_gb_interaction_importance(
+        self,
+        X: pd.DataFrame,
+        y: np.ndarray,
+        pairs: List[Tuple[str, str]]
+    ) -> pd.Series:
+        """
+        Estimate pairwise interaction importance using out-of-sample
+        improvement from explicitly engineered pair features.
+
+        The improvement is measured using cross-validation, never on
+        the training data.
+        """
+
+        scores = defaultdict(list)
+
+        skf = StratifiedKFold(
+            n_splits=self.n_folds,
+            shuffle=True,
+            random_state=self.random_state
+        )
+
+        for fold_id, (train_idx, val_idx) in enumerate(
+            skf.split(X, y)
+        ):
+
+            X_train = X.iloc[train_idx].copy()
+            X_val = X.iloc[val_idx].copy()
+
+            y_train = y[train_idx]
+            y_val = y[val_idx]
+
+            base_model = GradientBoostingClassifier(
+                n_estimators=100,
+                max_depth=2,
+                random_state=self.random_state
+            )
+
+            base_model.fit(
+                X_train,
+                y_train
+            )
+
+            base_score = accuracy_score(
+                y_val,
+                base_model.predict(X_val)
+            )
+
+            for f1, f2 in pairs:
+
+                pair_key = self.pair_key((f1, f2))
+
+                X_train_interact = X_train.copy()
+                X_val_interact = X_val.copy()
+
+                interaction_train = (
+                    X_train[f1] * X_train[f2]
+                )
+
+                interaction_val = (
+                    X_val[f1] * X_val[f2]
+                )
+
+                column_name = (
+                    f"interaction__{f1}__{f2}"
+                )
+
+                X_train_interact[column_name] = (
+                    interaction_train
+                )
+
+                X_val_interact[column_name] = (
+                    interaction_val
+                )
+
+                model = GradientBoostingClassifier(
+                    n_estimators=100,
+                    max_depth=2,
+                    random_state=self.random_state
+                )
+
+                model.fit(
+                    X_train_interact,
+                    y_train
+                )
+
+                interaction_score = accuracy_score(
+                    y_val,
+                    model.predict(X_val_interact)
+                )
+
+                improvement = max(
+                    0.0,
+                    interaction_score - base_score
+                )
+
+                scores[pair_key].append(
+                    improvement
+                )
+
+        return pd.Series({
+            pair: float(np.mean(values))
+            for pair, values in scores.items()
+        })
+
+    def compute_bootstrap_stability(
+        self,
+        X: pd.DataFrame,
+        y: np.ndarray,
+        pairs: List[Tuple[str, str]]
+    ) -> pd.Series:
+        """
+        Estimate bootstrap stability of feature-interaction rankings.
+
+        Bootstrap is intentionally performed on the interaction signal
+        itself rather than rerunning the full cross-validation pipeline.
+
+        Stability for a pair is:
+
+            number of bootstrap samples in which the pair appears
+            in the top-k interactions
+            /
+            number of successful bootstrap samples
+
+        This avoids nested:
+
+            bootstrap × CV × pair × model
+
+        computation.
+        """
+
+        if not pairs:
+            return pd.Series(dtype=float)
+
+        if self.n_bootstrap <= 0:
+            return pd.Series(
+                0.0,
+                index=[
+                    self.pair_key(pair)
+                    for pair in pairs
+                ]
+            )
+
+        counts = defaultdict(int)
+
+        successful = 0
+
+        top_k = min(
+            max(1, len(pairs) // 2),
+            10
+        )
+
+        n_samples = len(X)
+
+        # Use a fixed bootstrap sample size for stability estimation
+        bootstrap_size = min(
+            n_samples,
+            20000
+        )
+
+        for bootstrap_id in range(self.n_bootstrap):
+
+            rng = np.random.default_rng(
+                self.random_state + bootstrap_id
+            )
+
+            # ------------------------------------------------------
+            # Bootstrap resampling with fixed sample size
+            # ------------------------------------------------------
+            indices = rng.integers(
+                0,
+                n_samples,
+                size=bootstrap_size
+            )
+
+            X_boot = (
+                X.iloc[indices]
+                .reset_index(drop=True)
+            )
+
+            y_boot = y[indices]
+
+            try:
+
+                # --------------------------------------------------
+                # Use the lightweight interaction measurements.
+                #
+                # Do NOT call compute_gb_interaction_importance()
+                # here because that method performs CV.
+                # --------------------------------------------------
+
+                mi_scores = (
+                    self.compute_mutual_information_interaction(
+                        X_boot,
+                        y_boot,
+                        pairs
+                    )
+                )
+
+                anova_scores = (
+                    self.compute_two_way_anova(
+                        X_boot,
+                        y_boot,
+                        pairs
+                    )
+                )
+
+                # --------------------------------------------------
+                # Combine only lightweight bootstrap signals.
+                # --------------------------------------------------
+                bootstrap_scores = pd.DataFrame({
+                    "mi": mi_scores,
+                    "anova": anova_scores,
+                }).fillna(0.0)
+
+                # Normalize each method.
+                for column in bootstrap_scores.columns:
+
+                    maximum = bootstrap_scores[
+                        column
+                    ].max()
+
+                    if maximum > 0:
+                        bootstrap_scores[
+                            column
+                        ] = (
+                            bootstrap_scores[column]
+                            / maximum
+                        )
+                    else:
+                        bootstrap_scores[
+                            column
+                        ] = 0.0
+
+                bootstrap_scores[
+                    "score"
+                ] = (
+                    0.5
+                    * bootstrap_scores["mi"]
+                    +
+                    0.5
+                    * bootstrap_scores["anova"]
+                )
+
+                top_pairs = (
+                    bootstrap_scores[
+                        "score"
+                    ]
+                    .sort_values(
+                        ascending=False
+                    )
+                    .head(top_k)
+                    .index
+                )
+
+                for pair_key in top_pairs:
+                    counts[pair_key] += 1
+
+                successful += 1
+
+                # --------------------------------------------------
+                # Progress output
+                # --------------------------------------------------
+                if (
+                    bootstrap_id == 0
+                    or
+                    (bootstrap_id + 1) % 10 == 0
+                    or
+                    bootstrap_id == self.n_bootstrap - 1
+                ):
+                    print(
+                        f"  Bootstrap progress: "
+                        f"{bootstrap_id + 1}/"
+                        f"{self.n_bootstrap}"
+                    )
+
+            except Exception as exc:
+
+                print(
+                    f"  Bootstrap {bootstrap_id + 1} "
+                    f"failed: {exc}"
+                )
+
+                continue
+
+        if successful == 0:
+            raise RuntimeError(
+                "All Module 110 bootstrap iterations failed."
+            )
+
+        stability = pd.Series(
+            {
+                self.pair_key(pair): (
+                    counts[
+                        self.pair_key(pair)
+                    ]
+                    / successful
+                )
+                for pair in pairs
+            },
+            dtype=float
+        )
+
+        return stability.sort_values(
+            ascending=False
+        )
+
+    def _weighted_rank(self, df_scores: pd.DataFrame) -> pd.Series:
+        ranks = df_scores.rank(axis=0, ascending=False, method='first')
+        available_weights = {method: self.weights.get(method, 0.0) for method in ranks.columns}
+        if sum(available_weights.values()) == 0:
+            available_weights = {method: 1.0 for method in ranks.columns}
+        weight_sum = sum(available_weights.values())
+        weighted_rank = sum(ranks[col] * available_weights[col] for col in ranks.columns)
+        return weighted_rank / weight_sum
+
+    def normalize_scores(self, scores: pd.Series) -> pd.Series:
+        if scores.max() == scores.min():
+            return pd.Series(0.0, index=scores.index)
+        ranks = scores.rank(ascending=False)
+        max_rank = len(ranks)
+        normalized = 1 - (ranks - 1) / (max_rank - 1)
+        return normalized
+
+    def combine_scores(self, scores_dict: Dict[str, pd.Series]) -> pd.DataFrame:
+        normalized_scores = {}
+        for method, scores in scores_dict.items():
+            normalized_scores[method] = self.normalize_scores(scores)
+        df_scores = pd.DataFrame(normalized_scores)
+        avg_rank = self._weighted_rank(df_scores)
+        max_rank = len(avg_rank) + 1
+        importance_score = 1 - (avg_rank - 1) / (max_rank - 1)
+        df_scores['interaction_score'] = importance_score
+        df_scores = df_scores.sort_values('interaction_score', ascending=False)
+        return df_scores
+
+    def compute_method_agreement(self, scores_dict: Dict[str, pd.Series]) -> float:
+        if not scores_dict:
+            return 0.0
+        feature_names = list(scores_dict.values())[0].index.tolist()
+        n_features = len(feature_names)
+        k = len(scores_dict)
+        if n_features <= 1 or k <= 1:
+            return 1.0
+        rank_matrix = np.zeros((n_features, k))
+        for i, (method, scores) in enumerate(scores_dict.items()):
+            ranks = scores.rank(ascending=False, method='first').values
+            rank_matrix[:, i] = ranks
+        rank_sums = np.sum(rank_matrix, axis=1)
+        mean_rank_sum = np.mean(rank_sums)
+        ss = np.sum((rank_sums - mean_rank_sum) ** 2)
+        W = (12 * ss) / (k**2 * (n_features**3 - n_features))
+        return W
+
+    def _calculate_entropy(self, scores: np.ndarray) -> float:
+        """
+        Calculate entropy of interaction scores.
+        
+        Entropy measures the diversity of interaction strengths across
+        feature pairs. Higher entropy indicates more varied interactions.
+        
+        Args:
+            scores: Array of interaction scores
+            
+        Returns:
+            float: Entropy in bits
+        """
+        scores = np.asarray(scores, dtype=float)
+
+        total = scores.sum()
+
+        if total <= 0:
+            return 0.0
+
+        p = scores / (total + 1e-12)
+        p = p[p > 0]
+
+        return float(-np.sum(p * np.log2(p)))
+
+    def compute(self, df: pd.DataFrame) -> FeatureInteractionResult:
+
+        X, y, feature_names = self.prepare_data(df)
+
+        pairs = self.generate_pairs(feature_names)
+
+        if not pairs:
+            return FeatureInteractionResult(
+                interaction_scores=pd.DataFrame(),
+                interaction_matrix=pd.DataFrame(),
+                top_interactions=[],
+                stability_scores=pd.Series(dtype=float),
+                statistics={
+                    "total_pairs": 0,
+                    "top_pair": None,
+                    "top_score": 0.0,
+                }
+            )
+
+        print(
+            f"\n  Computing interactions for "
+            f"{len(pairs)} pairs..."
+        )
+
+        scores_dict = {}
+
+        print(
+            "  Computing Mutual Information Interaction..."
+        )
+
+        scores_dict["mutual_information"] = (
+            self.compute_mutual_information_interaction(
+                X,
+                y,
+                pairs
+            )
+        )
+
+        print(
+            "  Computing Interaction Permutation..."
+        )
+
+        scores_dict["interaction_permutation"] = (
+            self.compute_interaction_permutation(
+                X,
+                y,
+                pairs
+            )
+        )
+
+        print(
+            "  Computing Interaction ANOVA Screening..."
+        )
+
+        scores_dict["anova_interaction"] = (
+            self.compute_two_way_anova(
+                X,
+                y,
+                pairs
+            )
+        )
+
+        print(
+            "  Computing Gradient Boosting Interaction..."
+        )
+
+        scores_dict["gb_interaction"] = (
+            self.compute_gb_interaction_importance(
+                X,
+                y,
+                pairs
+            )
+        )
+
+        combined_scores = self.combine_scores(
+            scores_dict
+        )
+
+        method_agreement = self.compute_method_agreement(
+            scores_dict
+        )
+
+        print(
+            "  Computing Bootstrap Stability..."
+        )
+
+        stability_scores = self.compute_bootstrap_stability(
+            X,
+            y,
+            pairs
+        )
+
+        combined_scores["stability"] = (
+            combined_scores.index.map(
+                lambda pair: stability_scores.get(
+                    pair,
+                    0.0
+                )
+            )
+        )
+
+        interaction_entropy = self._calculate_entropy(
+            combined_scores[
+                "interaction_score"
+            ].values
+        )
+
+        if method_agreement >= 0.70:
+            agreement_level = "High"
+        elif method_agreement >= 0.40:
+            agreement_level = "Moderate"
+        else:
+            agreement_level = "Low"
+
+        top_interactions = (
+            combined_scores
+            .head(10)
+            .index
+            .tolist()
+        )
+
+        top_pair = (
+            combined_scores.index[0]
+            if not combined_scores.empty
+            else None
+        )
+
+        top_score = (
+            float(
+                combined_scores.iloc[0][
+                    "interaction_score"
+                ]
+            )
+            if not combined_scores.empty
+            else 0.0
+        )
+
+        interaction_matrix = pd.DataFrame(
+            0.0,
+            index=feature_names,
+            columns=feature_names
+        )
+
+        for pair_key in combined_scores.index:
+
+            f1, f2 = pair_key.split("||", 1)
+
+            score = combined_scores.loc[
+                pair_key,
+                "interaction_score"
+            ]
+
+            interaction_matrix.loc[
+                f1,
+                f2
+            ] = score
+
+            interaction_matrix.loc[
+                f2,
+                f1
+            ] = score
+
+        stats = {
+            "total_pairs": len(pairs),
+            "top_pair": top_pair,
+            "top_score": top_score,
+            "method_agreement": method_agreement,
+            "agreement_level": agreement_level,
+            "top_10_pairs": top_interactions,
+            "methods_used": list(scores_dict.keys()),
+            "n_features": len(feature_names),
+            "interaction_entropy": interaction_entropy,
+            "n_bootstrap": self.n_bootstrap,
+            "n_folds": self.n_folds,
+            "top_stability": (
+                float(stability_scores.max())
+                if not stability_scores.empty
+                else 0.0
+            ),
+        }
+
+        return FeatureInteractionResult(
+            interaction_scores=combined_scores,
+            interaction_matrix=interaction_matrix,
+            top_interactions=top_interactions,
+            stability_scores=stability_scores,
+            statistics=stats
+        )

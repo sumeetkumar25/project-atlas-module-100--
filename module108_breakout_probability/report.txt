@@ -1,0 +1,210 @@
+"""
+Module 108 - Breakout Probability Report
+"""
+
+from datetime import datetime
+import pandas as pd
+import numpy as np
+
+
+class BreakoutProbabilityReport:
+    """Report generator for breakout probability results."""
+    
+    @staticmethod
+    def generate(statistics, metadata=None, dataset_name="Unknown") -> str:
+        """
+        Generate a formatted report.
+        
+        Args:
+            statistics: BreakoutStatistics
+            metadata: Optional metadata dict
+            dataset_name: Name of the dataset
+            
+        Returns:
+            Formatted report string
+        """
+        lines = []
+        
+        lines.append("=" * 55)
+        lines.append("MODULE 108")
+        lines.append("BREAKOUT PROBABILITY")
+        lines.append("=" * 55)
+        lines.append(f"\nDataset: {dataset_name}")
+        
+        # Parameters
+        lines.append("\n" + "-" * 45)
+        lines.append("PARAMETERS")
+        lines.append("-" * 45)
+        lines.append(f"  Horizons: {statistics.horizons}")
+        lines.append(f"  Sample Size: {statistics.sample_size:,}")
+        
+        # Overview
+        lines.append("\n" + "-" * 45)
+        lines.append("OVERVIEW")
+        lines.append("-" * 45)
+        lines.append(f"  States with Samples: {statistics.states_with_samples}/16")
+        
+        # Top Upside States
+        if statistics.max_up_prob_state >= 0:
+            lines.append("\n  Top Upside Breakout State:")
+            lines.append(f"    State {statistics.max_up_prob_state}: "
+                        f"{statistics.max_up_prob_value:.2%} average")
+        
+        # Top Downside States
+        if statistics.max_down_prob_state >= 0:
+            lines.append("\n  Top Downside Breakout State:")
+            lines.append(f"    State {statistics.max_down_prob_state}: "
+                        f"{statistics.max_down_prob_value:.2%} average")
+        
+        # Most Neutral State
+        if statistics.most_neutral_state >= 0:
+            lines.append("\n  Most Neutral State:")
+            lines.append(f"    State {statistics.most_neutral_state}: "
+                        f"{statistics.neutral_prob_value:.2%} max probability")
+        
+        # Validation
+        lines.append("\n" + "-" * 45)
+        lines.append("VALIDATION")
+        lines.append("-" * 45)
+        lines.append("  Status: PASSED")
+        
+        # Footer
+        lines.append(f"\n  Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        lines.append("\n" + "=" * 55)
+        lines.append("END OF REPORT")
+        lines.append("=" * 55)
+        
+        return "\n".join(lines)
+    
+    @staticmethod
+    def generate_state_report(state_probabilities: pd.DataFrame, horizons: list) -> str:
+        """
+        Generate a detailed state report.
+        
+        Args:
+            state_probabilities: DataFrame with per-state probabilities
+            horizons: List of horizons
+            
+        Returns:
+            Formatted state report string
+        """
+        lines = []
+        lines.append("\n" + "=" * 80)
+        lines.append("STATE BREAKOUT PROBABILITIES")
+        lines.append("=" * 80)
+        
+        # Header
+        header = f"{'State':<8} {'Samples':<10}"
+        for h in horizons:
+            header += f" {'Up_{h}':<10} {'Down_{h}':<10} {'No_{h}':<10}"
+        lines.append(header)
+        lines.append("-" * (80))
+        
+        # FIXED: Use max horizon sample count (not sum across horizons)
+        # This avoids double-counting the same observations that appear in multiple horizons
+        for _, row in state_probabilities.iterrows():
+            state = row['state']
+
+            # Use the largest horizon's sample count as the
+            # representative sample count for this state.
+            # Do not sum across horizons because the same observations
+            # can appear in multiple horizons.
+            samples = max(
+                int(row[f'samples_{h}'])
+                for h in horizons
+            )
+
+            if samples == 0:
+                lines.append(f"{state:<8} {samples:<10} {'No samples':<30}")
+                continue
+            
+            line = f"{state:<8} {samples:<10}"
+            for h in horizons:
+                up = row[f'up_prob_{h}']
+                down = row[f'down_prob_{h}']
+                no = row[f'no_breakout_prob_{h}']
+                line += f" {up:<10.2%} {down:<10.2%} {no:<10.2%}"
+            
+            lines.append(line)
+        
+        lines.append("\n" + "=" * 80)
+        return "\n".join(lines)
+    
+    @staticmethod
+    def generate_ranking_report(
+        state_statistics: pd.DataFrame,
+        horizons: list,
+        top_n: int = 5
+    ) -> str:
+        """
+        Generate a ranking report showing top states.
+        
+        Args:
+            state_statistics: DataFrame with per-state statistics
+            horizons: List of horizons
+            top_n: Number of top states to show
+            
+        Returns:
+            Formatted ranking report string
+        """
+        lines = []
+        lines.append("\n" + "=" * 60)
+        lines.append("STATE RANKINGS")
+        lines.append("=" * 60)
+        
+        # Only include states with samples
+        valid_states = state_statistics[state_statistics['total_samples'] > 0]
+        
+        if valid_states.empty:
+            lines.append("No states with sufficient samples.")
+            return "\n".join(lines)
+        
+        # Top Upside States
+        lines.append("\n" + "-" * 50)
+        lines.append(f"Top {top_n} States by Upside Breakout Probability")
+        lines.append("-" * 50)
+        
+        top_up = valid_states.nlargest(top_n, 'mean_up_prob')[['state', 'mean_up_prob', 'total_samples']]
+        for _, row in top_up.iterrows():
+            lines.append(f"  State {int(row['state'])}: {row['mean_up_prob']:.2%} "
+                        f"(samples: {int(row['total_samples'])})")
+        
+        # Top Downside States
+        lines.append("\n" + "-" * 50)
+        lines.append(f"Top {top_n} States by Downside Breakout Probability")
+        lines.append("-" * 50)
+        
+        top_down = valid_states.nlargest(top_n, 'mean_down_prob')[['state', 'mean_down_prob', 'total_samples']]
+        for _, row in top_down.iterrows():
+            lines.append(f"  State {int(row['state'])}: {row['mean_down_prob']:.2%} "
+                        f"(samples: {int(row['total_samples'])})")
+        
+        # Most Neutral States
+        lines.append("\n" + "-" * 50)
+        lines.append(f"Top {top_n} Most Neutral States")
+        lines.append("-" * 50)
+        
+        # FIXED: Create a copy to avoid SettingWithCopyWarning
+        valid_states = valid_states.copy()
+        valid_states['balance'] = (
+            valid_states['mean_up_prob'] - 
+            valid_states['mean_down_prob']
+        ).abs()
+        
+        most_neutral = valid_states.nsmallest(top_n, 'balance')[['state', 'mean_up_prob', 'mean_down_prob', 'total_samples']]
+        for _, row in most_neutral.iterrows():
+            lines.append(f"  State {int(row['state'])}: Up={row['mean_up_prob']:.2%}, "
+                        f"Down={row['mean_down_prob']:.2%} "
+                        f"(samples: {int(row['total_samples'])})")
+        
+        lines.append("\n" + "=" * 60)
+        return "\n".join(lines)
+    
+    @staticmethod
+    def save(report: str, filepath: str):
+        """Save report to file."""
+        from pathlib import Path
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(report)

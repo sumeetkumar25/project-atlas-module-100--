@@ -1,0 +1,65 @@
+"""
+Module 109 - Feature Importance Statistics
+
+Provides statistical analysis and classification of feature importance results.
+"""
+
+from dataclasses import dataclass, asdict
+import numpy as np
+import pandas as pd
+from .engine import FeatureImportanceResult
+
+
+@dataclass
+class FeatureImportanceStatistics:
+    """High-level statistics from feature importance analysis."""
+    total_features: int
+    top_feature: str
+    top_importance: float
+    top_stability: float
+    average_importance: float
+    importance_entropy: float
+    top_5_features: list
+    method_agreement: float
+    agreement_level: str
+    methods_used: list
+    n_bootstrap: int
+    n_folds: int
+    correlation_threshold: float
+
+
+class FeatureImportanceStatisticsEngine:
+    """Engine for generating high-level statistics."""
+    
+    METADATA = {
+        "module": 109,
+        "name": "Feature Importance",
+        "version": "2.0.0",
+        "description": "Research-grade feature importance analysis with ensemble methods and stability"
+    }
+    
+    def analyze(self, result: FeatureImportanceResult) -> FeatureImportanceStatistics:
+        """Analyze results and generate high-level statistics."""
+        return FeatureImportanceStatistics(
+            total_features=result.statistics['total_features'],
+            top_feature=result.statistics['top_feature'],
+            top_importance=result.statistics['top_importance'],
+            top_stability=result.statistics['top_stability'],
+            average_importance=result.statistics['average_importance'],
+            importance_entropy=result.statistics['importance_entropy'],
+            top_5_features=result.statistics['top_5_features'],
+            method_agreement=result.statistics['method_agreement'],
+            agreement_level=result.statistics['agreement_level'],
+            methods_used=result.statistics['methods_used'],
+            n_bootstrap=result.statistics['n_bootstrap'],
+            n_folds=result.statistics['n_folds'],
+            correlation_threshold=result.statistics['correlation_threshold']
+        )
+    
+    def summary_dataframe(self, stats: FeatureImportanceStatistics) -> pd.DataFrame:
+        """Convert statistics to DataFrame."""
+        return pd.DataFrame([asdict(stats)])
+    
+    def summary_dict(self, stats: FeatureImportanceStatistics) -> dict:
+        """Convert statistics to dictionary."""
+        return asdict(stats)

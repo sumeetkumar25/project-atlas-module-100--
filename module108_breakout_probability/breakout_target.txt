@@ -1,0 +1,104 @@
+"""
+Module 108 - Breakout Target Construction
+
+Canonical implementation of row-level forward breakout targets.
+"""
+
+import numpy as np
+import pandas as pd
+
+
+INVALID_TARGET = -99
+
+
+def build_breakout_target(
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    atr: pd.Series,
+    horizon: int,
+    k_multiplier: float = 1.0,
+) -> pd.Series:
+    """
+    Build a row-level forward breakout target.
+
+    Values:
+        +1 = Up breakout
+        -1 = Down breakout
+         0 = No breakout
+       -99 = Insufficient future data / invalid observation
+
+    The target asks:
+        "Does price reach +/- k * ATR from the current close
+         at any point during the next `horizon` bars?"
+    """
+
+    if horizon <= 0:
+        raise ValueError("horizon must be greater than 0")
+
+    if not (len(high) == len(low) == len(close) == len(atr)):
+        raise ValueError("high, low, close, and atr must have equal length")
+
+    n = len(close)
+    INVALID = INVALID_TARGET
+
+    target = np.full(n, INVALID, dtype=np.int8)
+
+    for i in range(n - horizon):
+        current_close = close.iloc[i]
+        current_atr = atr.iloc[i]
+
+        if pd.isna(current_close):
+            continue
+
+        if pd.isna(current_atr) or current_atr <= 0:
+            continue
+
+        future_high = high.iloc[i + 1:i + horizon + 1].max()
+        future_low = low.iloc[i + 1:i + horizon + 1].min()
+
+        if pd.isna(future_high) or pd.isna(future_low):
+            continue
+
+        up_threshold = current_close + k_multiplier * current_atr
+        down_threshold = current_close - k_multiplier * current_atr
+
+        up_hit = future_high >= up_threshold
+        down_hit = future_low <= down_threshold
+
+        if up_hit and down_hit:
+            up_distance = (future_high - current_close) / current_atr
+            down_distance = (current_close - future_low) / current_atr
+            target[i] = 1 if up_distance >= down_distance else -1
+        elif up_hit:
+            target[i] = 1
+        elif down_hit:
+            target[i] = -1
+        else:
+            target[i] = 0
+
+    return pd.Series(target, index=close.index, name=f"breakout_{horizon}")
+
+
+def build_all_breakout_targets(
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    atr: pd.Series,
+    horizons,
+    k_multiplier: float = 1.0,
+) -> pd.DataFrame:
+    """
+    Build breakout targets for all given horizons.
+    """
+    targets = {}
+    for horizon in sorted(horizons):
+        targets[f"breakout_{horizon}"] = build_breakout_target(
+            high=high,
+            low=low,
+            close=close,
+            atr=atr,
+            horizon=horizon,
+            k_multiplier=k_multiplier,
+        )
+    return pd.DataFrame(targets, index=close.index)

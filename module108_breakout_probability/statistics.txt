@@ -1,0 +1,214 @@
+"""
+Module 108 - Breakout Probability Statistics
+"""
+
+from dataclasses import dataclass, asdict
+
+import pandas as pd
+
+from .engine import BreakoutProbabilityResult
+
+
+@dataclass
+class BreakoutStatistics:
+    """High-level statistics from breakout probability analysis."""
+
+    total_states: int
+    states_with_samples: int
+
+    max_up_prob_state: int
+    max_up_prob_value: float
+
+    max_down_prob_state: int
+    max_down_prob_value: float
+
+    most_neutral_state: int
+    neutral_prob_value: float
+
+    sample_size: int
+    horizons: list
+
+
+class BreakoutStatisticsEngine:
+    """Generate high-level Module 108 statistics."""
+
+    METADATA = {
+        "module": 108,
+        "name": "Breakout Probability",
+        "version": "1.0.0",
+        "description":
+            "Measures probability of future breakouts "
+            "for each market state",
+        "depends_on": ["103"],
+    }
+
+    def analyze(
+        self,
+        result: BreakoutProbabilityResult,
+    ) -> BreakoutStatistics:
+        """
+        Analyze the engine result.
+        """
+
+        states_with_samples = (
+            result.state_statistics[
+                result.state_statistics[
+                    "total_samples"
+                ] > 0
+            ]
+            .copy()
+        )
+
+        if states_with_samples.empty:
+
+            return BreakoutStatistics(
+                total_states=16,
+                states_with_samples=0,
+
+                max_up_prob_state=-1,
+                max_up_prob_value=0.0,
+
+                max_down_prob_state=-1,
+                max_down_prob_value=0.0,
+
+                most_neutral_state=-1,
+                neutral_prob_value=1.0,
+
+                sample_size=result.sample_size,
+                horizons=result.horizons,
+            )
+
+        # --------------------------------------------------------------
+        # Maximum upside probability
+        # --------------------------------------------------------------
+
+        max_up_idx = (
+            states_with_samples[
+                "mean_up_prob"
+            ].idxmax()
+        )
+
+        max_up_state = int(
+            states_with_samples.loc[
+                max_up_idx,
+                "state",
+            ]
+        )
+
+        max_up_prob = float(
+            states_with_samples.loc[
+                max_up_idx,
+                "mean_up_prob",
+            ]
+        )
+
+        # --------------------------------------------------------------
+        # Maximum downside probability
+        # --------------------------------------------------------------
+
+        max_down_idx = (
+            states_with_samples[
+                "mean_down_prob"
+            ].idxmax()
+        )
+
+        max_down_state = int(
+            states_with_samples.loc[
+                max_down_idx,
+                "state",
+            ]
+        )
+
+        max_down_prob = float(
+            states_with_samples.loc[
+                max_down_idx,
+                "mean_down_prob",
+            ]
+        )
+
+        # --------------------------------------------------------------
+        # Most neutral state
+        # --------------------------------------------------------------
+
+        states_with_samples[
+            "balance_score"
+        ] = (
+            states_with_samples[
+                "mean_up_prob"
+            ]
+            - states_with_samples[
+                "mean_down_prob"
+            ]
+        ).abs()
+
+        neutral_idx = (
+            states_with_samples[
+                "balance_score"
+            ].idxmin()
+        )
+
+        most_neutral_state = int(
+            states_with_samples.loc[
+                neutral_idx,
+                "state",
+            ]
+        )
+
+        neutral_prob_value = float(
+            max(
+                states_with_samples.loc[
+                    neutral_idx,
+                    "mean_up_prob",
+                ],
+                states_with_samples.loc[
+                    neutral_idx,
+                    "mean_down_prob",
+                ],
+            )
+        )
+
+        return BreakoutStatistics(
+            total_states=16,
+
+            states_with_samples=len(
+                states_with_samples
+            ),
+
+            max_up_prob_state=max_up_state,
+            max_up_prob_value=max_up_prob,
+
+            max_down_prob_state=max_down_state,
+            max_down_prob_value=max_down_prob,
+
+            most_neutral_state=(
+                most_neutral_state
+            ),
+            neutral_prob_value=(
+                neutral_prob_value
+            ),
+
+            sample_size=result.sample_size,
+            horizons=result.horizons,
+        )
+
+    def summary_dataframe(
+        self,
+        stats: BreakoutStatistics,
+    ) -> pd.DataFrame:
+        """
+        Convert statistics to a one-row DataFrame.
+        """
+
+        return pd.DataFrame(
+            [asdict(stats)]
+        )
+
+    def summary_dict(
+        self,
+        stats: BreakoutStatistics,
+    ) -> dict:
+        """
+        Convert statistics to a dictionary.
+        """
+
+        return asdict(stats)

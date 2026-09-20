@@ -1,0 +1,816 @@
+"""
+Module 109 - Feature Importance Engine
+
+Evaluates which features contain information about future market behavior.
+
+Methods:
+  1. Mutual Information: Measures nonlinear information content
+  2. Information Gain: Entropy reduction after feature conditioning (Freedman-Diaconis bins)
+  3. Chi-Square: Tests statistical dependence (Freedman-Diaconis bins)
+  4. ANOVA F-score: Tests variance differences for continuous variables
+  5. Permutation Importance: Ensemble of RandomForest, ExtraTrees, GradientBoosting
+
+Final Importance: Normalized and combined using weighted average rank across all methods.
+"""
+
+import numpy as np
+import pandas as pd
+
+from dataclasses import dataclass
+from typing import Optional, Dict, Any, List, Tuple
+from collections import defaultdict
+
+from scipy import stats
+from scipy.stats import chi2_contingency
+from scipy.cluster.hierarchy import fcluster, linkage
+from scipy.spatial.distance import squareform
+
+from sklearn.preprocessing import LabelEncoder
+from sklearn.ensemble import (
+    RandomForestClassifier,
+    ExtraTreesClassifier,
+    GradientBoostingClassifier
+)
+from sklearn.feature_selection import (
+    mutual_info_classif,
+    f_classif
+)
+from sklearn.inspection import permutation_importance
+from sklearn.model_selection import StratifiedKFold
+from sklearn.utils import resample
+
+import warnings
+warnings.filterwarnings('ignore')
+
+
+@dataclass
+class FeatureImportanceResult:
+    """Results from feature importance analysis."""
+    feature_importance: pd.DataFrame  # Final combined importance scores
+    method_scores: pd.DataFrame       # Scores from each method
+    feature_ranking: pd.DataFrame     # Ranked features
+    stability_scores: pd.DataFrame    # Bootstrap stability scores
+    top_feature_stability: float      # Stability of top feature
+    raw_permutation_importance: pd.Series  # Raw permutation importance (including negatives)
+    statistics: Dict[str, Any]        # Summary statistics
+    top_features: List[str]           # Top N features
+    method_agreement: float           # Agreement between methods
+
+
+class FeatureImportanceEngine:
+    """Core engine for feature importance analysis."""
+
+    # Recommended weights based on statistical robustness
+    DEFAULT_WEIGHTS = {
+        "mutual_information": 0.30,
+        "permutation_importance": 0.25,
+        "information_gain": 0.20,
+        "f_score": 0.15,
+        "chi_square": 0.10,
+    }
+
+    def __init__(
+        self,
+        target_column: str = 'future_breakout',
+        feature_columns: Optional[List[str]] = None,
+        n_permutations: int = 10,
+        n_bootstrap: int = 100,
+        n_folds: int = 5,
+        correlation_threshold: float = 0.95,
+        random_state: int = 42,
+        weights: Optional[Dict[str, float]] = None,
+        fast_bootstrap: bool = True,
+        include_state: bool = False
+    ):
+        """
+        Initialize the feature importance engine.
+        
+        Args:
+            target_column: Name of the target column
+            feature_columns: List of feature columns to analyze (auto-detect if None)
+            n_permutations: Number of permutations for permutation importance
+            n_bootstrap: Number of bootstrap samples for stability analysis
+            n_folds: Number of folds for cross-validated permutation importance
+            correlation_threshold: Threshold for removing highly correlated features
+            random_state: Random seed for reproducibility
+            weights: Dictionary of method weights (default: DEFAULT_WEIGHTS)
+            fast_bootstrap: If True, uses fast methods in bootstrap (no permutation)
+            include_state: If True, include 'state' as a feature (default: False)
+        """
+        self.target_column = target_column
+        self.feature_columns = feature_columns
+        self.n_permutations = n_permutations
+        self.n_bootstrap = n_bootstrap
+        self.n_folds = n_folds
+        self.correlation_threshold = correlation_threshold
+        self.random_state = random_state
+        self.weights = weights or self.DEFAULT_WEIGHTS.copy()
+        self.fast_bootstrap = fast_bootstrap
+        self.include_state = include_state
+        self._feature_detected = False
+
+    def detect_features(self, df: pd.DataFrame) -> List[str]:
+        """
+        Automatically detect feature columns.
+        
+        Excludes target column and common index/date columns.
+        Uses Pandas dtype checking for robust detection.
+        """
+        exclude_cols = [
+            self.target_column,
+            'timestamp', 'date', 'time', 'index',
+            'open', 'high', 'low', 'close', 'volume'
+        ]
+        
+        # Module 108 future-derived target columns must never
+        # become predictor variables in Module 109.
+        future_target_columns = [
+            col
+            for col in df.columns
+            if isinstance(col, str) and col.startswith("breakout_")
+        ]
+        
+        exclude_cols.extend(future_target_columns)
+        
+        # Exclude 'state' unless explicitly included
+        if not self.include_state:
+            exclude_cols.append('state')
+        
+        features = [
+            col
+            for col in df.columns
+            if col not in exclude_cols
+            and not col.startswith("_")
+            and (
+                pd.api.types.is_integer_dtype(df[col]) or
+                pd.api.types.is_float_dtype(df[col])
+            )
+            and df[col].nunique() > 1
+        ]
+        
+        return features
+
+    def remove_correlated_features(
+        self,
+        X: pd.DataFrame,
+        y: Optional[np.ndarray] = None,
+        threshold: float = 0.95
+    ) -> Tuple[pd.DataFrame, List[str]]:
+        """
+        Remove highly correlated features to avoid redundancy.
+        
+        Uses hierarchical clustering to group correlated features.
+        
+        Two modes:
+        - Research mode (y provided): Uses mutual information with target to select best feature
+        - Generic mode (y=None): Uses highest variance (backward compatible)
+        
+        Returns:
+            (X_filtered, selected_features)
+        """
+        if X.shape[1] <= 1:
+            return X, X.columns.tolist()
+        
+        # Calculate correlation matrix
+        corr_matrix = X.corr().abs()
+        
+        # Convert to distance matrix
+        distance_matrix = 1 - corr_matrix
+        
+        # Perform hierarchical clustering
+        condensed = squareform(distance_matrix.values)
+        linkage_matrix = linkage(condensed, method='average')
+        
+        # Get clusters
+        cluster_labels = fcluster(linkage_matrix, 1 - threshold, criterion='distance')
+        
+        # Select one feature per cluster
+        selected_features = []
+        for cluster_id in np.unique(cluster_labels):
+            cluster_features = X.columns[cluster_labels == cluster_id].tolist()
+            if len(cluster_features) == 1:
+                selected_features.append(cluster_features[0])
+            else:
+                if y is not None:
+                    # Research mode: Use mutual information with target
+                    mi_scores = self.compute_mutual_information(
+                        X[cluster_features], y
+                    )
+                    selected_features.append(mi_scores.idxmax())
+                else:
+                    # Generic mode: Use highest variance (backward compatible)
+                    variances = X[cluster_features].var()
+                    selected_features.append(variances.idxmax())
+        
+        return X[selected_features], selected_features
+
+    def freedman_diaconis_bins(self, data: np.ndarray) -> int:
+        """
+        Calculate number of bins using Freedman-Diaconis rule.
+        
+        bin_width = 2 * IQR * n^(-1/3)
+        bins = (max - min) / bin_width
+        """
+        q75, q25 = np.percentile(data, [75, 25])
+        iqr = q75 - q25
+        
+        if iqr == 0:
+            # Fallback to Sturges rule
+            return int(np.ceil(np.log2(len(data)) + 1))
+        
+        n = len(data)
+        bin_width = 2 * iqr * n ** (-1/3)
+        
+        if bin_width == 0:
+            return int(np.ceil(np.log2(n) + 1))
+        
+        data_range = data.max() - data.min()
+        bins = int(np.ceil(data_range / bin_width))
+        
+        # Ensure reasonable number of bins
+        return max(2, min(bins, 50))
+
+    def prepare_data(
+        self,
+        df: pd.DataFrame
+    ) -> Tuple[pd.DataFrame, np.ndarray, List[str]]:
+        """
+        Prepare data for analysis.
+        
+        Rows with invalid/missing targets are removed before feature
+        selection and model fitting.
+
+        Breakout target convention:
+            +1 = UP breakout
+            -1 = DOWN breakout
+             0 = NO breakout
+
+        Invalid target values such as -99 are excluded.
+        """
+        # Get feature columns
+        if self.feature_columns is None:
+            feature_columns = self.detect_features(df)
+        else:
+            feature_columns = list(self.feature_columns)
+        
+        # Protection: ensure no Module 108 breakout columns are used as features
+        future_target_columns = {
+            col
+            for col in df.columns
+            if isinstance(col, str) and col.startswith("breakout_")
+        }
+
+        leaked_features = [
+            col
+            for col in feature_columns
+            if col in future_target_columns
+        ]
+
+        if leaked_features:
+            raise ValueError(
+                "Future-derived Module 108 target columns cannot be used "
+                f"as Module 109 predictors: {leaked_features}"
+            )
+        
+        self._feature_detected = True
+        
+        # Check target exists
+        if self.target_column not in df.columns:
+            raise ValueError(f"Target column '{self.target_column}' not found")
+        
+        # Valid target values.
+        target = df[self.target_column]
+        valid_target_mask = (
+            target.notna()
+            & target.isin([-1, 0, 1])
+        )
+        
+        if valid_target_mask.sum() == 0:
+            raise ValueError(
+                f"No valid observations found for target "
+                f"'{self.target_column}'"
+            )
+        
+        # Prepare feature matrix
+        X = df.loc[
+            valid_target_mask,
+            feature_columns
+        ].copy()
+        
+        y = target.loc[
+            valid_target_mask
+        ].to_numpy()
+        
+        # Handle missing values (unsupervised approach)
+        X = X.replace([np.inf, -np.inf], np.nan)
+        X = X.dropna(axis=1, how="all")
+        if X.isna().any().any():
+            raise ValueError(
+                "Feature matrix contains missing values. "
+                "Upstream feature generation must resolve "
+                "missing values before Module 109."
+            )
+        
+        # Remove columns that remain entirely invalid.
+        valid_columns = [
+            col
+            for col in X.columns
+            if X[col].notna().any()
+            and X[col].nunique(dropna=True) > 1
+        ]
+        
+        X = X[valid_columns]
+        
+        if X.empty:
+            raise ValueError("No valid feature columns remain after preprocessing")
+        
+        # Now remove correlated features using target information (research mode)
+        # BUT to avoid leakage, use unsupervised mode (y=None)
+        X, selected_features = self.remove_correlated_features(
+            X,
+            None,  # Unsupervised mode
+            self.correlation_threshold
+        )
+        
+        return X, y, selected_features
+
+    def compute_mutual_information(self, X: pd.DataFrame, y: np.ndarray) -> pd.Series:
+        """Compute mutual information between each feature and target."""
+        X_encoded = X.copy()
+        for col in X_encoded.columns:
+            if X_encoded[col].dtype == 'object' or X_encoded[col].dtype.name == 'category':
+                le = LabelEncoder()
+                X_encoded[col] = le.fit_transform(X_encoded[col].astype(str))
+        
+        mi_scores = mutual_info_classif(X_encoded, y, random_state=self.random_state)
+        return pd.Series(mi_scores, index=X.columns)
+
+    def compute_information_gain(self, X: pd.DataFrame, y: np.ndarray) -> pd.Series:
+        """
+        Compute information gain using Freedman-Diaconis binning.
+        """
+        _, counts = np.unique(y, return_counts=True)
+        p = counts / len(y)
+        entropy_target = -np.sum(p * np.log2(p + 1e-12))
+        
+        ig_scores = []
+        
+        for col in X.columns:
+            feature_values = X[col].values
+            
+            # Use Freedman-Diaconis binning
+            if len(np.unique(feature_values)) > 10:
+                n_bins = self.freedman_diaconis_bins(feature_values)
+                try:
+                    feature_values = pd.qcut(feature_values, q=n_bins, duplicates='drop')
+                except:
+                    # Fallback to unique values
+                    pass
+            
+            unique_vals = np.unique(feature_values)
+            cond_entropy = 0
+            
+            for val in unique_vals:
+                mask = feature_values == val
+                if np.sum(mask) == 0:
+                    continue
+                
+                y_subset = y[mask]
+                _, counts_sub = np.unique(y_subset, return_counts=True)
+                p_sub = counts_sub / len(y_subset)
+                entropy_sub = -np.sum(p_sub * np.log2(p_sub + 1e-12))
+                cond_entropy += (np.sum(mask) / len(y)) * entropy_sub
+            
+            ig = entropy_target - cond_entropy
+            ig_scores.append(max(0, ig))
+        
+        return pd.Series(ig_scores, index=X.columns)
+
+    def compute_chi_square(self, X: pd.DataFrame, y: np.ndarray) -> pd.Series:
+        """
+        Compute chi-square using Freedman-Diaconis binning.
+        """
+        chi2_scores = []
+        
+        for col in X.columns:
+            feature_values = X[col].values
+            
+            # Use Freedman-Diaconis binning
+            if len(np.unique(feature_values)) > 10:
+                n_bins = min(self.freedman_diaconis_bins(feature_values), int(np.sqrt(len(feature_values))))
+                try:
+                    feature_values = pd.qcut(feature_values, q=n_bins, duplicates='drop')
+                    feature_values = LabelEncoder().fit_transform(feature_values.astype(str))
+                except:
+                    feature_values = LabelEncoder().fit_transform(pd.cut(feature_values, bins=n_bins).astype(str))
+            elif feature_values.dtype == 'object' or feature_values.dtype.name == 'category':
+                le = LabelEncoder()
+                feature_values = le.fit_transform(feature_values.astype(str))
+            
+            try:
+                contingency = pd.crosstab(feature_values, y)
+                chi2, p_value, dof, expected = chi2_contingency(contingency)
+                chi2_scores.append(chi2)
+            except:
+                chi2_scores.append(0.0)
+        
+        return pd.Series(chi2_scores, index=X.columns)
+
+    def compute_f_score(self, X: pd.DataFrame, y: np.ndarray) -> pd.Series:
+        """Compute ANOVA F-score."""
+        f_scores, p_values = f_classif(X, y)
+        return pd.Series(f_scores, index=X.columns)
+
+    def compute_permutation_importance_ensemble(
+        self,
+        X: pd.DataFrame,
+        y: np.ndarray,
+        fast_mode: bool = False
+    ) -> Tuple[pd.Series, pd.Series]:
+        """
+        Compute permutation importance using ensemble of models with cross-validation.
+        
+        Models: RandomForest, ExtraTrees, GradientBoosting
+        Uses StratifiedKFold for stable estimates.
+        
+        Args:
+            X: Feature matrix
+            y: Target array
+            fast_mode: If True, uses faster configuration (for bootstrap)
+        
+        Returns:
+            (raw_permutation_importance, perm_for_ranking)
+            
+        Note: Raw permutation importance may include negative values, which is
+        scientifically meaningful (indicating features that hurt prediction).
+        """
+        if fast_mode:
+            # Fast configuration for bootstrap
+            n_estimators = 20
+            n_folds = 2
+            n_repeats = 2
+        else:
+            # Full research configuration
+            n_estimators = 100
+            n_folds = self.n_folds
+            n_repeats = self.n_permutations
+        
+        skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=self.random_state)
+        
+        # Initialize models
+        models = {
+            'rf': RandomForestClassifier(n_estimators=n_estimators, random_state=self.random_state, n_jobs=-1),
+            'et': ExtraTreesClassifier(n_estimators=n_estimators, random_state=self.random_state, n_jobs=-1),
+            'gb': GradientBoostingClassifier(n_estimators=n_estimators, random_state=self.random_state)
+        }
+        
+        # Store importance scores from all models and folds
+        all_scores = defaultdict(list)
+        
+        for train_idx, val_idx in skf.split(X, y):
+            X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
+            y_train, y_val = y[train_idx], y[val_idx]
+            
+            for model_name, model in models.items():
+                model.fit(X_train, y_train)
+                result = permutation_importance(
+                    model, X_val, y_val,
+                    n_repeats=n_repeats,
+                    random_state=self.random_state,
+                    n_jobs=-1
+                )
+                all_scores[model_name].append(result.importances_mean)
+        
+        # Average across models and folds
+        avg_scores = {}
+        for model_name, scores_list in all_scores.items():
+            avg_scores[model_name] = np.mean(scores_list, axis=0)
+        
+        # Average across all models
+        final_scores = np.mean(list(avg_scores.values()), axis=0)
+        
+        # Raw permutation importance (including negatives)
+        raw_perm = pd.Series(final_scores, index=X.columns)
+        
+        # Clipped version for ranking (non-negative)
+        perm_for_ranking = raw_perm.clip(lower=0)
+        
+        return raw_perm, perm_for_ranking
+
+    def compute_permutation_importance(
+        self,
+        X: pd.DataFrame,
+        y: np.ndarray
+    ) -> pd.Series:
+        """
+        Backward-compatible wrapper for permutation importance.
+        
+        Returns raw permutation importance (including negative values).
+        This maintains backward compatibility with existing tests.
+        Negative values are meaningful - they indicate features that hurt prediction.
+        """
+        raw_perm, _ = self.compute_permutation_importance_ensemble(X, y, fast_mode=False)
+        return raw_perm
+
+    def _weighted_rank(self, df_scores: pd.DataFrame) -> pd.Series:
+        """
+        Calculate weighted average rank from normalized scores.
+        
+        This is the core ranking logic used by both combine_scores() and
+        combine_scores_bootstrap().
+        
+        Args:
+            df_scores: DataFrame with methods as columns and features as index,
+                       values are normalized scores [0, 1]
+        
+        Returns:
+            Series of weighted average ranks
+        """
+        # Get ranks for each method
+        ranks = df_scores.rank(axis=0, ascending=False, method='first')
+        
+        # Only keep weights for methods actually present
+        available_weights = {
+            method: self.weights.get(method, 0.0)
+            for method in ranks.columns
+        }
+        
+        # If none of the supplied methods have predefined weights,
+        # fall back to equal weighting.
+        if sum(available_weights.values()) == 0:
+            available_weights = {
+                method: 1.0
+                for method in ranks.columns
+            }
+        
+        weight_sum = sum(available_weights.values())
+        
+        # Calculate weighted average rank
+        weighted_rank = sum(
+            ranks[col] * available_weights[col]
+            for col in ranks.columns
+        )
+        
+        return weighted_rank / weight_sum
+
+    def compute_bootstrap_stability(
+        self,
+        X: pd.DataFrame,
+        y: np.ndarray,
+        n_bootstrap: int = 100
+    ) -> Tuple[pd.Series, float]:
+        """
+        Compute bootstrap stability of the FINAL ranking.
+        
+        Uses fast methods (MI, IG, Chi2, F-score) for bootstrap.
+        Permutation importance is computed once on the full dataset in compute().
+        This makes bootstrap computationally feasible.
+        
+        Returns:
+            (stability_scores, top_feature_stability)
+        """
+        n_features = X.shape[1]
+        feature_names = X.columns.tolist()
+        
+        # Track how often each feature appears in top-k
+        top_k_counts = defaultdict(int)
+        successful_bootstraps = 0
+        
+        print(f"  Bootstrap progress: 0/{n_bootstrap}", end="")
+        
+        for i in range(n_bootstrap):
+            # Print progress
+            if (i + 1) % 10 == 0 or i == n_bootstrap - 1:
+                print(f"\r  Bootstrap progress: {i+1}/{n_bootstrap}", end="", flush=True)
+            
+            # Bootstrap sample
+            X_boot, y_boot = resample(X, y, replace=True, random_state=self.random_state + i)
+            
+            try:
+                # Compute fast importance methods only (no permutation)
+                scores = {
+                    "mutual_information": self.compute_mutual_information(X_boot, y_boot),
+                    "information_gain": self.compute_information_gain(X_boot, y_boot),
+                    "chi_square": self.compute_chi_square(X_boot, y_boot),
+                    "f_score": self.compute_f_score(X_boot, y_boot),
+                }
+                
+                # Normalize scores
+                normalized_scores = {}
+                for method, score_series in scores.items():
+                    normalized_scores[method] = self.normalize_scores(score_series)
+                
+                df_scores = pd.DataFrame(normalized_scores)
+                
+                # Calculate weighted average rank using shared helper
+                avg_rank = self._weighted_rank(df_scores)
+                
+                # Convert rank to importance score
+                max_rank = len(avg_rank) + 1
+                importance_score = 1 - (avg_rank - 1) / (max_rank - 1)
+                df_scores['importance'] = importance_score
+                
+                # Sort by importance
+                combined = df_scores.sort_values('importance', ascending=False)
+                
+                # Track top 5 features
+                top_5 = combined.index[:5].tolist()
+                for feat in top_5:
+                    top_k_counts[feat] += 1
+                
+                successful_bootstraps += 1  # Only increment on success
+                
+            except Exception as e:
+                # Skip failed bootstraps
+                continue
+        
+        print()  # New line after progress
+        
+        if successful_bootstraps == 0:
+            raise ValueError("All bootstrap iterations failed")
+        
+        print(f"  Successful bootstraps: {successful_bootstraps}/{n_bootstrap}")
+        
+        # Calculate stability scores (percentage of successful bootstraps where feature appears in top 5)
+        stability_scores = pd.Series(
+            {
+                feat: count / successful_bootstraps
+                for feat, count in top_k_counts.items()
+            }
+        ).reindex(feature_names, fill_value=0.0)
+        
+        # Stability of top feature
+        top_feature_stability = stability_scores.max() if len(stability_scores) > 0 else 0.0
+        
+        return stability_scores, top_feature_stability
+
+    def normalize_scores(self, scores: pd.Series) -> pd.Series:
+        """Normalize scores to [0, 1] using rank normalization."""
+        if scores.max() == scores.min():
+            return pd.Series(0.0, index=scores.index)
+        
+        # Rank normalization (more robust for combining different scales)
+        ranks = scores.rank(ascending=False)
+        max_rank = len(ranks)
+        normalized = 1 - (ranks - 1) / (max_rank - 1)
+        return normalized
+
+    def combine_scores(self, scores_dict: Dict[str, pd.Series]) -> pd.DataFrame:
+        """
+        Combine multiple importance scores using weighted average rank.
+        
+        Uses pre-defined weights for each method based on statistical robustness.
+        """
+        # Normalize each method's scores
+        normalized_scores = {}
+        for method, scores in scores_dict.items():
+            normalized_scores[method] = self.normalize_scores(scores)
+        
+        df_scores = pd.DataFrame(normalized_scores)
+        
+        # Calculate weighted average rank using shared helper
+        avg_rank = self._weighted_rank(df_scores)
+        
+        # Convert rank to importance score (lower rank = higher importance)
+        max_rank = len(avg_rank) + 1
+        importance_score = 1 - (avg_rank - 1) / (max_rank - 1)
+        
+        df_scores['importance'] = importance_score
+        df_scores = df_scores.sort_values('importance', ascending=False)
+        
+        return df_scores
+
+    def compute_method_agreement(self, scores_dict: Dict[str, pd.Series]) -> float:
+        """Compute Kendall's coefficient of concordance."""
+        feature_names = list(scores_dict.values())[0].index.tolist()
+        n_features = len(feature_names)
+        k = len(scores_dict)
+        
+        if n_features <= 1 or k <= 1:
+            return 1.0
+        
+        # Create rank matrix
+        rank_matrix = np.zeros((n_features, k))
+        for i, (method, scores) in enumerate(scores_dict.items()):
+            ranks = scores.rank(ascending=False, method='first').values
+            rank_matrix[:, i] = ranks
+        
+        # Calculate sum of ranks
+        rank_sums = np.sum(rank_matrix, axis=1)
+        mean_rank_sum = np.mean(rank_sums)
+        
+        # Sum of squared deviations
+        ss = np.sum((rank_sums - mean_rank_sum) ** 2)
+        
+        # Kendall's W with tie correction
+        W = (12 * ss) / (k**2 * (n_features**3 - n_features))
+        
+        return W
+
+    def compute(self, df: pd.DataFrame) -> FeatureImportanceResult:
+        """
+        Main computation method.
+        """
+        # Prepare data
+        X, y, feature_names = self.prepare_data(df)
+        
+        # Compute all importance methods
+        scores_dict = {}
+        
+        print("\n  Computing Mutual Information...")
+        scores_dict['mutual_information'] = self.compute_mutual_information(X, y)
+        
+        print("  Computing Information Gain (Freedman-Diaconis)...")
+        scores_dict['information_gain'] = self.compute_information_gain(X, y)
+        
+        print("  Computing Chi-Square (Freedman-Diaconis)...")
+        scores_dict['chi_square'] = self.compute_chi_square(X, y)
+        
+        print("  Computing F-Score...")
+        scores_dict['f_score'] = self.compute_f_score(X, y)
+        
+        print("  Computing Permutation Importance (Ensemble + CV)...")
+        raw_perm, perm_for_ranking = self.compute_permutation_importance_ensemble(
+            X, y, fast_mode=False
+        )
+        scores_dict['permutation_importance'] = perm_for_ranking
+        
+        # Combine scores using weighted ranking
+        combined_scores = self.combine_scores(scores_dict)
+        
+        # Compute method agreement
+        method_agreement = self.compute_method_agreement(scores_dict)
+        
+        # Add warning for low agreement
+        if method_agreement < 0.30:
+            print("  WARNING: Low agreement between feature importance methods.")
+        
+        # Determine agreement level
+        if method_agreement >= 0.70:
+            agreement_level = "High"
+        elif method_agreement >= 0.40:
+            agreement_level = "Moderate"
+        else:
+            agreement_level = "Low"
+        
+        # Compute bootstrap stability of FINAL ranking (fast, no permutation inside)
+        print("  Computing Bootstrap Stability...")
+        stability_scores, top_feature_stability = self.compute_bootstrap_stability(
+            X, y, self.n_bootstrap
+        )
+        
+        # Create method scores DataFrame
+        method_scores = pd.DataFrame(scores_dict)
+        method_scores = method_scores.fillna(0)
+        
+        # Create feature ranking
+        feature_ranking = combined_scores[['importance']].copy()
+        feature_ranking['rank'] = feature_ranking['importance'].rank(
+            ascending=False, method='first'
+        ).astype(int)
+        feature_ranking = feature_ranking.sort_values('rank')
+        
+        # Add stability to ranking
+        feature_ranking['stability'] = feature_ranking.index.map(
+            lambda x: stability_scores.get(x, 0.0)
+        )
+        
+        # Get top features
+        top_features = feature_ranking.head(5).index.tolist()
+        
+        # Statistics
+        stats = {
+            'total_features': len(feature_names),
+            'top_feature': top_features[0] if top_features else None,
+            'top_importance': float(feature_ranking.iloc[0]['importance']) if not feature_ranking.empty else 0,
+            'top_stability': top_feature_stability,
+            'average_importance': float(feature_ranking['importance'].mean()),
+            'importance_entropy': self._calculate_entropy(feature_ranking['importance'].values),
+            'top_5_features': top_features[:5],
+            'method_agreement': method_agreement,
+            'agreement_level': agreement_level,
+            'methods_used': list(scores_dict.keys()),
+            'n_bootstrap': self.n_bootstrap,
+            'n_folds': self.n_folds,
+            'correlation_threshold': self.correlation_threshold,
+            'weights': self.weights.copy(),
+            'fast_bootstrap': self.fast_bootstrap
+        }
+        
+        return FeatureImportanceResult(
+            feature_importance=combined_scores,
+            method_scores=method_scores,
+            feature_ranking=feature_ranking,
+            stability_scores=stability_scores,
+            top_feature_stability=top_feature_stability,
+            raw_permutation_importance=raw_perm,
+            statistics=stats,
+            top_features=top_features,
+            method_agreement=method_agreement
+        )
+    
+    def _calculate_entropy(self, scores: np.ndarray) -> float:
+        """Calculate entropy of importance scores."""
+        p = scores / (scores.sum() + 1e-12)
+        p = p[p > 0]
+        return -np.sum(p * np.log2(p))

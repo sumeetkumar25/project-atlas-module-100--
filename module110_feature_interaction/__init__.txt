@@ -1,0 +1,9 @@
+# atlas/modules/module110_feature_interaction/__init__.py
+"""
+Module 110
+Feature Interaction
+"""
+
+from .module import FeatureInteractionResearch
+
+__all__ = ["FeatureInteractionResearch"]

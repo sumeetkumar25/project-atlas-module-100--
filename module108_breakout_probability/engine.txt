@@ -1,0 +1,697 @@
+"""
+Engine for Module 108 - Breakout Probability.
+
+The engine calculates ATR, constructs canonical row-level
+forward breakout targets, and computes state-conditioned
+breakout probabilities.
+"""
+
+from dataclasses import dataclass
+from typing import List, Dict, Any, Tuple
+
+import numpy as np
+import pandas as pd
+from scipy import stats
+
+from .targets import (
+    INVALID_TARGET,
+    build_all_breakout_targets,
+)
+
+
+@dataclass
+class BreakoutProbabilityResult:
+    """
+    Result container for Module 108.
+    """
+
+    # Canonical row-level targets.
+    targets: pd.DataFrame
+
+    # State-conditioned probability tables.
+    state_probabilities: pd.DataFrame
+    state_statistics: pd.DataFrame
+
+    horizons: List[int]
+    sample_size: int
+    atr_period: int
+    k_multiplier: float
+    min_samples: int
+
+
+# Backward-compatible alias.
+BreakoutResult = BreakoutProbabilityResult
+
+
+class BreakoutProbabilityEngine:
+    """
+    Engine for computing breakout probabilities by market state.
+
+    States are integer encoded market conditions.
+
+    For every state and horizon the engine computes:
+
+        P(up breakout)
+        P(down breakout)
+        P(no breakout)
+    """
+
+    def __init__(
+        self,
+        horizons: List[int] = None,
+        atr_period: int = 14,
+        k_multiplier: float = 1.0,
+        min_samples: int = 10,
+        confidence_level: float = 0.95,
+    ):
+        if horizons is None:
+            horizons = [1, 3, 5, 10, 20]
+
+        if not horizons:
+            raise ValueError(
+                "horizons must contain at least one value"
+            )
+
+        if any(int(h) <= 0 for h in horizons):
+            raise ValueError(
+                "All horizons must be greater than 0"
+            )
+
+        if atr_period <= 0:
+            raise ValueError(
+                "atr_period must be greater than 0"
+            )
+
+        if k_multiplier <= 0:
+            raise ValueError(
+                "k_multiplier must be greater than 0"
+            )
+
+        if min_samples < 1:
+            raise ValueError(
+                "min_samples must be at least 1"
+            )
+
+        if not 0 < confidence_level < 1:
+            raise ValueError(
+                "confidence_level must be between 0 and 1"
+            )
+
+        self.horizons = sorted(
+            set(int(h) for h in horizons)
+        )
+
+        self.atr_period = int(atr_period)
+        self.k_multiplier = float(k_multiplier)
+        self.min_samples = int(min_samples)
+        self.confidence_level = float(
+            confidence_level
+        )
+
+    # ------------------------------------------------------------------
+    # ATR
+    # ------------------------------------------------------------------
+
+    def calculate_atr(
+        self,
+        high: pd.Series,
+        low: pd.Series,
+        close: pd.Series,
+    ) -> pd.Series:
+        """
+        Calculate ATR using EMA smoothing.
+        """
+
+        if not (
+            len(high)
+            == len(low)
+            == len(close)
+        ):
+            raise ValueError(
+                "high, low, and close must have equal length"
+            )
+
+        prev_close = close.shift(1)
+
+        tr1 = high - low
+        tr2 = (high - prev_close).abs()
+        tr3 = (low - prev_close).abs()
+
+        tr = pd.concat(
+            [tr1, tr2, tr3],
+            axis=1,
+        ).max(axis=1)
+
+        atr = tr.ewm(
+            span=self.atr_period,
+            min_periods=self.atr_period,
+            adjust=False,
+        ).mean()
+
+        return atr
+
+    # ------------------------------------------------------------------
+    # Breakout targets
+    # ------------------------------------------------------------------
+
+    def build_all_breakout_targets(
+        self,
+        high: pd.Series,
+        low: pd.Series,
+        close: pd.Series,
+    ) -> pd.DataFrame:
+        """
+        Construct canonical row-level breakout targets.
+        """
+
+        atr = self.calculate_atr(
+            high=high,
+            low=low,
+            close=close,
+        )
+
+        return build_all_breakout_targets(
+            high=high,
+            low=low,
+            close=close,
+            atr=atr,
+            horizons=self.horizons,
+            k_multiplier=self.k_multiplier,
+        )
+
+    def detect_breakouts(
+        self,
+        high: pd.Series,
+        low: pd.Series,
+        close: pd.Series,
+        atr: pd.Series,
+        horizon: int,
+    ) -> np.ndarray:
+        """
+        Compatibility wrapper around the canonical target builder.
+
+        IMPORTANT:
+        This method now uses the exact same target definition as
+        the row-level target construction:
+
+            close +/- k * ATR
+
+        rather than the previous inconsistent:
+
+            high/low +/- k * ATR
+        """
+
+        target = build_all_breakout_targets(
+            high=high,
+            low=low,
+            close=close,
+            atr=atr,
+            horizons=[horizon],
+            k_multiplier=self.k_multiplier,
+        )
+
+        return target[
+            f"breakout_{horizon}"
+        ].to_numpy()
+
+    # ------------------------------------------------------------------
+    # Wilson confidence interval
+    # ------------------------------------------------------------------
+
+    def wilson_interval(
+        self,
+        successes: int,
+        trials: int,
+        confidence_level: float = None,
+    ) -> Tuple[float, float]:
+        """
+        Calculate Wilson confidence interval.
+        """
+
+        if trials < 0:
+            raise ValueError(
+                "trials cannot be negative"
+            )
+
+        if successes < 0 or successes > trials:
+            raise ValueError(
+                "successes must be between 0 and trials"
+            )
+
+        if trials == 0:
+            return 0.0, 0.0
+
+        if confidence_level is None:
+            confidence_level = self.confidence_level
+
+        z = stats.norm.ppf(
+            1 - (1 - confidence_level) / 2
+        )
+
+        p = successes / trials
+
+        denominator = (
+            1 + z**2 / trials
+        )
+
+        center = (
+            p + z**2 / (2 * trials)
+        )
+
+        half_width = z * np.sqrt(
+            (
+                p * (1 - p) / trials
+            )
+            + (
+                z**2 / (4 * trials**2)
+            )
+        )
+
+        lower = (
+            center - half_width
+        ) / denominator
+
+        upper = (
+            center + half_width
+        ) / denominator
+
+        return (
+            max(0.0, lower),
+            min(1.0, upper),
+        )
+
+    # ------------------------------------------------------------------
+    # State probabilities
+    # ------------------------------------------------------------------
+
+    def compute_state_breakout_probabilities(
+        self,
+        states: np.ndarray,
+        breakout_labels: np.ndarray,
+        horizon: int,
+    ) -> List[Dict[str, Any]]:
+        """
+        Compute probabilities for every state.
+        """
+
+        if len(states) != len(breakout_labels):
+            raise ValueError(
+                "states and breakout_labels must have equal length"
+            )
+
+        valid_mask = (
+            breakout_labels != INVALID_TARGET
+        )
+
+        valid_states = states[valid_mask]
+        valid_labels = breakout_labels[valid_mask]
+
+        state_data = []
+
+        for state in range(16):
+
+            mask = valid_states == state
+
+            state_labels = valid_labels[mask]
+
+            n = len(state_labels)
+
+            has_samples = (
+                n >= self.min_samples
+            )
+
+            if has_samples:
+
+                up_count = int(
+                    np.sum(state_labels == 1)
+                )
+
+                down_count = int(
+                    np.sum(state_labels == -1)
+                )
+
+                no_breakout_count = int(
+                    np.sum(state_labels == 0)
+                )
+
+                up_prob = (
+                    up_count / n
+                )
+
+                down_prob = (
+                    down_count / n
+                )
+
+                no_breakout_prob = (
+                    no_breakout_count / n
+                )
+
+                lower_up, upper_up = (
+                    self.wilson_interval(
+                        up_count,
+                        n,
+                    )
+                )
+
+                lower_down, upper_down = (
+                    self.wilson_interval(
+                        down_count,
+                        n,
+                    )
+                )
+
+            else:
+
+                up_count = 0
+                down_count = 0
+                no_breakout_count = 0
+
+                up_prob = 0.0
+                down_prob = 0.0
+                no_breakout_prob = 1.0
+
+                lower_up = 0.0
+                upper_up = 0.0
+
+                lower_down = 0.0
+                upper_down = 0.0
+
+            state_data.append(
+                {
+                    "state": state,
+                    "samples": n,
+                    "has_samples": has_samples,
+
+                    "up_count": up_count,
+                    "down_count": down_count,
+                    "no_breakout_count": (
+                        no_breakout_count
+                    ),
+
+                    "up_prob": up_prob,
+                    "down_prob": down_prob,
+                    "no_breakout_prob": (
+                        no_breakout_prob
+                    ),
+
+                    "conf_lower_up": lower_up,
+                    "conf_upper_up": upper_up,
+
+                    "conf_lower_down": (
+                        lower_down
+                    ),
+                    "conf_upper_down": (
+                        upper_down
+                    ),
+
+                    "expected_move": 0.0,
+                    "median_move": 0.0,
+                }
+            )
+
+        return state_data
+
+    # ------------------------------------------------------------------
+    # Full computation
+    # ------------------------------------------------------------------
+
+    def compute(
+        self,
+        high: pd.Series,
+        low: pd.Series,
+        close: pd.Series,
+        states: np.ndarray,
+    ) -> BreakoutProbabilityResult:
+        """
+        Compute row-level targets and state-conditioned
+        breakout probabilities.
+        """
+
+        if not (
+            len(high)
+            == len(low)
+            == len(close)
+            == len(states)
+        ):
+            raise ValueError(
+                "high, low, close, and states "
+                "must have equal length"
+            )
+
+        targets = (
+            self.build_all_breakout_targets(
+                high=high,
+                low=low,
+                close=close,
+            )
+        )
+
+        all_data = []
+
+        for horizon in self.horizons:
+
+            labels = targets[
+                f"breakout_{horizon}"
+            ].to_numpy()
+
+            state_data = (
+                self.compute_state_breakout_probabilities(
+                    states=states,
+                    breakout_labels=labels,
+                    horizon=horizon,
+                )
+            )
+
+            for data in state_data:
+
+                all_data.append(
+                    {
+                        "state": data["state"],
+
+                        f"samples_{horizon}":
+                            data["samples"],
+
+                        f"has_samples_{horizon}":
+                            data["has_samples"],
+
+                        f"up_count_{horizon}":
+                            data["up_count"],
+
+                        f"down_count_{horizon}":
+                            data["down_count"],
+
+                        f"no_breakout_count_{horizon}":
+                            data[
+                                "no_breakout_count"
+                            ],
+
+                        f"up_prob_{horizon}":
+                            data["up_prob"],
+
+                        f"down_prob_{horizon}":
+                            data["down_prob"],
+
+                        f"no_breakout_prob_{horizon}":
+                            data[
+                                "no_breakout_prob"
+                            ],
+
+                        f"conf_lower_{horizon}":
+                            data[
+                                "conf_lower_up"
+                            ],
+
+                        f"conf_upper_{horizon}":
+                            data[
+                                "conf_upper_up"
+                            ],
+
+                        f"expected_move_{horizon}":
+                            data["expected_move"],
+
+                        f"median_move_{horizon}":
+                            data["median_move"],
+                    }
+                )
+
+        df = pd.DataFrame(all_data)
+
+        # One row per state.
+        state_probabilities = (
+            df.groupby("state")
+            .first()
+            .reset_index()
+        )
+
+        # Guarantee all 16 states exist.
+        existing_states = set(
+            state_probabilities["state"]
+        )
+
+        missing_states = (
+            set(range(16))
+            - existing_states
+        )
+
+        missing_rows = []
+
+        for state in sorted(missing_states):
+
+            row = {
+                "state": state,
+            }
+
+            for h in self.horizons:
+
+                row[f"samples_{h}"] = 0
+
+                row[f"has_samples_{h}"] = False
+
+                row[f"up_count_{h}"] = 0
+                row[f"down_count_{h}"] = 0
+                row[f"no_breakout_count_{h}"] = 0
+
+                row[f"up_prob_{h}"] = 0.0
+                row[f"down_prob_{h}"] = 0.0
+                row[f"no_breakout_prob_{h}"] = 1.0
+
+                row[f"conf_lower_{h}"] = 0.0
+                row[f"conf_upper_{h}"] = 0.0
+
+                row[f"expected_move_{h}"] = 0.0
+                row[f"median_move_{h}"] = 0.0
+
+            missing_rows.append(row)
+
+        if missing_rows:
+
+            state_probabilities = pd.concat(
+                [
+                    state_probabilities,
+                    pd.DataFrame(missing_rows),
+                ],
+                ignore_index=True,
+            )
+
+        state_probabilities = (
+            state_probabilities
+            .sort_values("state")
+            .reset_index(drop=True)
+        )
+
+        # --------------------------------------------------------------
+        # State statistics
+        #
+        # IMPORTANT:
+        # Do not add sample counts across horizons.
+        # The same underlying observation may occur in multiple
+        # horizon samples.
+        # --------------------------------------------------------------
+
+        state_stats = []
+
+        for _, row in (
+            state_probabilities.iterrows()
+        ):
+
+            state = int(row["state"])
+
+            samples_by_horizon = {}
+
+            up_probabilities = []
+            down_probabilities = []
+
+            for h in self.horizons:
+
+                samples = int(
+                    row[f"samples_{h}"]
+                )
+
+                samples_by_horizon[h] = samples
+
+                if samples > 0:
+
+                    up_probabilities.append(
+                        float(
+                            row[f"up_prob_{h}"]
+                        )
+                    )
+
+                    down_probabilities.append(
+                        float(
+                            row[f"down_prob_{h}"]
+                        )
+                    )
+
+            # Do NOT sum horizon sample counts.
+            #
+            # Use the maximum valid horizon sample count as the
+            # representative number of underlying observations.
+            total_samples = (
+                max(
+                    samples_by_horizon.values()
+                )
+                if samples_by_horizon
+                else 0
+            )
+
+            has_any_samples = (
+                total_samples > 0
+            )
+
+            if up_probabilities:
+
+                mean_up_prob = float(
+                    np.mean(up_probabilities)
+                )
+
+                mean_down_prob = float(
+                    np.mean(down_probabilities)
+                )
+
+            else:
+
+                mean_up_prob = 0.0
+                mean_down_prob = 0.0
+
+            state_stats.append(
+                {
+                    "state": state,
+                    "total_samples":
+                        total_samples,
+
+                    "has_samples":
+                        has_any_samples,
+
+                    "mean_up_prob":
+                        mean_up_prob,
+
+                    "mean_down_prob":
+                        mean_down_prob,
+
+                    **{
+                        f"samples_{h}":
+                            samples_by_horizon[h]
+                        for h in self.horizons
+                    },
+                }
+            )
+
+        state_statistics = pd.DataFrame(
+            state_stats
+        )
+
+        return BreakoutProbabilityResult(
+            targets=targets,
+            state_probabilities=(
+                state_probabilities
+            ),
+            state_statistics=(
+                state_statistics
+            ),
+            horizons=self.horizons,
+            sample_size=len(states),
+            atr_period=self.atr_period,
+            k_multiplier=self.k_multiplier,
+            min_samples=self.min_samples,
+        )

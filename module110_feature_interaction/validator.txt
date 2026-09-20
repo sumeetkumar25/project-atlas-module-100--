@@ -1,0 +1,147 @@
+"""
+Module 110 - Feature Interaction Validator
+"""
+
+import numpy as np
+import pandas as pd
+from .engine import FeatureInteractionResult
+from .statistics import FeatureInteractionStatistics
+
+
+class FeatureInteractionValidator:
+    """Validator for feature interaction results."""
+    
+    def validate(
+        self,
+        result: FeatureInteractionResult,
+        statistics: FeatureInteractionStatistics
+    ) -> bool:
+        """Validate results and statistics."""
+        issues = []
+        warnings = []
+        
+        # Check interaction scores
+        if result.interaction_scores.empty:
+            issues.append("Interaction scores DataFrame is empty")
+        else:
+            # Check for duplicates
+            if result.interaction_scores.index.duplicated().any():
+                issues.append("Duplicate interaction pairs found")
+            
+            # Check scores are in [0, 1]
+            if 'interaction_score' in result.interaction_scores.columns:
+                if not np.all((0 <= result.interaction_scores['interaction_score']) & 
+                            (result.interaction_scores['interaction_score'] <= 1)):
+                    issues.append("Interaction scores outside [0, 1] range")
+        
+        # Check interaction matrix
+        if result.interaction_matrix.empty:
+            issues.append("Interaction matrix is empty")
+        else:
+            # Check symmetry
+            if not np.allclose(result.interaction_matrix.values, 
+                              result.interaction_matrix.values.T, atol=1e-10):
+                issues.append("Interaction matrix is not symmetric")
+            
+            # Check diagonal is zero (no self-interactions)
+            if not np.allclose(np.diag(result.interaction_matrix.values), 0, atol=1e-10):
+                issues.append("Self-interactions found on diagonal")
+        
+        # Check stability scores
+        if result.stability_scores.empty:
+            issues.append("Interaction stability scores are empty")
+        else:
+            if not np.all(
+                (result.stability_scores >= 0)
+                & (result.stability_scores <= 1)
+            ):
+                issues.append("Interaction stability scores outside [0,1]")
+        
+        # Check top stability
+        if not (
+            0 <= result.statistics["top_stability"] <= 1
+        ):
+            issues.append("Top stability outside [0,1]")
+        
+        # Check top interactions
+        if result.top_interactions:
+            for pair in result.top_interactions:
+                if "||" not in pair:
+                    issues.append(f"Invalid pair format (missing '||'): {pair}")
+        
+        # Check statistics
+        if statistics.total_pairs != len(result.interaction_scores):
+            issues.append(
+                f"Total pairs mismatch: stats={statistics.total_pairs}, "
+                f"result={len(result.interaction_scores)}"
+            )
+        
+        if statistics.top_pair != result.statistics.get('top_pair'):
+            issues.append(
+                f"Top pair mismatch: stats={statistics.top_pair}, "
+                f"result={result.statistics.get('top_pair')}"
+            )
+        
+        if not (0 <= result.statistics['method_agreement'] <= 1):
+            issues.append(f"Method agreement out of [0,1]: {result.statistics['method_agreement']}")
+        
+        # Check methods used are correct
+        expected_methods = {
+            "mutual_information",
+            "interaction_permutation",
+            "anova_interaction",
+            "gb_interaction",
+        }
+
+        actual_methods = set(
+            result.statistics["methods_used"]
+        )
+
+        if actual_methods != expected_methods:
+            issues.append(
+                "Unexpected interaction methods: "
+                f"{sorted(actual_methods)}"
+            )
+        
+        # Warnings (non-fatal)
+        if result.statistics['method_agreement'] < 0.30:
+            warnings.append(
+                f"Low agreement between interaction methods: {result.statistics['method_agreement']:.3f}"
+            )
+        
+        if result.statistics['total_pairs'] < 10:
+            warnings.append(
+                f"Very few interaction pairs: {result.statistics['total_pairs']}"
+            )
+        
+        if warnings:
+            print("\n  WARNINGS:")
+            for warning in warnings:
+                print(f"    ⚠ {warning}")
+        
+        if issues:
+            raise ValueError(
+                f"Feature Interaction validation failed with {len(issues)} issue(s):\n" +
+                "\n".join(f"  - {issue}" for issue in issues)
+            )
+        
+        return True
+
+
+def run_validation(result, statistics):
+    """Run validation with user-friendly output."""
+    validator = FeatureInteractionValidator()
+    
+    print("\n" + "=" * 60)
+    print("FEATURE INTERACTION VALIDATION")
+    print("=" * 60)
+    
+    try:
+        validator.validate(result, statistics)
+        print("\n  ✓ All validation checks passed")
+        print("=" * 60)
+        return True
+    except ValueError as e:
+        print(e)
+        print("=" * 60)
+        return False

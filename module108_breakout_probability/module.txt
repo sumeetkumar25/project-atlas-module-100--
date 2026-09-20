@@ -1,0 +1,588 @@
+"""
+Module 108 - Breakout Probability Research.
+
+Produces both:
+
+1. Canonical Atlas artifacts:
+       features
+       statistics
+       report
+       validation
+
+2. Module-specific artifacts:
+       state_probabilities
+       state_statistics
+       breakout_probability_report
+       state_report
+       ranking_report
+"""
+
+from datetime import datetime
+from pathlib import Path
+from typing import List, Optional
+
+import numpy as np
+import pandas as pd
+
+from atlas.core.base_research_module import (
+    BaseResearchModule,
+)
+
+from atlas.core.research_result import (
+    ResearchResult,
+)
+
+from atlas.modules.module108_breakout_probability.engine import (
+    BreakoutProbabilityEngine,
+)
+
+from atlas.modules.module108_breakout_probability.statistics import (
+    BreakoutStatisticsEngine,
+)
+
+from atlas.modules.module108_breakout_probability.validator import (
+    run_validation,
+)
+
+from atlas.modules.module108_breakout_probability.report import (
+    BreakoutProbabilityReport,
+)
+
+
+class BreakoutProbabilityResearch(
+    BaseResearchModule
+):
+    """
+    Research module for breakout probability analysis.
+
+    Module 108 measures the probability of future price
+    breakouts conditioned on Module 103 market states.
+    """
+
+    METADATA = {
+        "name": "Breakout Probability",
+        "version": "1.0.0",
+        "category": "Market Behavior Research",
+        "depends_on": ["103"],
+    }
+
+    def __init__(
+        self,
+        horizons: List[int] = None,
+        atr_period: int = 14,
+        k_multiplier: float = 1.0,
+        min_samples: int = 10,
+        confidence_level: float = 0.95,
+    ):
+        super().__init__(
+            module_name="Breakout Probability Research",
+            module_version="1.0.0",
+        )
+
+        self.engine = (
+            BreakoutProbabilityEngine(
+                horizons=horizons,
+                atr_period=atr_period,
+                k_multiplier=k_multiplier,
+                min_samples=min_samples,
+                confidence_level=confidence_level,
+            )
+        )
+
+        self.stats_engine = (
+            BreakoutStatisticsEngine()
+        )
+
+    # ------------------------------------------------------------------
+    # Core computation
+    # ------------------------------------------------------------------
+
+    def compute(
+        self,
+        high: pd.Series,
+        low: pd.Series,
+        close: pd.Series,
+        states: np.ndarray,
+        dataset_id: str = "default",
+    ) -> ResearchResult:
+        """
+        Compute Module 108 breakout research.
+        """
+
+        if not (
+            len(high)
+            == len(low)
+            == len(close)
+            == len(states)
+        ):
+            raise ValueError(
+                "high, low, close, and states "
+                "must have equal length"
+            )
+
+        if len(close) == 0:
+            raise ValueError(
+                "Input data cannot be empty"
+            )
+
+        # --------------------------------------------------------------
+        # ResearchResult
+        # --------------------------------------------------------------
+
+        result = ResearchResult(
+            module_name=self.module_name,
+            module_version=self.module_version,
+            dataset_identifier=dataset_id,
+
+            timestamp_start=(
+                close.index[0]
+            ),
+
+            timestamp_end=(
+                close.index[-1]
+            ),
+
+            execution_timestamp=(
+                datetime.now().isoformat()
+            ),
+        )
+
+        # --------------------------------------------------------------
+        # 1. Run engine
+        # --------------------------------------------------------------
+
+        engine_result = self.engine.compute(
+            high=high,
+            low=low,
+            close=close,
+            states=states,
+        )
+
+        # --------------------------------------------------------------
+        # 2. Statistics
+        # --------------------------------------------------------------
+
+        stats = self.stats_engine.analyze(
+            engine_result
+        )
+
+        # --------------------------------------------------------------
+        # 3. Validation
+        # --------------------------------------------------------------
+
+        validation_passed = run_validation(
+            engine_result,
+            stats,
+        )
+
+        # --------------------------------------------------------------
+        # 4. Reports
+        # --------------------------------------------------------------
+
+        prob_report = (
+            BreakoutProbabilityReport.generate(
+                statistics=stats,
+                dataset_name=dataset_id,
+            )
+        )
+
+        state_report = (
+            BreakoutProbabilityReport.generate_state_report(
+                state_probabilities=(
+                    engine_result.state_probabilities
+                ),
+                horizons=stats.horizons,
+            )
+        )
+
+        ranking_report = (
+            BreakoutProbabilityReport.generate_ranking_report(
+                state_statistics=(
+                    engine_result.state_statistics
+                ),
+                horizons=stats.horizons,
+            )
+        )
+
+        # --------------------------------------------------------------
+        # 5. CANONICAL FEATURES ARTIFACT
+        #
+        # This is the artifact required by the Atlas framework.
+        #
+        # It contains row-level forward targets and the market state
+        # used to condition the Module 108 analysis.
+        # --------------------------------------------------------------
+
+        features = engine_result.targets.copy()
+
+        # Preserve the original market index.
+        #
+        # The framework may use DatetimeIndex or another index type.
+        # We therefore retain it explicitly as a timestamp column
+        # without changing the target index itself.
+        features.insert(
+            0,
+            "timestamp",
+            close.index,
+        )
+
+        features.insert(
+            1,
+            "state",
+            np.asarray(states),
+        )
+
+        # --------------------------------------------------------------
+        # 6. CANONICAL STATISTICS ARTIFACT
+        # --------------------------------------------------------------
+
+        statistics_df = (
+            self.stats_engine.summary_dataframe(
+                stats
+            )
+        )
+
+        # --------------------------------------------------------------
+        # 7. CANONICAL ARTIFACTS
+        #
+        # DO NOT remove the Module 108-specific artifacts.
+        # The framework requires the first four canonical artifacts.
+        # --------------------------------------------------------------
+
+        artifacts = {
+
+            # ==========================================================
+            # CANONICAL ATLAS ARTIFACT CONTRACT
+            # ==========================================================
+
+            "features": features,
+
+            "statistics": statistics_df,
+
+            "report": prob_report,
+
+            "validation": validation_passed,
+
+            # ==========================================================
+            # MODULE 108-SPECIFIC ARTIFACTS
+            # ==========================================================
+
+            "state_probabilities": (
+                engine_result.state_probabilities
+            ),
+
+            "state_statistics": (
+                engine_result.state_statistics
+            ),
+
+            "breakout_probability_report": (
+                prob_report
+            ),
+
+            "state_report": state_report,
+
+            "ranking_report": ranking_report,
+        }
+
+        # --------------------------------------------------------------
+        # 8. Scalar statistics stored on ResearchResult
+        # --------------------------------------------------------------
+
+        result.add_statistic(
+            "validation_passed",
+            validation_passed,
+        )
+
+        result.add_statistic(
+            "states_with_samples",
+            stats.states_with_samples,
+        )
+
+        result.add_statistic(
+            "max_up_prob_state",
+            stats.max_up_prob_state,
+        )
+
+        result.add_statistic(
+            "max_up_prob_value",
+            stats.max_up_prob_value,
+        )
+
+        result.add_statistic(
+            "max_down_prob_state",
+            stats.max_down_prob_state,
+        )
+
+        result.add_statistic(
+            "max_down_prob_value",
+            stats.max_down_prob_value,
+        )
+
+        result.add_statistic(
+            "total_states",
+            stats.total_states,
+        )
+
+        result.add_statistic(
+            "sample_size",
+            stats.sample_size,
+        )
+
+        result.add_statistic(
+            "horizons",
+            stats.horizons,
+        )
+
+        # --------------------------------------------------------------
+        # 9. Attach artifacts
+        # --------------------------------------------------------------
+
+        result.artifacts = artifacts
+
+        result.status = "completed"
+
+        return result
+
+    # ------------------------------------------------------------------
+    # DataFrame execution
+    # ------------------------------------------------------------------
+
+    def run_dataframe(
+        self,
+        df: pd.DataFrame,
+        dataset_id: str = "default",
+        output_dir: Optional[Path] = None,
+        **kwargs,
+    ) -> ResearchResult:
+        """
+        Run Module 108 on a DataFrame.
+
+        The ResearchRunner may inject Module 103 dependency
+        features before this method executes.
+        """
+
+        # --------------------------------------------------------------
+        # Load through BaseResearchModule.
+        # This preserves framework dependency injection.
+        # --------------------------------------------------------------
+
+        self.load_dataframe(
+            df,
+            dataset_id,
+        )
+
+        execution_df = self.df
+
+        # --------------------------------------------------------------
+        # Required columns
+        # --------------------------------------------------------------
+
+        required = [
+            "open",
+            "high",
+            "low",
+            "close",
+            "state",
+        ]
+
+        missing = [
+            column
+            for column in required
+            if column not in execution_df.columns
+        ]
+
+        if missing:
+            raise ValueError(
+                f"Missing required columns: {missing}"
+            )
+
+        # --------------------------------------------------------------
+        # Extract OHLC
+        # --------------------------------------------------------------
+
+        high = execution_df["high"]
+        low = execution_df["low"]
+        close = execution_df["close"]
+
+        # --------------------------------------------------------------
+        # Extract Module 103 state
+        # --------------------------------------------------------------
+
+        states = (
+            execution_df["state"]
+            .to_numpy()
+        )
+
+        # --------------------------------------------------------------
+        # Execute computation
+        # --------------------------------------------------------------
+
+        result = self.compute(
+            high=high,
+            low=low,
+            close=close,
+            states=states,
+            dataset_id=dataset_id,
+        )
+
+        # --------------------------------------------------------------
+        # Export
+        # --------------------------------------------------------------
+
+        if output_dir is not None:
+            self.export(
+                result,
+                output_dir,
+            )
+
+        return result
+
+    # ------------------------------------------------------------------
+    # Framework run
+    # ------------------------------------------------------------------
+
+    def run(
+        self,
+        data: pd.DataFrame,
+        dataset_id: str = "default",
+        output_dir: Optional[Path] = None,
+        **kwargs,
+    ) -> ResearchResult:
+        """
+        Framework-compatible execution entry point.
+        """
+
+        return self.run_dataframe(
+            data=data,
+            dataset_id=dataset_id,
+            output_dir=output_dir,
+            **kwargs,
+        )
+
+    # ------------------------------------------------------------------
+    # Export
+    # ------------------------------------------------------------------
+
+    def export(
+        self,
+        result: ResearchResult,
+        output_dir: Path,
+    ) -> None:
+        """
+        Export Module 108 artifacts.
+
+        Important:
+        `statistics.csv` belongs to the canonical artifact named
+        "statistics".
+
+        Framework execution/scalar statistics are therefore written
+        separately to `run_statistics.csv` so they cannot overwrite
+        the canonical statistics artifact.
+        """
+
+        output_dir = Path(
+            output_dir
+        )
+
+        output_dir.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        # --------------------------------------------------------------
+        # Export artifacts
+        # --------------------------------------------------------------
+
+        for name, artifact in (
+            result.artifacts.items()
+        ):
+
+            if isinstance(
+                artifact,
+                pd.DataFrame,
+            ):
+
+                path = (
+                    output_dir
+                    / f"{name}.csv"
+                )
+
+                artifact.to_csv(
+                    path,
+                    index=False,
+                )
+
+            elif isinstance(
+                artifact,
+                str,
+            ):
+
+                path = (
+                    output_dir
+                    / f"{name}.txt"
+                )
+
+                with open(
+                    path,
+                    "w",
+                    encoding="utf-8",
+                ) as f:
+
+                    f.write(artifact)
+
+            elif isinstance(
+                artifact,
+                bool,
+            ):
+
+                path = (
+                    output_dir
+                    / f"{name}.txt"
+                )
+
+                with open(
+                    path,
+                    "w",
+                    encoding="utf-8",
+                ) as f:
+
+                    f.write(
+                        f"{name}: {artifact}"
+                    )
+
+        # --------------------------------------------------------------
+        # Export ResearchResult scalar statistics separately.
+        #
+        # DO NOT call this `statistics.csv`.
+        # Otherwise it overwrites the canonical statistics artifact.
+        # --------------------------------------------------------------
+
+        stats_path = (
+            output_dir
+            / "run_statistics.csv"
+        )
+
+        stats_data = []
+
+        for key, value in (
+            result.statistics.items()
+        ):
+
+            stats_data.append(
+                {
+                    "statistic": key,
+                    "value": value,
+                }
+            )
+
+        pd.DataFrame(
+            stats_data
+        ).to_csv(
+            stats_path,
+            index=False,
+        )
+
+        print(
+            f"  ✓ Exported results to "
+            f"{output_dir}"
+        )

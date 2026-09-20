@@ -1,0 +1,9 @@
+# atlas/modules/module108_breakout_probability/__init__.py
+"""
+Module 108
+Breakout Probability
+"""
+
+from .module import BreakoutProbabilityResearch
+
+__all__ = ["BreakoutProbabilityResearch"]

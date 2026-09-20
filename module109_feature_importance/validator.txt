@@ -1,0 +1,54 @@
+"""
+Module 109 - Feature Importance Validator
+"""
+
+import numpy as np
+from .engine import FeatureImportanceResult
+from .statistics import FeatureImportanceStatistics
+
+
+class FeatureImportanceValidator:
+    def validate(self, result: FeatureImportanceResult, statistics: FeatureImportanceStatistics) -> bool:
+        issues = []
+        
+        if result.feature_importance.empty:
+            issues.append("Feature importance DataFrame is empty")
+        
+        if result.method_scores.empty:
+            issues.append("Method scores DataFrame is empty")
+        
+        if result.feature_ranking.empty:
+            issues.append("Feature ranking DataFrame is empty")
+        
+        if statistics.total_features <= 0:
+            issues.append(f"Total features must be positive: {statistics.total_features}")
+        
+        if not (0 <= statistics.top_importance <= 1):
+            issues.append(f"Top importance out of [0, 1]: {statistics.top_importance:.4f}")
+        
+        if not (0 <= statistics.top_stability <= 1):
+            issues.append(f"Top stability out of [0, 1]: {statistics.top_stability:.1%}")
+        
+        if statistics.method_agreement < 0 or statistics.method_agreement > 1:
+            issues.append(f"Method agreement out of [0, 1]: {statistics.method_agreement:.3f}")
+        
+        if issues:
+            raise ValueError(f"Feature Importance validation failed with {len(issues)} issue(s):\n" + "\n".join(f"  - {issue}" for issue in issues))
+        
+        return True
+
+
+def run_validation(result, statistics):
+    validator = FeatureImportanceValidator()
+    print("\n" + "=" * 60)
+    print("FEATURE IMPORTANCE VALIDATION")
+    print("=" * 60)
+    try:
+        validator.validate(result, statistics)
+        print("\n  ✓ All validation checks passed")
+        print("=" * 60)
+        return True
+    except ValueError as e:
+        print(e)
+        print("=" * 60)
+        return False
