@@ -1,0 +1,1939 @@
+"""
+Module 111 - Monte Carlo Validation Engine
+
+Validates statistical relationships under repeated
+resampling, randomization and temporal robustness testing.
+
+Design principles:
+1. Observed statistics use the full estimator.
+2. Monte Carlo statistics use a lighter estimator with the
+   same scoring procedure.
+3. ROC-AUC null hypothesis is 0.5.
+4. Randomness is deterministic per iteration.
+5. Walk-forward validation is genuinely out-of-sample.
+6. Statistical failures are not silently converted to score=0.
+
+Two-tier estimator configuration:
+- Observed score:      n_estimators=100, cv_folds=5  (accurate)
+- Monte Carlo tests:   resampling_estimators=30, resampling_cv_folds=3  (faster)
+"""
+
+import warnings
+from dataclasses import dataclass
+from typing import Optional, Dict, Any, List, Tuple
+
+import numpy as np
+import pandas as pd
+
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import (
+    accuracy_score,
+    balanced_accuracy_score,
+    roc_auc_score,
+    f1_score,
+    matthews_corrcoef,
+)
+from sklearn.model_selection import StratifiedKFold, cross_val_score
+from sklearn.utils import resample
+from joblib import Parallel, delayed
+
+
+warnings.filterwarnings("ignore")
+
+
+@dataclass
+class MonteCarloValidationResult:
+    """Results from Monte Carlo validation."""
+
+    observed_score: float
+    monte_carlo_mean: float
+    monte_carlo_std: float
+
+    confidence_interval_95: Tuple[float, float]
+    confidence_interval_99: Tuple[float, float]
+
+    p_value: float
+    z_score: float
+
+    bootstrap_distribution: pd.DataFrame
+    permutation_distribution: pd.DataFrame
+
+    robustness_statistics: Dict[str, Any]
+    passed: bool
+    validation_details: Dict[str, Any]
+
+    edge_survival_rate: float
+    edge_failure_rate: float
+
+    worst_case: float
+    best_case: float
+
+    skewness: float
+    kurtosis: float
+
+
+class MonteCarloValidationEngine:
+    """Core Monte Carlo validation engine."""
+
+    def __init__(
+        self,
+        n_bootstrap: int = 200,
+        n_permutations: int = 500,
+        n_shuffles: int = 3,
+        n_noise_repeats: int = 5,
+        n_noise_levels: Optional[List[float]] = None,
+        block_sizes: Optional[List[int]] = None,
+        sample_sizes: Optional[List[float]] = None,
+        outlier_percentiles: Optional[List[float]] = None,
+        price_column: Optional[str] = None,
+        random_state: int = 42,
+        n_jobs: int = -1,
+        fast_mode: bool = False,
+        metric: str = "roc_auc",
+        n_estimators: int = 100,
+        cv_folds: int = 5,
+        resampling_estimators: int = 30,
+        resampling_cv_folds: int = 3,
+    ):
+        if n_noise_levels is None:
+            n_noise_levels = [0.01, 0.05, 0.10, 0.20]
+
+        if block_sizes is None:
+            block_sizes = [32, 64, 128]
+
+        if sample_sizes is None:
+            sample_sizes = [0.6, 0.7, 0.8, 0.9]
+
+        if outlier_percentiles is None:
+            outlier_percentiles = [0.01, 0.02, 0.05]
+
+        if fast_mode:
+            n_bootstrap = min(n_bootstrap, 30)
+            n_permutations = min(n_permutations, 50)
+            n_shuffles = min(n_shuffles, 3)
+            n_noise_repeats = min(n_noise_repeats, 5)
+
+            resampling_estimators = min(
+                resampling_estimators,
+                20,
+            )
+
+            resampling_cv_folds = min(
+                resampling_cv_folds,
+                3,
+            )
+
+        self.n_bootstrap = n_bootstrap
+        self.n_permutations = n_permutations
+        self.n_shuffles = n_shuffles
+        self.n_noise_repeats = n_noise_repeats
+
+        self.n_noise_levels = n_noise_levels
+        self.block_sizes = block_sizes
+        self.sample_sizes = sample_sizes
+        self.outlier_percentiles = outlier_percentiles
+
+        self.price_column = price_column
+        self.random_state = random_state
+        self.n_jobs = n_jobs
+        self.fast_mode = fast_mode
+        self.metric = metric
+        self.n_estimators = n_estimators
+        self.cv_folds = cv_folds
+
+        # ---------------------------------------------------------
+        # Two-tier estimator configuration
+        #
+        # Observed score uses the full estimator.
+        # Monte Carlo repetitions use a lighter estimator.
+        #
+        # Rationale: the purpose of the observed score is accuracy.
+        # The purpose of the Monte Carlo tests is measuring the
+        # distribution / robustness of that score under resampling.
+        # ---------------------------------------------------------
+        self.resampling_estimators = resampling_estimators
+        self.resampling_cv_folds = resampling_cv_folds
+
+        # ---------------------------------------------------------
+        # Bootstrap diagnostics (opt-in, off by default)
+        # ---------------------------------------------------------
+        self.bootstrap_diagnostics = False
+        self.bootstrap_progress_every = 1
+
+    # ---------------------------------------------------------
+    # Utility
+    # ---------------------------------------------------------
+
+    def _seed(self, iteration: int, namespace: int = 0) -> int:
+        """Generate deterministic independent seed."""
+        return (
+            self.random_state
+            + namespace * 1_000_003
+            + iteration * 9_973
+        )
+
+    def _validate_input(
+        self,
+        X: pd.DataFrame,
+        y: np.ndarray,
+    ):
+        if X is None or y is None:
+            raise ValueError("X and y are required")
+
+        if len(X) != len(y):
+            raise ValueError(
+                f"X/y length mismatch: X={len(X)}, y={len(y)}"
+            )
+
+        if len(X) == 0:
+            raise ValueError("Empty dataset")
+
+        if not isinstance(X, pd.DataFrame):
+            raise TypeError("X must be a pandas DataFrame")
+
+        if X.isnull().any().any():
+            raise ValueError("X contains NaN values")
+
+        if not np.all(np.isfinite(X.to_numpy(dtype=float))):
+            raise ValueError("X contains infinite values")
+
+        if len(np.unique(y)) < 2:
+            raise ValueError(
+                "Target must contain at least two classes"
+            )
+
+    def _get_cv(
+        self,
+        y: np.ndarray,
+        cv_folds: int
+    ):
+        """
+        Create stratified cross-validation splits.
+
+        Defensively validates the target before attempting to
+        create folds. This ensures the engine receives clean
+        binary labels.
+        """
+        y = np.asarray(y)
+
+        if y.ndim != 1:
+            raise ValueError(
+                "Target y must be one-dimensional"
+            )
+
+        if not np.all(
+            np.isfinite(y)
+        ):
+            raise ValueError(
+                "Target y contains NaN or infinite values"
+            )
+
+        if not np.all(
+            np.equal(
+                y,
+                np.floor(y)
+            )
+        ):
+            raise ValueError(
+                "Target y must contain integer class labels"
+            )
+
+        unique_classes = np.unique(y)
+
+        if not np.isin(
+            unique_classes,
+            [0, 1]
+        ).all():
+            raise ValueError(
+                "Target y must contain only binary "
+                f"labels 0 and 1; found "
+                f"{unique_classes.tolist()}"
+            )
+
+        class_counts = np.bincount(
+            y.astype(np.int64)
+        )
+
+        if len(class_counts) < 2:
+            raise ValueError(
+                "Target must contain two classes"
+            )
+
+        min_class = int(
+            np.min(class_counts)
+        )
+
+        n_splits = min(
+            cv_folds,
+            min_class
+        )
+
+        if n_splits < 2:
+            raise ValueError(
+                "Insufficient samples per class "
+                "for cross-validation"
+            )
+
+        return StratifiedKFold(
+            n_splits=n_splits,
+            shuffle=True,
+            random_state=self.random_state,
+        )
+
+    def _null_value(self) -> float:
+        """
+        Statistical null reference.
+
+        ROC-AUC:
+            H0 = 0.5
+
+        MCC/F1:
+            approximate zero reference
+
+        Accuracy:
+            handled mainly through permutation testing.
+        """
+        if self.metric == "roc_auc":
+            return 0.5
+
+        if self.metric in ("mcc", "f1", "balanced_accuracy"):
+            return 0.0
+
+        return 0.0
+
+    # ---------------------------------------------------------
+    # Metric
+    # ---------------------------------------------------------
+
+    def compute_score(
+        self,
+        X: pd.DataFrame,
+        y: np.ndarray,
+        cv_folds: Optional[int] = None,
+        n_estimators: Optional[int] = None,
+    ) -> float:
+        """
+        Compute the observed statistic.
+
+        IMPORTANT:
+        This exact estimator is also used by bootstrap
+        and permutation tests.
+
+        Two-tier configuration:
+        - If cv_folds is None, uses self.cv_folds (full accuracy)
+        - If n_estimators is None, uses self.n_estimators (full accuracy)
+
+        Repeated Monte Carlo tests should pass
+        self.resampling_cv_folds and self.resampling_estimators
+        to use the lighter estimator.
+        """
+
+        import time
+
+        score_start = time.perf_counter()
+
+        self._validate_input(X, y)
+
+        cv_folds = cv_folds or self.cv_folds
+        n_estimators = n_estimators or self.n_estimators
+
+        rf = RandomForestClassifier(
+            n_estimators=n_estimators,
+            random_state=self.random_state,
+            n_jobs=1,
+        )
+
+        cv = self._get_cv(y, cv_folds)
+
+        scoring_map = {
+            "roc_auc": "roc_auc",
+            "accuracy": "accuracy",
+            "balanced_accuracy": "balanced_accuracy",
+            "f1": "f1",
+        }
+
+        if self.metric in scoring_map:
+
+            if self.bootstrap_diagnostics:
+                print(
+                    "[COMPUTE SCORE START CV] "
+                    f"rows={len(X)} "
+                    f"features={X.shape[1]} "
+                    f"cv_folds={cv_folds} "
+                    f"estimators={n_estimators} "
+                    f"metric={self.metric}",
+                    flush=True,
+                )
+
+            scores = cross_val_score(
+                rf,
+                X,
+                y,
+                cv=cv,
+                scoring=scoring_map[self.metric],
+            )
+
+        elif self.metric == "mcc":
+            from sklearn.metrics import make_scorer
+
+            scorer = make_scorer(matthews_corrcoef)
+
+            scores = cross_val_score(
+                rf,
+                X,
+                y,
+                cv=cv,
+                scoring=scorer,
+            )
+
+        else:
+            raise ValueError(
+                f"Unsupported metric: {self.metric}"
+            )
+
+        if len(scores) == 0:
+            raise ValueError("Cross-validation returned no scores")
+
+        score = float(np.mean(scores))
+
+        if not np.isfinite(score):
+            raise ValueError(
+                f"Non-finite evaluation score: {score}"
+            )
+
+        elapsed = (
+            time.perf_counter()
+            - score_start
+        )
+
+        if self.bootstrap_diagnostics:
+            print(
+                f"[COMPUTE SCORE] "
+                f"rows={len(X)} "
+                f"features={X.shape[1]} "
+                f"score={score:.6f} "
+                f"time={elapsed:.2f}s",
+                flush=True,
+            )
+
+        return score
+
+    # ---------------------------------------------------------
+    # Bootstrap
+    # ---------------------------------------------------------
+
+    def _bootstrap_iter(
+        self,
+        iteration: int,
+        X: pd.DataFrame,
+        y: np.ndarray,
+    ) -> float:
+
+        import time
+
+        start_time = time.perf_counter()
+
+        if self.bootstrap_diagnostics:
+            print(
+                f"[BOOTSTRAP START] "
+                f"iteration={iteration} "
+                f"rows={len(X)}",
+                flush=True,
+            )
+
+        rng = np.random.default_rng(
+            self._seed(
+                iteration,
+                namespace=1,
+            )
+        )
+
+        indices = rng.integers(
+            0,
+            len(X),
+            size=len(X),
+        )
+
+        X_boot = (
+            X.iloc[indices]
+            .reset_index(drop=True)
+        )
+
+        y_boot = y[indices]
+
+        if self.bootstrap_diagnostics:
+
+            unique_classes, class_counts = np.unique(
+                y_boot,
+                return_counts=True,
+            )
+
+            print(
+                f"[BOOTSTRAP SAMPLE] "
+                f"iteration={iteration} "
+                f"class_distribution="
+                f"{dict(zip(unique_classes.tolist(), class_counts.tolist()))}",
+                flush=True,
+            )
+
+        try:
+
+            score_start = time.perf_counter()
+
+            score = self.compute_score(
+                X_boot,
+                y_boot,
+                cv_folds=self.resampling_cv_folds,
+                n_estimators=self.resampling_estimators,
+            )
+
+            score_elapsed = (
+                time.perf_counter()
+                - score_start
+            )
+
+            total_elapsed = (
+                time.perf_counter()
+                - start_time
+            )
+
+            if self.bootstrap_diagnostics:
+                print(
+                    f"[BOOTSTRAP DONE] "
+                    f"iteration={iteration} "
+                    f"score={score:.6f} "
+                    f"compute_time={score_elapsed:.2f}s "
+                    f"total_time={total_elapsed:.2f}s",
+                    flush=True,
+                )
+
+            return score
+
+        except Exception as exc:
+
+            elapsed = (
+                time.perf_counter()
+                - start_time
+            )
+
+            print(
+                f"[BOOTSTRAP ERROR] "
+                f"iteration={iteration} "
+                f"time={elapsed:.2f}s "
+                f"type={type(exc).__name__} "
+                f"message={exc}",
+                flush=True,
+            )
+
+            return np.nan
+
+    def bootstrap_validation(
+        self,
+        X: pd.DataFrame,
+        y: np.ndarray,
+        observed_score: Optional[float] = None,
+    ) -> Dict[str, Any]:
+
+        import time
+
+        bootstrap_start = time.perf_counter()
+
+        if self.bootstrap_diagnostics:
+            print(
+                "\n[BOOTSTRAP DIAGNOSTIC] "
+                f"starting "
+                f"iterations={self.n_bootstrap} "
+                f"rows={len(X)} "
+                f"features={X.shape[1]} "
+                f"n_jobs={self.n_jobs} "
+                f"estimators={self.resampling_estimators} "
+                f"cv_folds={self.resampling_cv_folds}",
+                flush=True,
+            )
+
+        if observed_score is None:
+            observed_score = self.compute_score(
+                X,
+                y,
+                cv_folds=self.cv_folds,
+                n_estimators=self.n_estimators,
+            )
+
+        # ---------------------------------------------------------
+        # EXECUTION MODE
+        # ---------------------------------------------------------
+        if self.bootstrap_diagnostics:
+
+            print(
+                "[BOOTSTRAP DIAGNOSTIC] "
+                "running sequential diagnostic mode",
+                flush=True,
+            )
+
+            scores = [
+                self._bootstrap_iter(
+                    i,
+                    X,
+                    y,
+                )
+                for i in range(self.n_bootstrap)
+            ]
+
+        else:
+
+            scores = Parallel(
+                n_jobs=self.n_jobs
+            )(
+                delayed(self._bootstrap_iter)(
+                    i,
+                    X,
+                    y,
+                )
+                for i in range(self.n_bootstrap)
+            )
+
+        bootstrap_elapsed = (
+            time.perf_counter()
+            - bootstrap_start
+        )
+
+        if self.bootstrap_diagnostics:
+            print(
+                "[BOOTSTRAP DIAGNOSTIC] "
+                f"execution returned "
+                f"after {bootstrap_elapsed:.2f}s",
+                flush=True,
+            )
+
+        scores = np.asarray(scores, dtype=float)
+        scores = scores[np.isfinite(scores)]
+
+        if len(scores) < max(10, self.n_bootstrap * 0.5):
+            raise RuntimeError(
+                "Too many bootstrap iterations failed. "
+                f"Successful={len(scores)}, "
+                f"requested={self.n_bootstrap}"
+            )
+
+        bias = float(np.mean(scores) - observed_score)
+
+        return {
+            "mean": float(np.mean(scores)),
+            "std": float(np.std(scores, ddof=1)),
+            "median": float(np.median(scores)),
+            "bias": bias,
+            "variance": float(np.var(scores, ddof=1)),
+            "skewness": float(pd.Series(scores).skew()),
+            "kurtosis": float(pd.Series(scores).kurtosis()),
+            "worst": float(np.min(scores)),
+            "best": float(np.max(scores)),
+            "ci_95_lower": float(np.percentile(scores, 2.5)),
+            "ci_95_upper": float(np.percentile(scores, 97.5)),
+            "ci_99_lower": float(np.percentile(scores, 0.5)),
+            "ci_99_upper": float(np.percentile(scores, 99.5)),
+            "distribution": scores,
+            "observed_score": observed_score,
+        }
+
+    # ---------------------------------------------------------
+    # Permutation
+    # ---------------------------------------------------------
+
+    def _permutation_iter(
+        self,
+        iteration: int,
+        X: pd.DataFrame,
+        y: np.ndarray,
+    ) -> float:
+
+        rng = np.random.default_rng(
+            self._seed(iteration, namespace=2)
+        )
+
+        y_permuted = rng.permutation(y)
+
+        try:
+            return self.compute_score(
+                X,
+                y_permuted,
+                cv_folds=self.resampling_cv_folds,
+                n_estimators=self.resampling_estimators,
+            )
+        except ValueError:
+            return np.nan
+
+    def permutation_test(
+        self,
+        X: pd.DataFrame,
+        y: np.ndarray,
+        observed_score: Optional[float] = None,
+    ) -> Dict[str, Any]:
+
+        if observed_score is None:
+            observed_score = self.compute_score(
+                X,
+                y,
+                cv_folds=self.cv_folds,
+                n_estimators=self.n_estimators,
+            )
+
+        null_scores = Parallel(
+            n_jobs=self.n_jobs
+        )(
+            delayed(self._permutation_iter)(
+                i,
+                X,
+                y,
+            )
+            for i in range(self.n_permutations)
+        )
+
+        null_scores = np.asarray(
+            null_scores,
+            dtype=float,
+        )
+
+        null_scores = null_scores[
+            np.isfinite(null_scores)
+        ]
+
+        if len(null_scores) < max(
+            10,
+            self.n_permutations * 0.5,
+        ):
+            raise RuntimeError(
+                "Too many permutation iterations failed."
+            )
+
+        # Finite-sample Monte Carlo p-value.
+        exceedances = np.sum(
+            null_scores >= observed_score
+        )
+
+        p_value = (
+            exceedances + 1
+        ) / (
+            len(null_scores) + 1
+        )
+
+        null_mean = float(np.mean(null_scores))
+        null_std = float(np.std(null_scores, ddof=1))
+
+        if null_std > 1e-12:
+            z_score = (
+                observed_score - null_mean
+            ) / null_std
+        else:
+            z_score = 0.0
+
+        return {
+            "observed_score": observed_score,
+            "null_mean": null_mean,
+            "null_std": null_std,
+            "p_value": float(p_value),
+            "z_score": float(z_score),
+            "distribution": null_scores,
+        }
+
+    # ---------------------------------------------------------
+    # Label shuffle (reuses permutation distribution)
+    # ---------------------------------------------------------
+
+    def label_shuffle_test(
+        self,
+        observed_score: float,
+        permutation: Dict[str, Any],
+    ) -> Dict[str, Any]:
+
+        scores = np.asarray(
+            permutation["distribution"],
+            dtype=float,
+        )
+
+        scores = scores[np.isfinite(scores)]
+
+        if len(scores) == 0:
+            raise RuntimeError(
+                "Permutation distribution contains no valid scores."
+            )
+
+        shuffled_mean = float(np.mean(scores))
+
+        return {
+            "observed_score": float(observed_score),
+            "shuffled_mean": shuffled_mean,
+            "shuffled_std": float(
+                np.std(scores, ddof=1)
+            ),
+            "degradation": float(
+                observed_score - shuffled_mean
+            ),
+        }
+
+    # ---------------------------------------------------------
+    # Feature shuffle
+    # ---------------------------------------------------------
+
+    def feature_shuffle_test(
+        self,
+        X: pd.DataFrame,
+        y: np.ndarray,
+        observed_score: Optional[float] = None,
+    ) -> Dict[str, Any]:
+
+        if observed_score is None:
+            observed_score = self.compute_score(
+                X,
+                y,
+                cv_folds=self.cv_folds,
+                n_estimators=self.n_estimators,
+            )
+
+        degradation = {}
+
+        for col_idx, col in enumerate(X.columns):
+
+            values = []
+
+            for iteration in range(self.n_shuffles):
+
+                rng = np.random.default_rng(
+                    self._seed(
+                        iteration,
+                        namespace=100 + col_idx,
+                    )
+                )
+
+                X_shuffled = X.copy()
+
+                X_shuffled[col] = rng.permutation(
+                    X_shuffled[col].values
+                )
+
+                shuffled_score = self.compute_score(
+                    X_shuffled,
+                    y,
+                    cv_folds=self.resampling_cv_folds,
+                    n_estimators=self.resampling_estimators,
+                )
+
+                values.append(
+                    observed_score - shuffled_score
+                )
+
+            degradation[col] = float(
+                np.mean(values)
+            )
+
+        return {
+            "observed_score": observed_score,
+            "degradation": degradation,
+            "max_degradation": (
+                float(max(degradation.values()))
+                if degradation
+                else 0.0
+            ),
+            "mean_degradation": (
+                float(np.mean(list(degradation.values())))
+                if degradation
+                else 0.0
+            ),
+        }
+
+    # ---------------------------------------------------------
+    # Block bootstrap
+    # ---------------------------------------------------------
+
+    def block_bootstrap(
+        self,
+        X: pd.DataFrame,
+        y: np.ndarray,
+        block_size: int = 64,
+    ) -> Dict[str, Any]:
+
+        n = len(X)
+
+        if block_size <= 0:
+            raise ValueError(
+                "block_size must be > 0"
+            )
+
+        n_blocks = int(
+            np.ceil(n / block_size)
+        )
+
+        def block_iteration(i):
+
+            rng = np.random.default_rng(
+                self._seed(
+                    i,
+                    namespace=200 + block_size,
+                )
+            )
+
+            selected_blocks = rng.integers(
+                0,
+                n_blocks,
+                size=n_blocks,
+            )
+
+            indices = []
+
+            for block_idx in selected_blocks:
+
+                start = block_idx * block_size
+                end = min(
+                    start + block_size,
+                    n,
+                )
+
+                indices.extend(
+                    range(start, end)
+                )
+
+            indices = np.asarray(
+                indices,
+                dtype=int,
+            )
+
+            X_block = X.iloc[indices].reset_index(
+                drop=True
+            )
+
+            y_block = y[indices]
+
+            try:
+                return self.compute_score(
+                    X_block,
+                    y_block,
+                    cv_folds=self.resampling_cv_folds,
+                    n_estimators=self.resampling_estimators,
+                )
+            except ValueError:
+                return np.nan
+
+        scores = Parallel(
+            n_jobs=self.n_jobs
+        )(
+            delayed(block_iteration)(i)
+            for i in range(
+                min(
+                    100,
+                    self.n_bootstrap,
+                )
+            )
+        )
+
+        scores = np.asarray(
+            scores,
+            dtype=float,
+        )
+
+        scores = scores[np.isfinite(scores)]
+
+        if len(scores) == 0:
+            raise RuntimeError(
+                f"Block bootstrap failed for block "
+                f"size {block_size}"
+            )
+
+        return {
+            "block_size": block_size,
+            "mean": float(np.mean(scores)),
+            "std": float(np.std(scores, ddof=1)),
+            "ci_95": (
+                float(np.percentile(scores, 2.5)),
+                float(np.percentile(scores, 97.5)),
+            ),
+        }
+
+    # ---------------------------------------------------------
+    # Time shuffle
+    # ---------------------------------------------------------
+
+    def time_shuffle_test(
+        self,
+        X: pd.DataFrame,
+        y: np.ndarray,
+        observed_score: Optional[float] = None,
+    ) -> Dict[str, Any]:
+
+        if observed_score is None:
+            observed_score = self.compute_score(
+                X,
+                y,
+                cv_folds=self.cv_folds,
+                n_estimators=self.n_estimators,
+            )
+
+        X_shuffled = X.copy()
+
+        for col_idx, col in enumerate(
+            X_shuffled.columns
+        ):
+
+            rng = np.random.default_rng(
+                self._seed(
+                    col_idx,
+                    namespace=300,
+                )
+            )
+
+            X_shuffled[col] = rng.permutation(
+                X_shuffled[col].values
+            )
+
+        shuffled_score = self.compute_score(
+            X_shuffled,
+            y,
+            cv_folds=self.resampling_cv_folds,
+            n_estimators=self.resampling_estimators,
+        )
+
+        return {
+            "observed_score": observed_score,
+            "shuffled_score": float(
+                shuffled_score
+            ),
+            "degradation": float(
+                observed_score - shuffled_score
+            ),
+        }
+
+    # ---------------------------------------------------------
+    # Noise injection
+    # ---------------------------------------------------------
+
+    def noise_injection_test(
+        self,
+        X: pd.DataFrame,
+        y: np.ndarray,
+        noise_levels: Optional[List[float]] = None,
+        observed_score: Optional[float] = None,
+    ) -> Dict[str, Any]:
+
+        if noise_levels is None:
+            noise_levels = self.n_noise_levels
+
+        if observed_score is None:
+            observed_score = self.compute_score(
+                X,
+                y,
+                cv_folds=self.cv_folds,
+                n_estimators=self.n_estimators,
+            )
+
+        results = {}
+
+        for level_idx, noise_level in enumerate(
+            noise_levels
+        ):
+
+            scores = []
+
+            for iteration in range(
+                self.n_noise_repeats
+            ):
+
+                rng = np.random.default_rng(
+                    self._seed(
+                        iteration,
+                        namespace=400 + level_idx,
+                    )
+                )
+
+                X_noisy = X.copy()
+
+                for col in X_noisy.columns:
+
+                    std = X_noisy[col].std()
+
+                    if not np.isfinite(std):
+                        raise ValueError(
+                            f"Invalid std for {col}"
+                        )
+
+                    noise = rng.normal(
+                        0,
+                        noise_level * std,
+                        len(X_noisy),
+                    )
+
+                    X_noisy[col] = (
+                        X_noisy[col] + noise
+                    )
+
+                scores.append(
+                    self.compute_score(
+                        X_noisy,
+                        y,
+                        cv_folds=self.resampling_cv_folds,
+                        n_estimators=self.resampling_estimators,
+                    )
+                )
+
+            scores = np.asarray(
+                scores,
+                dtype=float,
+            )
+
+            mean_score = float(
+                np.mean(scores)
+            )
+
+            survival = (
+                mean_score / observed_score
+                if observed_score > 0
+                else 0.0
+            )
+
+            survival = float(
+                np.clip(
+                    survival,
+                    0.0,
+                    1.0,
+                )
+            )
+
+            results[
+                f"{noise_level:.1%}"
+            ] = {
+                "mean_score": mean_score,
+                "std_score": float(
+                    np.std(scores, ddof=1)
+                ),
+                "degradation": float(
+                    observed_score - mean_score
+                ),
+                "survival_rate": survival,
+            }
+
+        survival_rates = [
+            item["survival_rate"]
+            for item in results.values()
+        ]
+
+        avg_survival = float(
+            np.mean(survival_rates)
+        )
+
+        return {
+            "observed_score": observed_score,
+            "results": results,
+            "avg_survival_rate": avg_survival,
+        }
+
+    # ---------------------------------------------------------
+    # Outlier robustness
+    # ---------------------------------------------------------
+
+    def outlier_robustness_test(
+        self,
+        X: pd.DataFrame,
+        y: np.ndarray,
+        percentiles: Optional[List[float]] = None,
+        price_series: Optional[pd.Series] = None,
+        observed_score: Optional[float] = None,
+    ) -> Dict[str, Any]:
+
+        if percentiles is None:
+            percentiles = self.outlier_percentiles
+
+        if observed_score is None:
+            observed_score = self.compute_score(
+                X,
+                y,
+                cv_folds=self.cv_folds,
+                n_estimators=self.n_estimators,
+            )
+
+        if price_series is None:
+            if (
+                self.price_column
+                and self.price_column in X.columns
+            ):
+                price_series = X[
+                    self.price_column
+                ]
+
+            elif "close" in X.columns:
+                price_series = X["close"]
+
+            else:
+                return {
+                    "observed_score": observed_score,
+                    "results": {},
+                    "skipped": True,
+                    "reason": (
+                        "No price series available "
+                        "for candle outlier testing."
+                    ),
+                }
+
+        price_series = price_series.reset_index(
+            drop=True
+        )
+
+        if len(price_series) != len(X):
+            raise ValueError(
+                "price_series length does not match X"
+            )
+
+        results = {}
+
+        for pct in percentiles:
+
+            threshold = price_series.quantile(
+                1 - pct
+            )
+
+            mask = (
+                price_series <= threshold
+            )
+
+            X_filtered = X.loc[
+                mask.values
+            ].reset_index(drop=True)
+
+            y_filtered = y[
+                mask.values
+            ]
+
+            if len(X_filtered) < 20:
+                continue
+
+            try:
+                score = self.compute_score(
+                    X_filtered,
+                    y_filtered,
+                    cv_folds=self.resampling_cv_folds,
+                    n_estimators=self.resampling_estimators,
+                )
+            except ValueError:
+                continue
+
+            results[
+                f"{pct:.1%}"
+            ] = {
+                "score": float(score),
+                "degradation": float(
+                    observed_score - score
+                ),
+                "samples_removed": int(
+                    len(X) - len(X_filtered)
+                ),
+                "survival_rate": float(
+                    score / observed_score
+                    if observed_score > 0
+                    else 0.0
+                ),
+            }
+
+        return {
+            "observed_score": observed_score,
+            "results": results,
+            "skipped": False,
+        }
+
+    # ---------------------------------------------------------
+    # Sample stability
+    # ---------------------------------------------------------
+
+    def sample_stability_test(
+        self,
+        X: pd.DataFrame,
+        y: np.ndarray,
+        sample_sizes: Optional[List[float]] = None,
+        observed_score: Optional[float] = None,
+    ) -> Dict[str, Any]:
+
+        if sample_sizes is None:
+            sample_sizes = self.sample_sizes
+
+        if observed_score is None:
+            observed_score = self.compute_score(
+                X,
+                y,
+                cv_folds=self.cv_folds,
+                n_estimators=self.n_estimators,
+            )
+
+        results = {}
+
+        repetitions = (
+            5 if self.fast_mode else 20
+        )
+
+        for size in sample_sizes:
+
+            scores = []
+
+            for iteration in range(
+                repetitions
+            ):
+
+                seed = self._seed(
+                    iteration,
+                    namespace=500
+                )
+
+                X_sample, y_sample = resample(
+                    X,
+                    y,
+                    n_samples=int(
+                        len(X) * size
+                    ),
+                    random_state=seed,
+                )
+
+                try:
+                    score = self.compute_score(
+                        X_sample,
+                        y_sample,
+                        cv_folds=self.resampling_cv_folds,
+                        n_estimators=self.resampling_estimators,
+                    )
+                    scores.append(score)
+                except ValueError:
+                    continue
+
+            if not scores:
+                raise RuntimeError(
+                    f"Sample stability failed "
+                    f"for sample size {size}"
+                )
+
+            scores = np.asarray(scores)
+
+            results[
+                f"{size:.0%}"
+            ] = {
+                "mean": float(
+                    np.mean(scores)
+                ),
+                "std": float(
+                    np.std(scores, ddof=1)
+                ),
+                "ci_95": (
+                    float(
+                        np.percentile(
+                            scores,
+                            2.5,
+                        )
+                    ),
+                    float(
+                        np.percentile(
+                            scores,
+                            97.5,
+                        )
+                    ),
+                ),
+                "degradation": float(
+                    observed_score
+                    - np.mean(scores)
+                ),
+            }
+
+        return {
+            "observed_score": observed_score,
+            "results": results,
+        }
+
+    # ---------------------------------------------------------
+    # TRUE WALK-FORWARD
+    # ---------------------------------------------------------
+
+    def _score_test_set(
+        self,
+        rf: RandomForestClassifier,
+        X_test: pd.DataFrame,
+        y_test: np.ndarray,
+    ) -> float:
+
+        if len(np.unique(y_test)) < 2:
+            return np.nan
+
+        if self.metric == "roc_auc":
+
+            probability = rf.predict_proba(
+                X_test
+            )[:, 1]
+
+            return float(
+                roc_auc_score(
+                    y_test,
+                    probability,
+                )
+            )
+
+        predictions = rf.predict(X_test)
+
+        if self.metric == "accuracy":
+            return float(
+                accuracy_score(
+                    y_test,
+                    predictions,
+                )
+            )
+
+        if self.metric == "balanced_accuracy":
+            return float(
+                balanced_accuracy_score(
+                    y_test,
+                    predictions,
+                )
+            )
+
+        if self.metric == "f1":
+            return float(
+                f1_score(
+                    y_test,
+                    predictions,
+                )
+            )
+
+        if self.metric == "mcc":
+            return float(
+                matthews_corrcoef(
+                    y_test,
+                    predictions,
+                )
+            )
+
+        raise ValueError(
+            f"Unsupported metric: {self.metric}"
+        )
+
+    def walk_forward_stability(
+        self,
+        X: pd.DataFrame,
+        y: np.ndarray,
+        window_size: float = 0.70,
+        test_size: float = 0.10,
+    ) -> Dict[str, Any]:
+
+        n = len(X)
+
+        train_window = int(
+            n * window_size
+        )
+
+        test_window = int(
+            n * test_size
+        )
+
+        if train_window <= 0:
+            raise ValueError(
+                "Training window too small"
+            )
+
+        if test_window <= 0:
+            raise ValueError(
+                "Test window too small"
+            )
+
+        scores = []
+        windows = []
+
+        start = 0
+
+        while (
+            start
+            + train_window
+            + test_window
+            <= n
+        ):
+
+            train_end = (
+                start + train_window
+            )
+
+            test_end = (
+                train_end + test_window
+            )
+
+            X_train = X.iloc[
+                start:train_end
+            ]
+
+            y_train = y[
+                start:train_end
+            ]
+
+            X_test = X.iloc[
+                train_end:test_end
+            ]
+
+            y_test = y[
+                train_end:test_end
+            ]
+
+            if (
+                len(np.unique(y_train)) < 2
+                or len(np.unique(y_test)) < 2
+            ):
+                start += test_window
+                continue
+
+            rf = RandomForestClassifier(
+                n_estimators=self.resampling_estimators,
+                random_state=self.random_state,
+                n_jobs=1,
+            )
+
+            rf.fit(
+                X_train,
+                y_train,
+            )
+
+            score = self._score_test_set(
+                rf,
+                X_test,
+                y_test,
+            )
+
+            if np.isfinite(score):
+
+                scores.append(score)
+
+                windows.append(
+                    {
+                        "train_start": start,
+                        "train_end": train_end,
+                        "test_start": train_end,
+                        "test_end": test_end,
+                        "score": float(score),
+                    }
+                )
+
+            start += test_window
+
+        if not scores:
+            raise RuntimeError(
+                "No valid walk-forward windows."
+            )
+
+        scores = np.asarray(scores)
+
+        return {
+            "window_size": train_window,
+            "test_size": test_window,
+            "num_windows": len(scores),
+            "mean": float(
+                np.mean(scores)
+            ),
+            "std": float(
+                np.std(scores, ddof=1)
+            ),
+            "min": float(
+                np.min(scores)
+            ),
+            "max": float(
+                np.max(scores)
+            ),
+            "ci_95": (
+                float(
+                    np.percentile(
+                        scores,
+                        2.5,
+                    )
+                ),
+                float(
+                    np.percentile(
+                        scores,
+                        97.5,
+                    )
+                ),
+            ),
+            "scores": scores,
+            "windows": windows,
+        }
+
+    # ---------------------------------------------------------
+    # Main computation
+    # ---------------------------------------------------------
+
+    def compute(
+        self,
+        X: pd.DataFrame,
+        y: np.ndarray,
+        observed_score: Optional[float] = None,
+        price_series: Optional[pd.Series] = None,
+    ) -> MonteCarloValidationResult:
+
+        self._validate_input(X, y)
+
+        if observed_score is None:
+            observed_score = self.compute_score(
+                X,
+                y,
+                cv_folds=self.cv_folds,
+                n_estimators=self.n_estimators,
+            )
+
+        print(
+            f"\n  Observed Score "
+            f"({self.metric}): "
+            f"{observed_score:.4f}"
+        )
+
+        print(
+            "\n  Running Bootstrap Validation..."
+        )
+
+        bootstrap = self.bootstrap_validation(
+            X,
+            y,
+            observed_score=observed_score,
+        )
+
+        print(
+            "  Running Permutation Test..."
+        )
+
+        permutation = self.permutation_test(
+            X,
+            y,
+            observed_score=observed_score,
+        )
+
+        print(
+            "  Running Label Shuffle Test..."
+        )
+
+        label_shuffle = self.label_shuffle_test(
+            observed_score,
+            permutation,
+        )
+
+        print(
+            "  Running Feature Shuffle Test..."
+        )
+
+        feature_shuffle = (
+            self.feature_shuffle_test(
+                X,
+                y,
+                observed_score=observed_score,
+            )
+        )
+
+        print(
+            "  Running Block Bootstrap..."
+        )
+
+        block_results = {}
+
+        for block_size in self.block_sizes:
+
+            block_results[
+                str(block_size)
+            ] = self.block_bootstrap(
+                X,
+                y,
+                block_size,
+            )
+
+        print(
+            "  Running Time Shuffle Test..."
+        )
+
+        time_shuffle = (
+            self.time_shuffle_test(
+                X,
+                y,
+                observed_score=observed_score,
+            )
+        )
+
+        print(
+            "  Running Noise Injection..."
+        )
+
+        noise = self.noise_injection_test(
+            X,
+            y,
+            observed_score=observed_score,
+        )
+
+        print(
+            "  Running Outlier Robustness..."
+        )
+
+        outlier = (
+            self.outlier_robustness_test(
+                X,
+                y,
+                price_series=price_series,
+                observed_score=observed_score,
+            )
+        )
+
+        print(
+            "  Running Sample Stability..."
+        )
+
+        sample = self.sample_stability_test(
+            X,
+            y,
+            observed_score=observed_score,
+        )
+
+        print(
+            "  Running TRUE Walk-Forward..."
+        )
+
+        walk_forward = (
+            self.walk_forward_stability(
+                X,
+                y,
+            )
+        )
+
+        passed = self._determine_validation(
+            observed_score,
+            permutation,
+            bootstrap,
+            noise,
+            walk_forward,
+        )
+
+        edge_survival_rate = (
+            noise["avg_survival_rate"]
+        )
+
+        edge_failure_rate = (
+            1.0 - edge_survival_rate
+        )
+
+        robustness_stats = {
+            "bootstrap_mean":
+                bootstrap["mean"],
+
+            "bootstrap_std":
+                bootstrap["std"],
+
+            "bootstrap_bias":
+                bootstrap["bias"],
+
+            "bootstrap_skewness":
+                bootstrap["skewness"],
+
+            "bootstrap_kurtosis":
+                bootstrap["kurtosis"],
+
+            "permutation_p_value":
+                permutation["p_value"],
+
+            "permutation_z_score":
+                permutation["z_score"],
+
+            "permutation_null_mean":
+                permutation["null_mean"],
+
+            "permutation_null_std":
+                permutation["null_std"],
+
+            "label_shuffle_degradation":
+                label_shuffle["degradation"],
+
+            "feature_shuffle_max_degradation":
+                feature_shuffle[
+                    "max_degradation"
+                ],
+
+            "feature_shuffle_mean_degradation":
+                feature_shuffle[
+                    "mean_degradation"
+                ],
+
+            "time_shuffle_degradation":
+                time_shuffle["degradation"],
+
+            "block_bootstrap_results":
+                block_results,
+
+            "noise_injection_results":
+                noise["results"],
+
+            "noise_avg_survival":
+                noise["avg_survival_rate"],
+
+            "outlier_robustness_results":
+                outlier["results"],
+
+            "outlier_skipped":
+                outlier.get("skipped", False),
+
+            "walk_forward_mean":
+                walk_forward["mean"],
+
+            "walk_forward_std":
+                walk_forward["std"],
+
+            "walk_forward_min":
+                walk_forward["min"],
+
+            "walk_forward_max":
+                walk_forward["max"],
+
+            "walk_forward_num_windows":
+                walk_forward["num_windows"],
+        }
+
+        null_value = self._null_value()
+
+        validation_details = {
+            "p_value":
+                permutation["p_value"],
+
+            "null_value":
+                null_value,
+
+            "ci_95_lower":
+                bootstrap["ci_95_lower"],
+
+            "ci_95_upper":
+                bootstrap["ci_95_upper"],
+
+            "ci_95_above_null":
+                bootstrap["ci_95_lower"]
+                > null_value,
+
+            "survival_rate":
+                edge_survival_rate,
+
+            "bootstrap_bias":
+                bootstrap["bias"],
+
+            "walk_forward_mean":
+                walk_forward["mean"],
+
+            "walk_forward_std":
+                walk_forward["std"],
+
+            "walk_forward_stability":
+                walk_forward["std"] < 0.10,
+
+            "feature_shuffle_robust":
+                feature_shuffle[
+                    "mean_degradation"
+                ] < 0.30,
+
+            "temporal_windows":
+                walk_forward["num_windows"],
+        }
+
+        return MonteCarloValidationResult(
+            observed_score=observed_score,
+
+            monte_carlo_mean=
+                bootstrap["mean"],
+
+            monte_carlo_std=
+                bootstrap["std"],
+
+            confidence_interval_95=(
+                bootstrap["ci_95_lower"],
+                bootstrap["ci_95_upper"],
+            ),
+
+            confidence_interval_99=(
+                bootstrap["ci_99_lower"],
+                bootstrap["ci_99_upper"],
+            ),
+
+            p_value=
+                permutation["p_value"],
+
+            z_score=
+                permutation["z_score"],
+
+            bootstrap_distribution=
+                pd.DataFrame({
+                    "bootstrap_scores":
+                        bootstrap["distribution"]
+                }),
+
+            permutation_distribution=
+                pd.DataFrame({
+                    "null_scores":
+                        permutation["distribution"]
+                }),
+
+            robustness_statistics=
+                robustness_stats,
+
+            passed=passed,
+
+            validation_details=
+                validation_details,
+
+            edge_survival_rate=
+                edge_survival_rate,
+
+            edge_failure_rate=
+                edge_failure_rate,
+
+            worst_case=
+                bootstrap["worst"],
+
+            best_case=
+                bootstrap["best"],
+
+            skewness=
+                bootstrap["skewness"],
+
+            kurtosis=
+                bootstrap["kurtosis"],
+        )
+
+    # ---------------------------------------------------------
+    # Statistical decision
+    # ---------------------------------------------------------
+
+    def _determine_validation(
+        self,
+        observed_score: float,
+        permutation: Dict[str, Any],
+        bootstrap: Dict[str, Any],
+        noise: Dict[str, Any],
+        walk_forward: Dict[str, Any],
+    ) -> bool:
+
+        null_value = self._null_value()
+
+        p_value_pass = (
+            permutation["p_value"] < 0.05
+        )
+
+        ci_pass = (
+            bootstrap["ci_95_lower"]
+            > null_value
+        )
+
+        bias_pass = (
+            abs(bootstrap["bias"]) < 0.05
+        )
+
+        z_score_pass = (
+            permutation["z_score"] > 2.0
+        )
+
+        survival_pass = (
+            noise["avg_survival_rate"] > 0.80
+        )
+
+        walk_forward_pass = (
+            walk_forward["mean"]
+            > null_value
+        )
+
+        return bool(
+            p_value_pass
+            and ci_pass
+            and bias_pass
+            and z_score_pass
+            and survival_pass
+            and walk_forward_pass
+        )

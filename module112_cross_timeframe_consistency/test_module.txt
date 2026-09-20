@@ -1,0 +1,444 @@
+"""
+Module 112 - Integration Test
+
+Tests cross-timeframe consistency engine, statistics, validator, report, and pipeline.
+"""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+
+import numpy as np
+import pandas as pd
+
+from atlas.modules.module112_cross_timeframe_consistency.engine import CrossTimeframeConsistencyEngine
+from atlas.modules.module112_cross_timeframe_consistency.statistics import CrossTimeframeStatisticsEngine
+from atlas.modules.module112_cross_timeframe_consistency.validator import run_validation
+from atlas.modules.module112_cross_timeframe_consistency.module import CrossTimeframeConsistencyResearch
+
+
+def create_test_datasets():
+    """Create synthetic test datasets for multiple timeframes."""
+    np.random.seed(42)
+    
+    datasets = {}
+    timeframes = ["15m", "1h", "4h"]
+    n_samples = {"15m": 500, "1h": 300, "4h": 150}
+    
+    for tf in timeframes:
+        n = n_samples[tf]
+        
+        # Create features
+        atr = np.random.randn(n) * 2 + 50
+        rsi = np.random.randn(n) * 10 + 50
+        volume = np.random.randn(n) * 100 + 1000
+        trend = np.random.randn(n) * 5 + 0
+        
+        # Create target
+        future_breakout = ((atr > 50) & (rsi > 50)).astype(int)
+        
+        df = pd.DataFrame({
+            "timestamp": pd.date_range("2020-01-01", periods=n, freq="1min"),
+            "open": 100 + np.random.randn(n) * 10,
+            "high": 105 + np.random.randn(n) * 10,
+            "low": 95 + np.random.randn(n) * 10,
+            "close": 100 + np.random.randn(n) * 10,
+            "volume": volume,
+            "ATR": atr,
+            "RSI": rsi,
+            "trend": trend,
+            "future_breakout": future_breakout
+        })
+        
+        datasets[tf] = df
+    
+    return datasets
+
+
+def test_engine_load():
+    """Test 1: Dataset loading."""
+    print("\n" + "=" * 60)
+    print("TEST 1: Dataset Loading")
+    print("=" * 60)
+    
+    engine = CrossTimeframeConsistencyEngine()
+    datasets = create_test_datasets()
+    
+    assert len(datasets) == 3
+    assert "15m" in datasets
+    assert "1h" in datasets
+    assert "4h" in datasets
+    
+    print(f"  Loaded {len(datasets)} datasets")
+    print("  ✓ Dataset loading test passed")
+    return True
+
+
+def test_engine_common_features():
+    """Test 2: Common features detection."""
+    print("\n" + "=" * 60)
+    print("TEST 2: Common Features Detection")
+    print("=" * 60)
+    
+    engine = CrossTimeframeConsistencyEngine()
+    datasets = create_test_datasets()
+    
+    features = engine.get_common_features(datasets)
+    
+    assert len(features) > 0
+    assert "ATR" in features
+    assert "RSI" in features
+    assert "trend" in features
+    assert "timestamp" not in features
+    assert "open" not in features
+    
+    print(f"  Found {len(features)} common features: {features}")
+    print("  ✓ Common features test passed")
+    return True
+
+
+def test_engine_feature_statistics():
+    """Test 3: Feature statistics computation."""
+    print("\n" + "=" * 60)
+    print("TEST 3: Feature Statistics")
+    print("=" * 60)
+    
+    engine = CrossTimeframeConsistencyEngine()
+    datasets = create_test_datasets()
+    features = engine.get_common_features(datasets)
+    
+    stats = engine.compute_feature_statistics(datasets, features)
+    
+    assert not stats.empty
+    assert "feature" in stats.columns
+    assert "15m_mean" in stats.columns
+    assert "1h_mean" in stats.columns
+    assert "4h_mean" in stats.columns
+    
+    print(f"  Feature statistics shape: {stats.shape}")
+    print("  ✓ Feature statistics test passed")
+    return True
+
+
+def test_engine_distribution_consistency():
+    """Test distribution consistency."""
+    print("\n" + "=" * 60)
+    print("TEST: Distribution Consistency")
+    print("=" * 60)
+
+    engine = CrossTimeframeConsistencyEngine()
+    datasets = create_test_datasets()
+    features = engine.get_common_features(datasets)
+
+    distribution = engine.compute_distribution_consistency(
+        datasets,
+        features
+    )
+
+    assert not distribution.empty
+
+    assert "feature" in distribution.columns
+    assert "mean_ks_statistic" in distribution.columns
+    assert "distribution_stability" in distribution.columns
+    assert "distribution_pairs" in distribution.columns
+
+    valid = distribution[
+        "distribution_stability"
+    ].dropna()
+
+    assert not valid.empty
+    assert valid.between(0.0, 1.0).all()
+
+    print(
+        f"  Distribution consistency shape: "
+        f"{distribution.shape}"
+    )
+    print("  ✓ Distribution consistency test passed")
+
+    return True
+
+
+def test_engine_correlations():
+    """Test 4: Correlation consistency."""
+    print("\n" + "=" * 60)
+    print("TEST 4: Correlation Consistency")
+    print("=" * 60)
+    
+    engine = CrossTimeframeConsistencyEngine()
+    datasets = create_test_datasets()
+    features = engine.get_common_features(datasets)
+    
+    correlations = engine.compute_correlation_consistency(datasets, features)
+    
+    assert not correlations.empty
+    assert "feature" in correlations.columns
+    assert "corr_mean" in correlations.columns
+    assert "corr_stability" in correlations.columns
+    
+    print(f"  Correlation consistency shape: {correlations.shape}")
+    print("  ✓ Correlation consistency test passed")
+    return True
+
+
+def test_engine_ranking():
+    """Test 5: Ranking consistency."""
+    print("\n" + "=" * 60)
+    print("TEST 5: Ranking Consistency")
+    print("=" * 60)
+
+    engine = CrossTimeframeConsistencyEngine()
+    datasets = create_test_datasets()
+    features = engine.get_common_features(datasets)
+
+    correlations = engine.compute_correlation_consistency(
+        datasets,
+        features
+    )
+
+    (
+        rankings,
+        spearman,
+        kendall,
+        feature_rank_stability
+    ) = engine.compute_ranking_consistency(
+        datasets,
+        correlations,
+        ["15m", "1h", "4h"]
+    )
+
+    assert not rankings.empty
+    assert not spearman.empty
+    assert not kendall.empty
+    assert not feature_rank_stability.empty
+
+    assert spearman.shape == (3, 3)
+    assert kendall.shape == (3, 3)
+
+    assert "feature" in feature_rank_stability.columns
+    assert "rank_std" in feature_rank_stability.columns
+    assert "rank_stability" in feature_rank_stability.columns
+
+    print(f"  Spearman matrix shape: {spearman.shape}")
+    print(f"  Kendall matrix shape: {kendall.shape}")
+    print(
+        f"  Feature rank stability shape: "
+        f"{feature_rank_stability.shape}"
+    )
+    print("  ✓ Ranking consistency test passed")
+
+    return True
+
+
+def test_engine_stability_scores():
+    """Test 6: Stability scores computation."""
+    print("\n" + "=" * 60)
+    print("TEST 6: Stability Scores")
+    print("=" * 60)
+
+    engine = CrossTimeframeConsistencyEngine()
+    datasets = create_test_datasets()
+    features = engine.get_common_features(datasets)
+
+    feature_stats = engine.compute_feature_statistics(
+        datasets,
+        features
+    )
+
+    distribution_consistency = (
+        engine.compute_distribution_consistency(
+            datasets,
+            features
+        )
+    )
+
+    correlations = engine.compute_correlation_consistency(
+        datasets,
+        features
+    )
+
+    (
+        rankings,
+        spearman,
+        kendall,
+        feature_rank_stability
+    ) = engine.compute_ranking_consistency(
+        datasets,
+        correlations,
+        ["15m", "1h", "4h"]
+    )
+
+    stability = engine.compute_stability_scores(
+        feature_stats,
+        correlations,
+        distribution_consistency,
+        feature_rank_stability
+    )
+
+    assert not stability.empty
+    assert "stability_score" in stability.columns
+
+    assert all(
+        0 <= score <= 100
+        for score in stability["stability_score"]
+    )
+
+    print(f"  Stability scores shape: {stability.shape}")
+    print(
+        f"  Mean stability: "
+        f"{stability['stability_score'].mean():.2f}"
+    )
+    print("  ✓ Stability scores test passed")
+
+    return True
+
+
+def test_engine_compute():
+    """Test 7: Full engine computation."""
+    print("\n" + "=" * 60)
+    print("TEST 7: Full Engine Computation")
+    print("=" * 60)
+    
+    engine = CrossTimeframeConsistencyEngine()
+    datasets = create_test_datasets()
+    
+    result = engine.compute(datasets)
+    
+    assert np.isfinite(result.stability_index)
+    assert 0 <= result.stability_index <= 100
+    
+    assert not result.feature_statistics.empty
+    assert not result.distribution_consistency.empty
+    assert not result.feature_correlations.empty
+    assert not result.feature_rankings.empty
+    assert not result.feature_rank_stability.empty
+    assert not result.stability_scores.empty
+    assert not result.spearman_matrix.empty
+    assert not result.kendall_matrix.empty
+    
+    assert result.summary_statistics["total_features"] > 0
+    
+    print(f"  Stability Index: {result.stability_index:.2f}")
+    print(f"  Total Features: {result.summary_statistics['total_features']}")
+    print("  ✓ Full engine test passed")
+    return True
+
+
+def test_statistics():
+    """Test 8: Statistics engine."""
+    print("\n" + "=" * 60)
+    print("TEST 8: Statistics Engine")
+    print("=" * 60)
+    
+    engine = CrossTimeframeConsistencyEngine()
+    stats_engine = CrossTimeframeStatisticsEngine()
+    
+    datasets = create_test_datasets()
+    result = engine.compute(datasets)
+    stats = stats_engine.analyze(result)
+    
+    assert stats.total_features == result.summary_statistics["total_features"]
+    assert stats.stability_index == result.summary_statistics["stability_index"]
+    assert len(stats.timeframes) == 3
+    
+    print(f"  Total features: {stats.total_features}")
+    print(f"  Stability index: {stats.stability_index:.2f}")
+    print("  ✓ Statistics test passed")
+    return True
+
+
+def test_validator():
+    """Test 9: Validator."""
+    print("\n" + "=" * 60)
+    print("TEST 9: Validator")
+    print("=" * 60)
+    
+    engine = CrossTimeframeConsistencyEngine()
+    stats_engine = CrossTimeframeStatisticsEngine()
+    
+    datasets = create_test_datasets()
+    result = engine.compute(datasets)
+    stats = stats_engine.analyze(result)
+    
+    passed = run_validation(result, stats)
+    assert passed
+    
+    print("  ✓ Validator test passed")
+    return True
+
+
+def test_pipeline():
+    """Test 10: Full pipeline."""
+    print("\n" + "=" * 60)
+    print("TEST 10: Full Pipeline")
+    print("=" * 60)
+    
+    datasets = create_test_datasets()
+    
+    research = CrossTimeframeConsistencyResearch()
+    
+    result = research.run_datasets(datasets, dataset_id="pipeline_test")
+    
+    assert result.status == "completed"
+    assert "feature_statistics" in result.artifacts
+    assert "distribution_consistency" in result.artifacts
+    assert "feature_correlations" in result.artifacts
+    assert "feature_rankings" in result.artifacts
+    assert "feature_rank_stability" in result.artifacts
+    assert "stability_scores" in result.artifacts
+    assert "spearman_matrix" in result.artifacts
+    assert "kendall_matrix" in result.artifacts
+    assert "cross_timeframe_report" in result.artifacts
+    assert result.statistics.get("software_validation_passed") == True
+    
+    print(f"  Stability index: {result.statistics.get('stability_index'):.2f}")
+    print(f"  Total features: {result.statistics.get('total_features')}")
+    print("  ✓ Full pipeline test passed")
+    return True
+
+
+def main():
+    """Run all tests."""
+    print("\n" + "=" * 70)
+    print("PROJECT ATLAS - MODULE 112 INTEGRATION TEST")
+    print("Cross-Timeframe Consistency")
+    print("=" * 70)
+    
+    results = {}
+    
+    results["dataset_loading"] = test_engine_load()
+    results["common_features"] = test_engine_common_features()
+    results["feature_statistics"] = test_engine_feature_statistics()
+    results["distribution_consistency"] = (
+        test_engine_distribution_consistency()
+    )
+    results["correlations"] = test_engine_correlations()
+    results["ranking"] = test_engine_ranking()
+    results["stability_scores"] = test_engine_stability_scores()
+    results["full_engine"] = test_engine_compute()
+    results["statistics"] = test_statistics()
+    results["validator"] = test_validator()
+    results["pipeline"] = test_pipeline()
+    
+    print("\n" + "=" * 70)
+    print("RESULTS")
+    print("=" * 70)
+    
+    for name, ok in results.items():
+        print(f"  {'✓' if ok else '✗'} {name}")
+    
+    passed = sum(results.values())
+    total = len(results)
+    
+    print(f"\n  {passed}/{total} tests passed")
+    
+    if passed == total:
+        print("\n✓ Module 112 VALIDATED")
+        return 0
+    else:
+        print("\n⚠ Some tests failed")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

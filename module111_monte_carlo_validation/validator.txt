@@ -1,0 +1,350 @@
+"""
+Module 111 - Monte Carlo Validation Validator
+"""
+
+import numpy as np
+
+from .engine import MonteCarloValidationResult
+from .statistics import (
+    MonteCarloValidationStatistics,
+)
+
+
+class MonteCarloValidationValidator:
+    """Validate structural integrity of Module 111 results."""
+
+    def validate(
+        self,
+        result: MonteCarloValidationResult,
+        statistics: MonteCarloValidationStatistics,
+    ) -> bool:
+
+        issues = []
+        warnings = []
+
+        # -------------------------------------------------
+        # Observed score
+        # -------------------------------------------------
+
+        if not np.isfinite(
+            result.observed_score
+        ):
+            issues.append(
+                "Observed score is not finite"
+            )
+
+        # -------------------------------------------------
+        # Bootstrap distribution
+        # -------------------------------------------------
+
+        if (
+            result.bootstrap_distribution.empty
+        ):
+            issues.append(
+                "Bootstrap distribution is empty"
+            )
+
+        elif (
+            "bootstrap_scores"
+            not in result.bootstrap_distribution.columns
+        ):
+            issues.append(
+                "Bootstrap distribution missing "
+                "'bootstrap_scores'"
+            )
+
+        else:
+
+            bootstrap_scores = (
+                result.bootstrap_distribution[
+                    "bootstrap_scores"
+                ]
+            )
+
+            if not np.all(
+                np.isfinite(
+                    bootstrap_scores
+                )
+            ):
+                issues.append(
+                    "Bootstrap distribution contains "
+                    "non-finite values"
+                )
+
+            bootstrap_mean = float(
+                bootstrap_scores.mean()
+            )
+
+            # This is a diagnostic only.
+            # Bootstrap bias should be reasonably small,
+            # but we do not demand exact equality.
+            bias = (
+                bootstrap_mean
+                - result.observed_score
+            )
+
+            if abs(bias) > 0.10:
+                warnings.append(
+                    f"Bootstrap bias is large: {bias:.4f}"
+                )
+
+        # -------------------------------------------------
+        # Permutation distribution
+        # -------------------------------------------------
+
+        if (
+            result.permutation_distribution.empty
+        ):
+            issues.append(
+                "Permutation distribution is empty"
+            )
+
+        elif (
+            "null_scores"
+            not in result.permutation_distribution.columns
+        ):
+            issues.append(
+                "Permutation distribution missing "
+                "'null_scores'"
+            )
+
+        else:
+
+            null_scores = (
+                result.permutation_distribution[
+                    "null_scores"
+                ]
+            )
+
+            if not np.all(
+                np.isfinite(null_scores)
+            ):
+                issues.append(
+                    "Permutation distribution contains "
+                    "non-finite values"
+                )
+
+        # -------------------------------------------------
+        # P-value
+        # -------------------------------------------------
+
+        if not (
+            0 <= result.p_value <= 1
+        ):
+            issues.append(
+                f"P-value outside [0,1]: "
+                f"{result.p_value}"
+            )
+
+        # -------------------------------------------------
+        # Confidence intervals
+        # -------------------------------------------------
+
+        lower95, upper95 = (
+            result.confidence_interval_95
+        )
+
+        lower99, upper99 = (
+            result.confidence_interval_99
+        )
+
+        if lower95 > upper95:
+            issues.append(
+                "95% confidence interval is invalid"
+            )
+
+        if lower99 > upper99:
+            issues.append(
+                "99% confidence interval is invalid"
+            )
+
+        # -------------------------------------------------
+        # Edge survival
+        # -------------------------------------------------
+
+        if not (
+            0 <= result.edge_survival_rate <= 1
+        ):
+            issues.append(
+                "Edge survival outside [0,1]"
+            )
+
+        if not (
+            0 <= result.edge_failure_rate <= 1
+        ):
+            issues.append(
+                "Edge failure outside [0,1]"
+            )
+
+        # -------------------------------------------------
+        # Z-score
+        # -------------------------------------------------
+
+        if not np.isfinite(
+            result.z_score
+        ):
+            issues.append(
+                "Z-score is not finite"
+            )
+
+        # -------------------------------------------------
+        # Statistics consistency
+        # -------------------------------------------------
+
+        if not np.isclose(
+            statistics.observed_score,
+            result.observed_score,
+        ):
+            issues.append(
+                "Statistics observed score mismatch"
+            )
+
+        if not np.isclose(
+            statistics.p_value,
+            result.p_value,
+        ):
+            issues.append(
+                "Statistics p-value mismatch"
+            )
+
+        # -------------------------------------------------
+        # Temporal validation
+        # -------------------------------------------------
+
+        num_windows = (
+            result.robustness_statistics.get(
+                "walk_forward_num_windows",
+                0,
+            )
+        )
+
+        if num_windows < 2:
+            warnings.append(
+                "Very few walk-forward windows"
+            )
+
+        # -------------------------------------------------
+        # Statistical warnings
+        # -------------------------------------------------
+
+        null_value = (
+            result.validation_details.get(
+                "null_value",
+                0.5,
+            )
+        )
+
+        if (
+            result.confidence_interval_95[0]
+            <= null_value
+        ):
+            warnings.append(
+                "95% CI does not exclude the "
+                f"null value ({null_value:.3f})"
+            )
+
+        if result.p_value >= 0.05:
+            warnings.append(
+                f"Permutation p-value is not "
+                f"significant: {result.p_value:.4f}"
+            )
+
+        if (
+            result.edge_survival_rate < 0.80
+        ):
+            warnings.append(
+                "Edge survival is below 80%"
+            )
+
+        if not result.passed:
+            warnings.append(
+                "Statistical edge did not pass "
+                "all validation criteria"
+            )
+
+        if warnings:
+
+            print("\n  WARNINGS:")
+
+            for warning in warnings:
+                print(
+                    f"    ⚠ {warning}"
+                )
+
+        if issues:
+
+            raise ValueError(
+                "Monte Carlo Validation failed "
+                f"with {len(issues)} issue(s):\n"
+                + "\n".join(
+                    f"  - {issue}"
+                    for issue in issues
+                )
+            )
+
+        return True
+
+
+def run_validation(
+    result,
+    statistics,
+):
+    """Run software validation."""
+
+    validator = (
+        MonteCarloValidationValidator()
+    )
+
+    print(
+        "\n"
+        + "=" * 60
+    )
+
+    print(
+        "MONTE CARLO VALIDATION - "
+        "SOFTWARE VALIDATION"
+    )
+
+    print(
+        "=" * 60
+    )
+
+    try:
+
+        validator.validate(
+            result,
+            statistics,
+        )
+
+        print(
+            "\n  ✓ All software validation "
+            "checks passed"
+        )
+
+        if result.passed:
+
+            print(
+                "  ✅ STATISTICAL EDGE: PASSED"
+            )
+
+        else:
+
+            print(
+                "  ⚠ STATISTICAL EDGE: FAILED"
+            )
+
+        print(
+            "=" * 60
+        )
+
+        return True
+
+    except ValueError as e:
+
+        print(e)
+
+        print(
+            "=" * 60
+        )
+
+        return False

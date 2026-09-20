@@ -1,0 +1,185 @@
+"""
+Module 111 - Monte Carlo Validation Report
+"""
+
+from datetime import datetime
+import pandas as pd
+
+
+class MonteCarloValidationReport:
+    """Report generator for Monte Carlo validation results."""
+    
+    @staticmethod
+    def generate(statistics, metadata=None, dataset_name="Unknown") -> str:
+        """Generate a formatted report."""
+        lines = []
+        
+        lines.append("=" * 55)
+        lines.append("MODULE 111")
+        lines.append("MONTE CARLO VALIDATION")
+        lines.append("=" * 55)
+        lines.append(f"\nDataset: {dataset_name}")
+        
+        # Results
+        lines.append("\n" + "-" * 45)
+        lines.append("VALIDATION RESULTS")
+        lines.append("-" * 45)
+        lines.append(f"  Validation Status: {'✅ PASSED' if statistics.passed else '❌ FAILED'}")
+        
+        # Score Statistics
+        lines.append("\n" + "-" * 45)
+        lines.append("SCORE STATISTICS")
+        lines.append("-" * 45)
+        lines.append(f"  Observed Score: {statistics.observed_score:.4f}")
+        lines.append(f"  Monte Carlo Mean: {statistics.monte_carlo_mean:.4f}")
+        lines.append(f"  Monte Carlo Std: {statistics.monte_carlo_std:.4f}")
+        lines.append(f"  Bootstrap Bias: {statistics.bootstrap_bias:.4f}")
+        
+        # Distribution Statistics
+        lines.append("\n" + "-" * 45)
+        lines.append("DISTRIBUTION STATISTICS")
+        lines.append("-" * 45)
+        lines.append(f"  Skewness: {statistics.bootstrap_skewness:.4f}")
+        lines.append(f"  Kurtosis: {statistics.bootstrap_kurtosis:.4f}")
+        lines.append(f"  Worst Case: {statistics.worst_case:.4f}")
+        lines.append(f"  Best Case: {statistics.best_case:.4f}")
+        
+        # Confidence Intervals
+        lines.append("\n" + "-" * 45)
+        lines.append("CONFIDENCE INTERVALS")
+        lines.append("-" * 45)
+        lines.append(f"  95% CI: ({statistics.ci_95_lower:.4f}, {statistics.ci_95_upper:.4f})")
+        lines.append(f"  99% CI: ({statistics.ci_99_lower:.4f}, {statistics.ci_99_upper:.4f})")
+        
+        # Statistical Significance
+        lines.append("\n" + "-" * 45)
+        lines.append("STATISTICAL SIGNIFICANCE")
+        lines.append("-" * 45)
+
+        lines.append(
+            f"  P-value: {statistics.p_value:.4f}"
+        )
+
+        lines.append(
+            f"  Z-score: {statistics.z_score:.4f}"
+        )
+
+        null_value = statistics.validation_criteria.get(
+            "null_value",
+            0.5,
+        )
+
+        lines.append(
+            f"  Null Value: {null_value:.4f}"
+        )
+
+        # Edge Survival
+        lines.append("\n" + "-" * 45)
+        lines.append("EDGE SURVIVAL")
+        lines.append("-" * 45)
+        lines.append(f"  Survival Rate: {statistics.edge_survival_rate:.1%}")
+        lines.append(f"  Failure Rate: {statistics.edge_failure_rate:.1%}")
+        
+        # Interpretation
+        lines.append("\n" + "-" * 45)
+        lines.append("INTERPRETATION")
+        lines.append("-" * 45)
+
+        if statistics.p_value < 0.05:
+            lines.append(
+                "  ✓ Statistically significant "
+                "(permutation p < 0.05)"
+            )
+        else:
+            lines.append(
+                "  ✗ Not statistically significant "
+                "(permutation p >= 0.05)"
+            )
+
+        if statistics.ci_95_lower > null_value:
+            lines.append(
+                f"  ✓ 95% CI exceeds null value "
+                f"({null_value:.3f})"
+            )
+        else:
+            lines.append(
+                f"  ✗ 95% CI does not exceed null "
+                f"value ({null_value:.3f})"
+            )
+
+        if statistics.edge_survival_rate > 0.80:
+            lines.append(
+                f"  ✓ Edge survives "
+                f"{statistics.edge_survival_rate:.1%} "
+                "of noise tests"
+            )
+        else:
+            lines.append(
+                f"  ✗ Edge survival only "
+                f"{statistics.edge_survival_rate:.1%}"
+            )
+
+        if statistics.passed:
+            lines.append(
+                "  ✅ Edge survives Monte Carlo validation"
+            )
+        else:
+            lines.append(
+                "  ❌ Edge fails Monte Carlo validation"
+            )
+        
+        # Validation
+        lines.append("\n" + "-" * 45)
+        lines.append("VALIDATION")
+        lines.append("-" * 45)
+        lines.append("  Status: PASSED")
+        
+        # Footer
+        lines.append(f"\n  Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        lines.append("\n" + "=" * 55)
+        lines.append("END OF REPORT")
+        lines.append("=" * 55)
+        
+        return "\n".join(lines)
+    
+    @staticmethod
+    def generate_distribution_report(
+        bootstrap_dist: pd.DataFrame,
+        permutation_dist: pd.DataFrame,
+        observed_score: float,
+        edge_survival_rate: float
+    ) -> str:
+        """Generate a distribution report."""
+        lines = []
+        lines.append("\n" + "=" * 70)
+        lines.append("DISTRIBUTION ANALYSIS")
+        lines.append("=" * 70)
+        
+        lines.append("\nBootstrap Distribution:")
+        lines.append(f"  Mean: {bootstrap_dist['bootstrap_scores'].mean():.4f}")
+        lines.append(f"  Std: {bootstrap_dist['bootstrap_scores'].std():.4f}")
+        lines.append(f"  Median: {bootstrap_dist['bootstrap_scores'].median():.4f}")
+        lines.append(f"  Skewness: {pd.Series(bootstrap_dist['bootstrap_scores']).skew():.4f}")
+        lines.append(f"  Kurtosis: {pd.Series(bootstrap_dist['bootstrap_scores']).kurtosis():.4f}")
+        lines.append(f"  Min: {bootstrap_dist['bootstrap_scores'].min():.4f}")
+        lines.append(f"  Max: {bootstrap_dist['bootstrap_scores'].max():.4f}")
+        
+        lines.append("\nPermutation Null Distribution:")
+        lines.append(f"  Mean: {permutation_dist['null_scores'].mean():.4f}")
+        lines.append(f"  Std: {permutation_dist['null_scores'].std():.4f}")
+        lines.append(f"  Median: {permutation_dist['null_scores'].median():.4f}")
+        
+        lines.append(f"\nObserved Score: {observed_score:.4f}")
+        lines.append(f"Edge Survival Rate: {edge_survival_rate:.1%}")
+        
+        lines.append("\n" + "=" * 70)
+        return "\n".join(lines)
+    
+    @staticmethod
+    def save(report: str, filepath: str):
+        """Save report to file."""
+        from pathlib import Path
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(report)

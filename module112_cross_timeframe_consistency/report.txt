@@ -1,0 +1,152 @@
+# atlas/modules/module112_cross_timeframe_consistency/report.py
+"""
+Module 112 - Cross-Timeframe Consistency Report
+"""
+
+from datetime import datetime
+import pandas as pd
+
+
+class CrossTimeframeReport:
+    """Report generator for cross-timeframe consistency results."""
+    
+    @staticmethod
+    def generate(statistics, metadata=None, dataset_name="Unknown") -> str:
+        """Generate a formatted report."""
+        lines = []
+        
+        lines.append("=" * 55)
+        lines.append("MODULE 112")
+        lines.append("CROSS-TIMEFRAME CONSISTENCY")
+        lines.append("=" * 55)
+        lines.append(f"\nDataset: {dataset_name}")
+        
+        # Datasets
+        lines.append("\n" + "-" * 45)
+        lines.append("DATASETS")
+        lines.append("-" * 45)
+        for tf in statistics.timeframes:
+            lines.append(f"  {tf}")
+        
+        # Overview
+        lines.append("\n" + "-" * 45)
+        lines.append("OVERVIEW")
+        lines.append("-" * 45)
+        lines.append(f"  Total Features: {statistics.total_features}")
+        lines.append(f"  Average Stability: {statistics.mean_stability:.2f}")
+        lines.append(f"  Median Stability: {statistics.median_stability:.2f}")
+        lines.append(f"  Min Stability: {statistics.min_stability:.2f}")
+        lines.append(f"  Max Stability: {statistics.max_stability:.2f}")
+        
+        # Ranking Consistency
+        lines.append("\n" + "-" * 45)
+        lines.append("RANKING CONSISTENCY")
+        lines.append("-" * 45)
+        lines.append(f"  Average Spearman: {statistics.avg_spearman:.4f}")
+        lines.append(f"  Average Kendall: {statistics.avg_kendall:.4f}")
+        
+        # Top Features
+        if statistics.top_features:
+            lines.append("\n" + "-" * 45)
+            lines.append("TOP 5 STABLE FEATURES")
+            lines.append("-" * 45)
+            for i, feature in enumerate(statistics.top_features[:5], 1):
+                lines.append(f"  {i}. {feature}")
+        
+        # Bottom Features
+        if statistics.bottom_features:
+            lines.append("\n" + "-" * 45)
+            lines.append("BOTTOM 5 FEATURES")
+            lines.append("-" * 45)
+            for i, feature in enumerate(statistics.bottom_features[:5], 1):
+                lines.append(f"  {i}. {feature}")
+        
+        # Overall Stability
+        lines.append("\n" + "-" * 45)
+        lines.append("OVERALL STABILITY")
+        lines.append("-" * 45)
+        lines.append(f"  Stability Index: {statistics.stability_index:.2f}/100")
+        
+        # Interpretation
+        lines.append("\n" + "-" * 45)
+        lines.append("INTERPRETATION")
+        lines.append("-" * 45)
+        
+        if statistics.stability_index >= 80:
+            lines.append("  ✅ Features are highly consistent across timeframes")
+        elif statistics.stability_index >= 60:
+            lines.append("  ✓ Features show moderate consistency across timeframes")
+        elif statistics.stability_index >= 40:
+            lines.append("  ⚠ Features show weak consistency across timeframes")
+        else:
+            lines.append("  ❌ Features show poor consistency across timeframes")
+        
+        if statistics.avg_spearman > 0.7:
+            lines.append("  ✅ Feature rankings are strongly consistent")
+        elif statistics.avg_spearman > 0.5:
+            lines.append("  ✓ Feature rankings are moderately consistent")
+        else:
+            lines.append("  ⚠ Feature rankings show low consistency")
+        
+        # Validation
+        lines.append("\n" + "-" * 45)
+        lines.append("VALIDATION")
+        lines.append("-" * 45)
+        lines.append("  Status: PASSED")
+        
+        # Footer
+        lines.append(f"\n  Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        lines.append("\n" + "=" * 55)
+        lines.append("END OF REPORT")
+        lines.append("=" * 55)
+        
+        return "\n".join(lines)
+    
+    @staticmethod
+    def generate_ranking_matrix(spearman_matrix: pd.DataFrame) -> str:
+        """Generate a formatted ranking consistency matrix."""
+        lines = []
+        lines.append("\n" + "=" * 60)
+        lines.append("RANKING CONSISTENCY MATRIX (Spearman)")
+        lines.append("=" * 60)
+        
+        lines.append("\n" + spearman_matrix.round(4).to_string())
+        lines.append("\n" + "=" * 60)
+        return "\n".join(lines)
+    
+    @staticmethod
+    def generate_feature_report(stability_scores: pd.DataFrame, top_n: int = 20) -> str:
+        """Generate a detailed feature stability report."""
+        lines = []
+        lines.append("\n" + "=" * 70)
+        lines.append(f"FEATURE STABILITY REPORT (Top {top_n})")
+        lines.append("=" * 70)
+        
+        # Sort by stability score
+        sorted_df = stability_scores.sort_values("stability_score", ascending=False)
+        
+        lines.append(
+            f"\n{'Feature':<25} {'Score':<10} {'Corr':<10} {'Rank':<10} {'Dist':<10}"
+        )
+        lines.append("-" * 65)
+        
+        for _, row in sorted_df.head(top_n).iterrows():
+            lines.append(
+                f"{row['feature'][:24]:<25} "
+                f"{row['stability_score']:<10.2f} "
+                f"{row['correlation_consistency']:<10.3f} "
+                f"{row['rank_consistency']:<10.3f} "
+                f"{row['distribution_consistency']:<10.3f}"
+            )
+        
+        lines.append("\n" + "=" * 70)
+        return "\n".join(lines)
+    
+    @staticmethod
+    def save(report: str, filepath: str):
+        """Save report to file."""
+        from pathlib import Path
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(report)

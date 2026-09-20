@@ -1,0 +1,392 @@
+# atlas/modules/module112_cross_timeframe_consistency/module.py
+"""
+Module 112
+Cross-Timeframe Consistency
+
+Measures whether previously discovered behaviors are invariant across timeframes.
+
+Pipeline: load datasets → identify common features → compute feature statistics →
+          correlation consistency → ranking consistency → stability scores →
+          statistics → validation → report → export
+"""
+
+from typing import Optional, Dict, Any
+import pandas as pd
+from pathlib import Path
+
+from atlas.core.base_research_module import BaseResearchModule
+from atlas.framework.registry import AtlasRegistry
+
+from .engine import CrossTimeframeConsistencyEngine
+from .statistics import CrossTimeframeStatisticsEngine
+from .validator import run_validation
+from .report import CrossTimeframeReport
+from .exporter import CrossTimeframeExporter
+
+
+class CrossTimeframeConsistencyResearch(BaseResearchModule):
+    """Main research module for cross-timeframe consistency analysis."""
+
+    MODULE_OUTPUT = "module112"
+    METADATA = CrossTimeframeStatisticsEngine.METADATA
+
+    # Declare target requirements for the target manager
+    REQUIRED_TARGETS = ["future_breakout"]
+
+    def __init__(
+        self,
+        registry: Optional[AtlasRegistry] = None,
+        dataset_paths: Optional[Dict[str, str]] = None,
+        ignore_cols: Optional[set] = None,
+        price_column: str = "close"
+    ):
+        """
+        Initialize the cross-timeframe consistency module.
+        
+        Args:
+            registry: Optional Atlas registry
+            dataset_paths: Dictionary mapping timeframe to file path
+            ignore_cols: Set of columns to ignore
+            price_column: Column name for price data
+        """
+        super().__init__(
+            module_name="Cross-Timeframe Consistency",
+            module_version=self.METADATA["version"],
+        )
+        
+        self.registry = registry or AtlasRegistry()
+        self.engine = CrossTimeframeConsistencyEngine(
+            dataset_paths=dataset_paths,
+            ignore_cols=ignore_cols,
+            price_column=price_column
+        )
+        self.stats_engine = CrossTimeframeStatisticsEngine()
+        self.result_data = None
+        self.statistics = None
+        self.ranking_matrix_report = None
+        self.feature_report = None
+        self._datasets = None
+        self._output_dir = None
+
+    def _register_pipeline_steps(self):
+        """Register pipeline steps."""
+        self.pipeline_steps = [
+            ("cross_timeframe", self._compute_consistency),
+            ("statistics", self._compute_statistics),
+            ("validate", self._validate),
+            ("export", self._export_results),
+        ]
+    
+    def _prepare_data(self) -> Dict[str, Any]:
+        """Prepare data from DataFrame."""
+        # If datasets were passed directly, use them
+        if self._datasets is not None:
+            return {"datasets": self._datasets}
+        return {"datasets": None}
+    
+    def _compute_consistency(self) -> Dict[str, Any]:
+        """Step 1: Compute cross-timeframe consistency."""
+        self.logger.info("Step 1: Computing cross-timeframe consistency")
+        
+        prepared = self._prepare_data()
+        
+        self.result_data = self.engine.compute(
+            datasets=prepared["datasets"]
+        )
+        
+        self.logger.metric(
+            "Total Features",
+            str(self.result_data.summary_statistics["total_features"])
+        )
+        self.logger.metric(
+            "Stability Index",
+            f"{self.result_data.stability_index:.2f}/100"
+        )
+        self.logger.metric(
+            "Avg Spearman",
+            f"{self.result_data.summary_statistics['avg_spearman']:.4f}"
+        )
+        self.logger.metric(
+            "Timeframes",
+            ", ".join(self.result_data.summary_statistics["timeframes"])
+        )
+        self.logger.success("Cross-timeframe consistency computed")
+        
+        # Generate reports
+        self.ranking_matrix_report = CrossTimeframeReport.generate_ranking_matrix(
+            self.result_data.spearman_matrix
+        )
+        
+        self.feature_report = CrossTimeframeReport.generate_feature_report(
+            self.result_data.stability_scores,
+            top_n=20
+        )
+        
+        return {
+            "total_features": self.result_data.summary_statistics["total_features"],
+            "stability_index": self.result_data.stability_index,
+            "avg_spearman": self.result_data.summary_statistics["avg_spearman"],
+            "timeframes": self.result_data.summary_statistics["timeframes"]
+        }
+    
+    def _compute_statistics(self) -> Dict[str, Any]:
+        """Step 2: Compute statistics."""
+        self.logger.info("Step 2: Computing statistics")
+        self.statistics = self.stats_engine.analyze(self.result_data)
+        
+        self.logger.metric(
+            "Top Feature",
+            self.statistics.top_features[0] if self.statistics.top_features else "N/A"
+        )
+        self.logger.metric(
+            "Min Stability",
+            f"{self.statistics.min_stability:.2f}"
+        )
+        self.logger.metric(
+            "Max Stability",
+            f"{self.statistics.max_stability:.2f}"
+        )
+        self.logger.success("Statistics computed")
+        
+        return self.stats_engine.summary_dict(self.statistics)
+    
+    def _validate(self) -> Dict[str, Any]:
+        """Step 3: Validation."""
+        self.logger.info("Step 3: Validation")
+        passed = run_validation(self.result_data, self.statistics)
+        self.logger.success("Validation complete")
+        return {"software_validation_passed": passed}
+    
+    def _export_results(self) -> Dict[str, Any]:
+        """Step 4: Export."""
+        self.logger.info("Step 4: Export")
+        
+        # Register DataFrames as artifacts
+        self.result.artifacts[
+            "feature_statistics"
+        ] = self.result_data.feature_statistics
+        
+        self.result.artifacts[
+            "distribution_consistency"
+        ] = self.result_data.distribution_consistency
+        
+        self.result.artifacts[
+            "feature_correlations"
+        ] = self.result_data.feature_correlations
+        
+        self.result.artifacts[
+            "feature_rankings"
+        ] = self.result_data.feature_rankings
+        
+        self.result.artifacts[
+            "feature_rank_stability"
+        ] = self.result_data.feature_rank_stability
+        
+        self.result.artifacts[
+            "stability_scores"
+        ] = self.result_data.stability_scores
+        
+        self.result.artifacts[
+            "spearman_matrix"
+        ] = self.result_data.spearman_matrix
+        
+        self.result.artifacts[
+            "kendall_matrix"
+        ] = self.result_data.kendall_matrix
+        
+        # Store summary
+        summary_df = pd.DataFrame([self.result_data.summary_statistics])
+        self.result.artifacts["cross_timeframe_summary"] = summary_df
+        
+        # Generate and register reports
+        main_report = CrossTimeframeReport.generate(
+            self.statistics,
+            metadata=self.METADATA,
+            dataset_name=self.result.dataset_identifier,
+        )
+        self.result.artifacts["cross_timeframe_report"] = main_report
+        self.result.artifacts["ranking_matrix_report"] = self.ranking_matrix_report
+        self.result.artifacts["feature_report"] = self.feature_report
+        
+        # Export to files using self._output_dir (set by run_datasets)
+        if self._output_dir is not None:
+            export_dir = self._output_dir / "exports"
+            export_dir.mkdir(parents=True, exist_ok=True)
+            
+            CrossTimeframeExporter.export_feature_statistics(
+                self.result_data.feature_statistics,
+                export_dir / "feature_statistics.csv"
+            )
+            
+            CrossTimeframeExporter.export_distribution_consistency(
+                self.result_data.distribution_consistency,
+                export_dir / "distribution_consistency.csv"
+            )
+            
+            CrossTimeframeExporter.export_correlations(
+                self.result_data.feature_correlations,
+                export_dir / "feature_correlations.csv"
+            )
+            
+            CrossTimeframeExporter.export_rankings(
+                self.result_data.feature_rankings,
+                export_dir / "feature_rankings.csv"
+            )
+            
+            CrossTimeframeExporter.export_feature_rank_stability(
+                self.result_data.feature_rank_stability,
+                export_dir / "feature_rank_stability.csv"
+            )
+            
+            CrossTimeframeExporter.export_stability_scores(
+                self.result_data.stability_scores,
+                export_dir / "stability_scores.csv"
+            )
+            
+            CrossTimeframeExporter.export_summary(
+                self.result_data.summary_statistics,
+                export_dir / "cross_timeframe_summary.csv"
+            )
+            
+            CrossTimeframeExporter.export_spearman_matrix(
+                self.result_data.spearman_matrix,
+                export_dir / "spearman_matrix.csv"
+            )
+            
+            CrossTimeframeExporter.export_kendall_matrix(
+                self.result_data.kendall_matrix,
+                export_dir / "kendall_matrix.csv"
+            )
+        else:
+            # Fallback: use result.output_dir if available (for backward compatibility)
+            output_dir = getattr(self.result, "output_dir", None)
+            if output_dir is not None:
+                export_dir = Path(output_dir) / "exports"
+                export_dir.mkdir(parents=True, exist_ok=True)
+                
+                CrossTimeframeExporter.export_feature_statistics(
+                    self.result_data.feature_statistics,
+                    export_dir / "feature_statistics.csv"
+                )
+                
+                CrossTimeframeExporter.export_distribution_consistency(
+                    self.result_data.distribution_consistency,
+                    export_dir / "distribution_consistency.csv"
+                )
+                
+                CrossTimeframeExporter.export_correlations(
+                    self.result_data.feature_correlations,
+                    export_dir / "feature_correlations.csv"
+                )
+                
+                CrossTimeframeExporter.export_rankings(
+                    self.result_data.feature_rankings,
+                    export_dir / "feature_rankings.csv"
+                )
+                
+                CrossTimeframeExporter.export_feature_rank_stability(
+                    self.result_data.feature_rank_stability,
+                    export_dir / "feature_rank_stability.csv"
+                )
+                
+                CrossTimeframeExporter.export_stability_scores(
+                    self.result_data.stability_scores,
+                    export_dir / "stability_scores.csv"
+                )
+                
+                CrossTimeframeExporter.export_summary(
+                    self.result_data.summary_statistics,
+                    export_dir / "cross_timeframe_summary.csv"
+                )
+                
+                CrossTimeframeExporter.export_spearman_matrix(
+                    self.result_data.spearman_matrix,
+                    export_dir / "spearman_matrix.csv"
+                )
+                
+                CrossTimeframeExporter.export_kendall_matrix(
+                    self.result_data.kendall_matrix,
+                    export_dir / "kendall_matrix.csv"
+                )
+        
+        self.logger.metric("Artifacts", str(len(self.result.artifacts)))
+        self.logger.success("Export complete")
+        
+        return {
+            "export_status": "complete",
+            "artifact_count": len(self.result.artifacts),
+            "stability_index": self.result_data.stability_index
+        }
+    
+    def compute(self) -> Dict[str, Any]:
+        """Run the full computation pipeline."""
+        self.logger.section("Cross-Timeframe Consistency Pipeline")
+        results = self.execute_pipeline()
+        self.result.status = "completed"
+        self.logger.success("Module 112 complete")
+        return results
+    
+    def run(self, filepath: str, output_dir=None):
+        """Run module on file."""
+        return super().run(filepath, output_dir)
+    
+    def run_dataframe(
+        self,
+        df,
+        dataset_id="in_memory",
+        output_dir=None
+    ):
+        """
+        Single-DataFrame execution is not supported.
+
+        Module 112 requires at least two timeframe datasets.
+        Use run_datasets() instead.
+        """
+        raise ValueError(
+            "Module 112 requires at least two timeframe datasets. "
+            "Use run_datasets() instead of run_dataframe()."
+        )
+    
+    def run_datasets(
+        self,
+        datasets: Dict[str, pd.DataFrame],
+        dataset_id: str = "multiple",
+        output_dir: Optional[str] = None,
+    ) -> Any:
+        """
+        Run module on multiple timeframe datasets.
+        
+        This is the primary entry point for Module 112.
+        
+        Args:
+            datasets: Dictionary mapping timeframe names to DataFrames
+            dataset_id: Identifier for the dataset
+            output_dir: Output directory for results
+            
+        Returns:
+            ResearchResult with all computed artifacts
+        """
+        if not datasets:
+            raise ValueError(
+                "run_datasets() requires at least "
+                "one dataset"
+            )
+
+        self._datasets = datasets
+        self._output_dir = Path(output_dir) if output_dir else None
+
+        # Use the first real timeframe as the representative
+        # market dataset for BaseResearchModule initialization.
+        representative_name = sorted(
+            datasets.keys()
+        )[0]
+
+        representative_df = datasets[
+            representative_name
+        ].copy()
+
+        return super().run_dataframe(
+            representative_df,
+            dataset_id=dataset_id,
+            output_dir=output_dir,
+        )

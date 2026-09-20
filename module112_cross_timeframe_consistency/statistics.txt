@@ -1,0 +1,70 @@
+"""
+Module 112 - Cross-Timeframe Consistency Statistics
+"""
+
+from dataclasses import dataclass, asdict
+import pandas as pd
+from .engine import CrossTimeframeResult
+
+
+@dataclass
+class CrossTimeframeStatistics:
+    """High-level statistics from cross-timeframe consistency analysis."""
+    total_features: int
+    timeframes: list
+    stability_index: float
+    mean_stability: float
+    median_stability: float
+    min_stability: float
+    max_stability: float
+    top_features: list
+    bottom_features: list
+    avg_spearman: float
+    avg_kendall: float
+
+
+class CrossTimeframeStatisticsEngine:
+    """Engine for generating high-level statistics."""
+    
+    METADATA = {
+        "module": 112,
+        "name": "Cross-Timeframe Consistency",
+        "version": "1.0.0",
+        "description": "Measures whether behaviors are invariant across timeframes",
+
+        "depends_on": [
+            "100",
+            "102",
+            "035",
+            "037",
+            "108"
+        ],
+
+        "required_targets": [
+            "future_breakout"
+        ]
+    }
+    
+    def analyze(self, result: CrossTimeframeResult) -> CrossTimeframeStatistics:
+        """Analyze results and generate high-level statistics."""
+        return CrossTimeframeStatistics(
+            total_features=result.summary_statistics["total_features"],
+            timeframes=result.summary_statistics["timeframes"],
+            stability_index=result.summary_statistics["stability_index"],
+            mean_stability=result.summary_statistics["mean_stability"],
+            median_stability=result.summary_statistics["median_stability"],
+            min_stability=result.summary_statistics["min_stability"],
+            max_stability=result.summary_statistics["max_stability"],
+            top_features=result.summary_statistics["top_features"],
+            bottom_features=result.summary_statistics["bottom_features"],
+            avg_spearman=result.summary_statistics["avg_spearman"],
+            avg_kendall=result.summary_statistics["avg_kendall"]
+        )
+    
+    def summary_dataframe(self, stats: CrossTimeframeStatistics) -> pd.DataFrame:
+        """Convert statistics to DataFrame."""
+        return pd.DataFrame([asdict(stats)])
+    
+    def summary_dict(self, stats: CrossTimeframeStatistics) -> dict:
+        """Convert statistics to dictionary."""
+        return asdict(stats)

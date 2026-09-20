@@ -1,0 +1,182 @@
+"""
+Module 112 - Cross-Timeframe Consistency Validator
+"""
+
+import numpy as np
+import pandas as pd
+from .engine import CrossTimeframeResult
+from .statistics import CrossTimeframeStatistics
+
+
+class CrossTimeframeValidator:
+    """Validator for cross-timeframe consistency results."""
+    
+    def validate(
+        self,
+        result: CrossTimeframeResult,
+        statistics: CrossTimeframeStatistics
+    ) -> bool:
+        """Validate results and statistics."""
+        issues = []
+        warnings = []
+        
+        # Check datasets loaded
+        if not statistics.timeframes:
+            issues.append("No datasets loaded")
+        
+        # Check common features
+        if result.feature_statistics.empty:
+            issues.append("Feature statistics DataFrame is empty")
+        else:
+            if "feature" not in result.feature_statistics.columns:
+                issues.append("Feature statistics missing 'feature' column")
+        
+        # Check distribution consistency
+        if result.distribution_consistency.empty:
+            issues.append("Distribution consistency DataFrame is empty")
+        else:
+            if "feature" not in result.distribution_consistency.columns:
+                issues.append("Distribution consistency missing 'feature' column")
+            if "distribution_stability" not in result.distribution_consistency.columns:
+                issues.append("Distribution consistency missing 'distribution_stability' column")
+        
+        # Check correlations
+        if result.feature_correlations.empty:
+            issues.append("Feature correlations DataFrame is empty")
+        else:
+            # Check for NaN values in stability scores
+            if "corr_stability" in result.feature_correlations.columns:
+                if result.feature_correlations["corr_stability"].isna().any():
+                    issues.append("NaN values found in correlation stability")
+        
+        # Check rankings
+        if result.feature_rankings.empty:
+            issues.append("Feature rankings DataFrame is empty")
+        
+        # Check feature rank stability
+        if result.feature_rank_stability.empty:
+            issues.append("Feature rank stability DataFrame is empty")
+        else:
+            if "feature" not in result.feature_rank_stability.columns:
+                issues.append("Feature rank stability missing 'feature' column")
+            if "rank_stability" not in result.feature_rank_stability.columns:
+                issues.append("Feature rank stability missing 'rank_stability' column")
+        
+        # Check stability scores
+        if result.stability_scores.empty:
+            issues.append("Stability scores DataFrame is empty")
+        else:
+            # Check stability scores are in [0, 100]
+            if "stability_score" in result.stability_scores.columns:
+                if not np.all((0 <= result.stability_scores["stability_score"]) & 
+                            (result.stability_scores["stability_score"] <= 100)):
+                    issues.append("Stability scores outside [0, 100] range")
+        
+        # Check Spearman matrix using pandas (no numpy arrays needed)
+        if result.spearman_matrix.empty:
+            issues.append("Spearman matrix is empty")
+        else:
+            # Use pandas to safely extract and validate values
+            try:
+                spearman_values = (
+                    result.spearman_matrix
+                    .stack()
+                    .dropna()
+                    .astype(float)
+                )
+                
+                if not spearman_values.empty:
+                    if not spearman_values.between(-1, 1).all():
+                        issues.append("Spearman values outside [-1, 1] range")
+            except Exception as e:
+                issues.append(f"Spearman matrix validation error: {str(e)}")
+        
+        # Check Kendall matrix using pandas (no numpy arrays needed)
+        if result.kendall_matrix.empty:
+            issues.append("Kendall matrix is empty")
+        else:
+            # Use pandas to safely extract and validate values
+            try:
+                kendall_values = (
+                    result.kendall_matrix
+                    .stack()
+                    .dropna()
+                    .astype(float)
+                )
+                
+                if not kendall_values.empty:
+                    if not kendall_values.between(-1, 1).all():
+                        issues.append("Kendall values outside [-1, 1] range")
+            except Exception as e:
+                issues.append(f"Kendall matrix validation error: {str(e)}")
+        
+        # Check statistics match result
+        if statistics.total_features != result.summary_statistics["total_features"]:
+            issues.append(
+                f"Total features mismatch: stats={statistics.total_features}, "
+                f"result={result.summary_statistics['total_features']}"
+            )
+        
+        if statistics.stability_index != result.summary_statistics["stability_index"]:
+            issues.append(
+                f"Stability index mismatch: stats={statistics.stability_index}, "
+                f"result={result.summary_statistics['stability_index']}"
+            )
+        
+        # Warnings (non-fatal)
+        if statistics.stability_index < 50:
+            warnings.append(f"Low overall stability index: {statistics.stability_index:.2f}")
+        
+        # Fixed Spearman validation with np.isfinite check
+        if not np.isfinite(statistics.avg_spearman):
+            warnings.append(
+                "Average Spearman correlation could not be computed"
+            )
+        elif statistics.avg_spearman < 0.3:
+            warnings.append(
+                f"Low average Spearman correlation: "
+                f"{statistics.avg_spearman:.3f}"
+            )
+        
+        # Added Kendall validation
+        if not np.isfinite(statistics.avg_kendall):
+            warnings.append(
+                "Average Kendall correlation could not be computed"
+            )
+        elif statistics.avg_kendall < 0.3:
+            warnings.append(
+                f"Low average Kendall correlation: "
+                f"{statistics.avg_kendall:.3f}"
+            )
+        
+        if warnings:
+            print("\n  WARNINGS:")
+            for warning in warnings:
+                print(f"    ⚠ {warning}")
+        
+        if issues:
+            raise ValueError(
+                f"Cross-Timeframe Consistency validation failed with {len(issues)} issue(s):\n" +
+                "\n".join(f"  - {issue}" for issue in issues)
+            )
+        
+        return True
+
+
+def run_validation(result, statistics):
+    """Run validation with user-friendly output."""
+    validator = CrossTimeframeValidator()
+    
+    print("\n" + "=" * 60)
+    print("CROSS-TIMEFRAME CONSISTENCY VALIDATION")
+    print("=" * 60)
+    
+    try:
+        validator.validate(result, statistics)
+        print("\n  ✓ All validation checks passed")
+        print("=" * 60)
+        return True
+    except ValueError as e:
+        print(e)
+        print("=" * 60)
+        return False

@@ -1,0 +1,145 @@
+"""
+Module 111 - Monte Carlo Validation Statistics
+"""
+
+from dataclasses import dataclass, asdict
+
+import pandas as pd
+
+from .engine import MonteCarloValidationResult
+
+
+@dataclass
+class MonteCarloValidationStatistics:
+    """High-level statistics from Monte Carlo validation."""
+
+    observed_score: float
+    monte_carlo_mean: float
+    monte_carlo_std: float
+
+    ci_95_lower: float
+    ci_95_upper: float
+
+    ci_99_lower: float
+    ci_99_upper: float
+
+    p_value: float
+    z_score: float
+
+    bootstrap_bias: float
+    bootstrap_skewness: float
+    bootstrap_kurtosis: float
+
+    worst_case: float
+    best_case: float
+
+    edge_survival_rate: float
+    edge_failure_rate: float
+
+    passed: bool
+
+    validation_criteria: dict
+
+
+class MonteCarloValidationStatisticsEngine:
+    """Generate high-level statistics."""
+
+    METADATA = {
+        "module": 111,
+        "name": "Monte Carlo Validation",
+        "version": "3.0.0",
+        "description": (
+            "Validates statistical robustness under "
+            "randomization, resampling and temporal "
+            "out-of-sample testing"
+        ),
+
+        "depends_on": [
+            "100",
+            "102",
+            "035",
+            "037",
+            "108",
+        ],
+
+        "required_targets": [
+            "future_breakout"
+        ],
+    }
+
+    def analyze(
+        self,
+        result: MonteCarloValidationResult,
+    ) -> MonteCarloValidationStatistics:
+
+        return MonteCarloValidationStatistics(
+            observed_score=result.observed_score,
+
+            monte_carlo_mean=
+                result.monte_carlo_mean,
+
+            monte_carlo_std=
+                result.monte_carlo_std,
+
+            ci_95_lower=
+                result.confidence_interval_95[0],
+
+            ci_95_upper=
+                result.confidence_interval_95[1],
+
+            ci_99_lower=
+                result.confidence_interval_99[0],
+
+            ci_99_upper=
+                result.confidence_interval_99[1],
+
+            p_value=result.p_value,
+
+            z_score=result.z_score,
+
+            bootstrap_bias=
+                result.robustness_statistics[
+                    "bootstrap_bias"
+                ],
+
+            bootstrap_skewness=
+                result.robustness_statistics[
+                    "bootstrap_skewness"
+                ],
+
+            bootstrap_kurtosis=
+                result.robustness_statistics[
+                    "bootstrap_kurtosis"
+                ],
+
+            worst_case=result.worst_case,
+
+            best_case=result.best_case,
+
+            edge_survival_rate=
+                result.edge_survival_rate,
+
+            edge_failure_rate=
+                result.edge_failure_rate,
+
+            passed=result.passed,
+
+            validation_criteria=
+                result.validation_details,
+        )
+
+    def summary_dataframe(
+        self,
+        stats: MonteCarloValidationStatistics,
+    ) -> pd.DataFrame:
+
+        return pd.DataFrame([
+            asdict(stats)
+        ])
+
+    def summary_dict(
+        self,
+        stats: MonteCarloValidationStatistics,
+    ) -> dict:
+
+        return asdict(stats)

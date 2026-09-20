@@ -1,0 +1,652 @@
+"""
+Module 111 - Integration Test
+
+Tests Monte Carlo validation engine, statistics, validator, report, and pipeline.
+"""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+
+import numpy as np
+import pandas as pd
+
+from atlas.modules.module111_monte_carlo_validation.engine import MonteCarloValidationEngine
+from atlas.modules.module111_monte_carlo_validation.statistics import MonteCarloValidationStatisticsEngine
+from atlas.modules.module111_monte_carlo_validation.validator import run_validation
+from atlas.modules.module111_monte_carlo_validation.module import MonteCarloValidationResearch
+
+
+def create_test_data(n=500, seed=42):
+    """Create synthetic test data with a known weak edge."""
+    np.random.seed(seed)
+    
+    # Features with a real signal
+    x1 = np.random.randn(n)
+    x2 = np.random.randn(n) * 0.5 + x1 * 0.3
+    x3 = np.random.randn(n) * 0.3 + x1 * 0.2
+    x4 = np.random.randn(n)  # Pure noise
+    
+    # Target with signal + noise
+    y_prob = 1 / (1 + np.exp(-(0.5 * x1 + 0.3 * x2 + 0.1 * x3)))
+    y = (np.random.random(n) < y_prob).astype(int)
+    
+    # Create DataFrame
+    df = pd.DataFrame({
+        'feature1': x1,
+        'feature2': x2,
+        'feature3': x3,
+        'feature4': x4,
+        'future_breakout': y
+    })
+    
+    return df
+
+
+def test_engine_compute_score():
+    """Test 1: Compute score."""
+    print("\n" + "=" * 60)
+    print("TEST 1: Compute Score")
+    print("=" * 60)
+    
+    df = create_test_data()
+    X = df[['feature1', 'feature2', 'feature3', 'feature4']]
+    y = df['future_breakout'].values
+    
+    engine = MonteCarloValidationEngine(metric='roc_auc')
+    score = engine.compute_score(X, y)
+    
+    assert score > 0
+    assert score <= 1
+    
+    print(f"  Score: {score:.4f}")
+    print("  ✓ Compute score test passed")
+    return True
+
+
+def test_engine_bootstrap():
+    """Test 2: Bootstrap validation."""
+    print("\n" + "=" * 60)
+    print("TEST 2: Bootstrap Validation")
+    print("=" * 60)
+    
+    df = create_test_data()
+    X = df[['feature1', 'feature2', 'feature3', 'feature4']]
+    y = df['future_breakout'].values
+    
+    engine = MonteCarloValidationEngine(n_bootstrap=30, n_jobs=2, fast_mode=True)
+    result = engine.bootstrap_validation(X, y)
+    
+    assert 'mean' in result
+    assert 'std' in result
+    assert 'ci_95_lower' in result
+    assert 'ci_95_upper' in result
+    assert 'skewness' in result
+    assert 'kurtosis' in result
+    assert 'worst' in result
+    assert 'best' in result
+    # Changed: check for sufficient successful iterations rather than exact count
+    assert len(result['distribution']) >= 15
+    
+    print(f"  Bootstrap mean: {result['mean']:.4f}")
+    print(f"  Bootstrap std: {result['std']:.4f}")
+    print("  ✓ Bootstrap test passed")
+    return True
+
+
+def test_engine_permutation():
+    """Test 3: Permutation test."""
+    print("\n" + "=" * 60)
+    print("TEST 3: Permutation Test")
+    print("=" * 60)
+    
+    df = create_test_data()
+    X = df[['feature1', 'feature2', 'feature3', 'feature4']]
+    y = df['future_breakout'].values
+    
+    engine = MonteCarloValidationEngine(n_permutations=30, n_jobs=2, fast_mode=True)
+    result = engine.permutation_test(X, y)
+    
+    assert 'observed_score' in result
+    assert 'p_value' in result
+    assert 'z_score' in result
+    assert len(result['distribution']) >= 15
+    assert 0 <= result['p_value'] <= 1
+    assert isinstance(result['z_score'], (int, float))
+    
+    print(f"  P-value: {result['p_value']:.4f}")
+    print(f"  Z-score: {result['z_score']:.4f}")
+    print(f"  Null std: {result['null_std']:.4f}")
+    print("  ✓ Permutation test passed")
+    return True
+
+
+def test_engine_noise_injection():
+    """Test 4: Noise injection."""
+    print("\n" + "=" * 60)
+    print("TEST 4: Noise Injection")
+    print("=" * 60)
+    
+    df = create_test_data()
+    X = df[['feature1', 'feature2', 'feature3', 'feature4']]
+    y = df['future_breakout'].values
+    
+    engine = MonteCarloValidationEngine(
+        n_noise_levels=[0.01, 0.05],
+        n_noise_repeats=10,
+        fast_mode=True
+    )
+    result = engine.noise_injection_test(X, y, [0.01, 0.05])
+    
+    assert 'observed_score' in result
+    assert 'results' in result
+    assert 'avg_survival_rate' in result
+    assert len(result['results']) == 2
+    
+    # Survival rate should be clamped to [0, 1]
+    assert 0 <= result['avg_survival_rate'] <= 1
+    
+    print(f"  Avg survival: {result['avg_survival_rate']:.1%}")
+    print("  ✓ Noise injection test passed")
+    return True
+
+
+def test_engine_walk_forward():
+    """Test 5: Walk forward stability."""
+    print("\n" + "=" * 60)
+    print("TEST 5: Walk Forward Stability")
+    print("=" * 60)
+    
+    df = create_test_data()
+    X = df[['feature1', 'feature2', 'feature3', 'feature4']]
+    y = df['future_breakout'].values
+    
+    engine = MonteCarloValidationEngine(fast_mode=True)
+    result = engine.walk_forward_stability(X, y, window_size=0.5)
+    
+    assert 'mean' in result
+    assert 'std' in result
+    assert 'min' in result
+    assert 'max' in result
+    assert 'num_windows' in result
+    assert 'ci_95' in result
+    
+    print(f"  Walk forward mean: {result['mean']:.4f}")
+    print(f"  Num windows: {result['num_windows']}")
+    print("  ✓ Walk forward test passed")
+    return True
+
+
+def test_engine_compute():
+    """Test 6: Full engine computation."""
+    print("\n" + "=" * 60)
+    print("TEST 6: Full Engine Computation")
+    print("=" * 60)
+    
+    df = create_test_data()
+    X = df[['feature1', 'feature2', 'feature3', 'feature4']]
+    y = df['future_breakout'].values
+    
+    engine = MonteCarloValidationEngine(
+        n_bootstrap=30,
+        n_permutations=30,
+        n_jobs=2,
+        fast_mode=True
+    )
+    
+    result = engine.compute(X, y)
+    
+    # Verify all expected fields exist
+    assert result.observed_score > 0
+    assert result.monte_carlo_mean > 0
+    assert result.monte_carlo_std >= 0
+    assert 0 <= result.p_value <= 1
+    assert isinstance(result.z_score, (int, float))
+    assert not result.bootstrap_distribution.empty
+    assert not result.permutation_distribution.empty
+    assert isinstance(result.passed, bool)
+    assert 0 <= result.edge_survival_rate <= 1
+    assert 0 <= result.edge_failure_rate <= 1
+    assert result.worst_case <= result.best_case
+    
+    # Verify distribution columns exist
+    assert 'bootstrap_scores' in result.bootstrap_distribution.columns
+    assert 'null_scores' in result.permutation_distribution.columns
+    
+    print(f"  Observed score: {result.observed_score:.4f}")
+    print(f"  P-value: {result.p_value:.4f}")
+    print(f"  Edge survival: {result.edge_survival_rate:.1%}")
+    print(f"  Statistical edge passed: {result.passed}")
+    print("  ✓ Full engine test passed")
+    return True
+
+
+def test_statistics():
+    """Test 7: Statistics engine."""
+    print("\n" + "=" * 60)
+    print("TEST 7: Statistics Engine")
+    print("=" * 60)
+    
+    df = create_test_data()
+    X = df[['feature1', 'feature2', 'feature3', 'feature4']]
+    y = df['future_breakout'].values
+    
+    engine = MonteCarloValidationEngine(n_bootstrap=30, n_permutations=30, n_jobs=2, fast_mode=True)
+    stats_engine = MonteCarloValidationStatisticsEngine()
+    
+    result = engine.compute(X, y)
+    stats = stats_engine.analyze(result)
+    
+    assert stats.observed_score == result.observed_score
+    assert stats.p_value == result.p_value
+    assert stats.passed == result.passed
+    assert stats.edge_survival_rate == result.edge_survival_rate
+    assert stats.edge_failure_rate == result.edge_failure_rate
+    assert stats.worst_case == result.worst_case
+    assert stats.best_case == result.best_case
+    
+    print(f"  Observed score: {stats.observed_score:.4f}")
+    print(f"  Edge survival: {stats.edge_survival_rate:.1%}")
+    print(f"  Statistical edge passed: {stats.passed}")
+    print("  ✓ Statistics test passed")
+    return True
+
+
+def test_validator():
+    """Test 8: Validator."""
+    print("\n" + "=" * 60)
+    print("TEST 8: Validator")
+    print("=" * 60)
+    
+    df = create_test_data()
+    X = df[['feature1', 'feature2', 'feature3', 'feature4']]
+    y = df['future_breakout'].values
+    
+    engine = MonteCarloValidationEngine(n_bootstrap=30, n_permutations=30, n_jobs=2, fast_mode=True)
+    stats_engine = MonteCarloValidationStatisticsEngine()
+    
+    result = engine.compute(X, y)
+    stats = stats_engine.analyze(result)
+    
+    # Software validation should always pass (structural checks)
+    software_validation_passed = run_validation(result, stats)
+    assert software_validation_passed is True
+    
+    print("  ✓ Software validation test passed")
+    return True
+
+
+def test_pipeline():
+    """Test 9: Full pipeline."""
+    print("\n" + "=" * 60)
+    print("TEST 9: Full Pipeline")
+    print("=" * 60)
+    
+    df = create_test_data()
+    
+    research = MonteCarloValidationResearch(
+        n_bootstrap=30,
+        n_permutations=30,
+        n_jobs=2,
+        fast_mode=True
+    )
+    
+    result = research.run_dataframe(df, dataset_id="pipeline_test")
+    
+    # Verify module completed successfully
+    assert result.status == "completed"
+    
+    # Verify software validation passed (structural correctness)
+    assert result.statistics.get("software_validation_passed") is True
+    
+    # Verify all expected artifacts exist
+    assert "bootstrap_distribution" in result.artifacts
+    assert "permutation_distribution" in result.artifacts
+    assert "monte_carlo_validation_report" in result.artifacts
+    assert "distribution_report" in result.artifacts
+    assert "robustness_statistics" in result.artifacts
+    assert "validation_details" in result.artifacts
+    
+    # Verify artifacts are DataFrames or strings
+    assert isinstance(result.artifacts["bootstrap_distribution"], pd.DataFrame)
+    assert isinstance(result.artifacts["permutation_distribution"], pd.DataFrame)
+    assert isinstance(result.artifacts["monte_carlo_validation_report"], str)
+    
+    print(f"  Observed score: {result.statistics.get('observed_score'):.4f}")
+    print(f"  Edge survival: {result.statistics.get('edge_survival_rate'):.1%}")
+    print(f"  Statistical edge passed: {result.statistics.get('passed')}")
+    print("  ✓ Full pipeline test passed")
+    return True
+
+
+def test_engine_edge_cases():
+    """Test 10: Edge cases."""
+    print("\n" + "=" * 60)
+    print("TEST 10: Edge Cases")
+    print("=" * 60)
+    
+    # Test with constant features (should handle gracefully)
+    n = 100
+    X_constant = pd.DataFrame({
+        'f1': np.ones(n),
+        'f2': np.ones(n),
+        'f3': np.ones(n)
+    })
+    y_constant = np.random.randint(0, 2, n)
+    
+    engine = MonteCarloValidationEngine(fast_mode=True)
+    
+    try:
+        result = engine.compute(X_constant, y_constant)
+        assert result.observed_score >= 0
+        print(f"  Constant features handled: score={result.observed_score:.4f}")
+    except Exception as e:
+        assert False, f"Constant features caused error: {e}"
+    
+    # Test with empty data - should raise ValueError
+    X_empty = pd.DataFrame()
+    y_empty = np.array([])
+    
+    try:
+        engine.compute_score(X_empty, y_empty)
+        assert False, "Empty data should have raised ValueError"
+    except ValueError as e:
+        assert "Empty dataset" in str(e) or "X and y are required" in str(e)
+        print("  ✓ Empty data correctly rejected with ValueError")
+    
+    # Test with single sample - should raise appropriate error
+    X_single = pd.DataFrame({'f1': [1.0]})
+    y_single = np.array([0])
+    
+    try:
+        engine.compute_score(X_single, y_single)
+        assert False, "Single sample should have raised ValueError"
+    except ValueError as e:
+        assert "at least two classes" in str(e) or "Insufficient samples" in str(e)
+        print("  ✓ Single sample correctly rejected")
+    
+    print("  ✓ Edge cases test passed")
+    return True
+
+
+def test_bootstrap_estimator_alignment():
+    """
+    Critical regression test.
+
+    Bootstrap must use the same estimator as the
+    observed statistic.
+
+    The previous implementation compared:
+        CV ROC-AUC
+    against:
+        OOB ROC-AUC
+
+    which produced pathological bootstrap bias.
+    """
+
+    print("\n" + "=" * 60)
+    print("TEST: Bootstrap Estimator Alignment")
+    print("=" * 60)
+
+    df = create_test_data()
+
+    X = df[
+        [
+            'feature1',
+            'feature2',
+            'feature3',
+            'feature4',
+        ]
+    ]
+
+    y = df[
+        'future_breakout'
+    ].values
+
+    engine = MonteCarloValidationEngine(
+        n_bootstrap=30,
+        n_permutations=30,
+        n_jobs=2,
+        fast_mode=True,
+        random_state=42,
+    )
+
+    observed = engine.compute_score(
+        X,
+        y,
+    )
+
+    bootstrap = (
+        engine.bootstrap_validation(
+            X,
+            y,
+        )
+    )
+
+    bias = abs(
+        bootstrap["bias"]
+    )
+
+    # The exact bias is data dependent.
+    # The important regression condition is
+    # that it is not the huge estimator mismatch
+    # seen in the previous implementation.
+    assert bias < 0.20, (
+        f"Bootstrap bias too large: {bias:.4f}. "
+        "Observed and bootstrap estimators may "
+        "not be aligned."
+    )
+
+    print(
+        f"  Observed score: {observed:.4f}"
+    )
+
+    print(
+        f"  Bootstrap mean: "
+        f"{bootstrap['mean']:.4f}"
+    )
+
+    print(
+        f"  Bootstrap bias: "
+        f"{bootstrap['bias']:.4f}"
+    )
+
+    print(
+        "  ✓ Bootstrap estimator alignment passed"
+    )
+
+    return True
+
+
+def test_auc_null_value():
+
+    print("\n" + "=" * 60)
+    print("TEST: ROC-AUC Null Distribution")
+    print("=" * 60)
+
+    df = create_test_data()
+
+    X = df[
+        [
+            'feature1',
+            'feature2',
+            'feature3',
+            'feature4',
+        ]
+    ]
+
+    y = df[
+        'future_breakout'
+    ].values
+
+    engine = MonteCarloValidationEngine(
+        n_permutations=30,
+        n_jobs=2,
+        fast_mode=True,
+        random_state=42,
+        metric='roc_auc',
+    )
+
+    result = engine.permutation_test(
+        X,
+        y,
+    )
+
+    # Under label permutation, ROC-AUC should
+    # be approximately centered around 0.5.
+    assert abs(
+        result["null_mean"] - 0.5
+    ) < 0.10, (
+        "Permutation null is not centered "
+        "near ROC-AUC=0.5"
+    )
+
+    assert (
+        0 < result["p_value"] <= 1
+    )
+
+    print(
+        f"  Null mean: "
+        f"{result['null_mean']:.4f}"
+    )
+
+    print(
+        f"  P-value: "
+        f"{result['p_value']:.4f}"
+    )
+
+    print(
+        "  ✓ ROC-AUC null test passed"
+    )
+
+    return True
+
+
+def test_true_walk_forward():
+
+    print("\n" + "=" * 60)
+    print("TEST: True Walk-Forward Validation")
+    print("=" * 60)
+
+    df = create_test_data(
+        n=500
+    )
+
+    X = df[
+        [
+            'feature1',
+            'feature2',
+            'feature3',
+            'feature4',
+        ]
+    ]
+
+    y = df[
+        'future_breakout'
+    ].values
+
+    engine = MonteCarloValidationEngine(
+        fast_mode=True,
+        metric='roc_auc',
+    )
+
+    result = engine.walk_forward_stability(
+        X,
+        y,
+        window_size=0.50,
+        test_size=0.10,
+    )
+
+    assert result[
+        "num_windows"
+    ] >= 2
+
+    for window in result["windows"]:
+
+        assert (
+            window["train_end"]
+            <= window["test_start"]
+        )
+
+        assert (
+            window["train_end"]
+            == window["test_start"]
+        )
+
+        assert (
+            window["train_start"]
+            < window["train_end"]
+            < window["test_end"]
+        )
+
+    print(
+        f"  Windows: "
+        f"{result['num_windows']}"
+    )
+
+    print(
+        f"  Mean OOS score: "
+        f"{result['mean']:.4f}"
+    )
+
+    print(
+        "  ✓ True walk-forward test passed"
+    )
+
+    return True
+
+
+def main():
+    """Run all tests."""
+    print("\n" + "=" * 70)
+    print("PROJECT ATLAS - MODULE 111 INTEGRATION TEST")
+    print("Monte Carlo Validation v3")
+    print("=" * 70)
+    
+    results = {}
+    
+    results["compute_score"] = test_engine_compute_score()
+    results["bootstrap"] = test_engine_bootstrap()
+    results["permutation"] = test_engine_permutation()
+    results["noise_injection"] = test_engine_noise_injection()
+    results["walk_forward"] = test_engine_walk_forward()
+    results["full_engine"] = test_engine_compute()
+    results["statistics"] = test_statistics()
+    results["validator"] = test_validator()
+    results["pipeline"] = test_pipeline()
+    results["edge_cases"] = test_engine_edge_cases()
+    
+    # New regression tests
+    results["bootstrap_estimator_alignment"] = (
+        test_bootstrap_estimator_alignment()
+    )
+    results["auc_null_value"] = (
+        test_auc_null_value()
+    )
+    results["true_walk_forward"] = (
+        test_true_walk_forward()
+    )
+    
+    print("\n" + "=" * 70)
+    print("RESULTS")
+    print("=" * 70)
+    
+    for name, ok in results.items():
+        print(f"  {'✓' if ok else '✗'} {name}")
+    
+    passed = sum(results.values())
+    total = len(results)
+    
+    print(f"\n  {passed}/{total} tests passed")
+    
+    if passed == total:
+        print("\n✓ Module 111 v3 VALIDATED")
+        return 0
+    else:
+        print("\n⚠ Some tests failed")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

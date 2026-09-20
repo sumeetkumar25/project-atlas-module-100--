@@ -1,0 +1,9 @@
+# atlas/modules/module111_monte_carlo_validation/__init__.py
+"""
+Module 111
+Monte Carlo Validation
+"""
+
+from .module import MonteCarloValidationResearch
+
+__all__ = ["MonteCarloValidationResearch"]

@@ -1,0 +1,1019 @@
+"""
+Module 112 - Cross-Timeframe Consistency Engine
+
+Measures whether previously discovered behaviors are invariant across timeframes.
+
+Tests:
+  1. Feature Stability: Distribution consistency across timeframes
+  2. Correlation Consistency: Relationship with target across timeframes
+  3. Ranking Consistency: Feature importance ranking across timeframes
+  4. Overall Stability Index: Combined stability score (0-100)
+"""
+
+import numpy as np
+import pandas as pd
+from dataclasses import dataclass
+from typing import Optional, Dict, Any, List, Tuple
+from scipy import stats
+from pathlib import Path
+import sys
+
+# Add project root to path
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(PROJECT_ROOT))
+
+
+@dataclass
+class CrossTimeframeResult:
+    """Results from cross-timeframe consistency analysis."""
+    feature_statistics: pd.DataFrame
+    distribution_consistency: pd.DataFrame
+    feature_correlations: pd.DataFrame
+    feature_rankings: pd.DataFrame
+    feature_rank_stability: pd.DataFrame
+    stability_scores: pd.DataFrame
+    stability_index: float
+    summary_statistics: Dict[str, Any]
+    spearman_matrix: pd.DataFrame
+    kendall_matrix: pd.DataFrame
+    dataset_identifier: str = "multiple"
+
+
+class CrossTimeframeConsistencyEngine:
+    """Core engine for cross-timeframe consistency analysis."""
+
+    # Use relative paths from project root
+    DEFAULT_DATASETS = {
+        "15m": str(PROJECT_ROOT / "data" / "raw" / "BTCUSD_15m.csv"),
+        "1h": str(PROJECT_ROOT / "data" / "raw" / "BTCUSD_1h.csv"),
+        "4h": str(PROJECT_ROOT / "data" / "raw" / "BTCUSD_4h.csv"),
+    }
+
+    # Columns to ignore (not features)
+    IGNORE_COLS = {
+        "timestamp", "open", "high", "low", "close", "volume",
+        "future_breakout", "date", "time", "index", "symbol", 
+        "exchange", "regime_name", "category"
+    }
+
+    def __init__(
+        self,
+        dataset_paths: Optional[Dict[str, str]] = None,
+        ignore_cols: Optional[set] = None,
+        price_column: str = "close"
+    ):
+        self.dataset_paths = dataset_paths or self.DEFAULT_DATASETS.copy()
+        self.ignore_cols = ignore_cols or self.IGNORE_COLS.copy()
+        self.price_column = price_column
+
+    def load_datasets(self) -> Dict[str, pd.DataFrame]:
+        """Load datasets from configured paths."""
+        datasets = {}
+        for name, path in self.dataset_paths.items():
+            if Path(path).exists():
+                df = pd.read_csv(path)
+                datasets[name] = df
+            else:
+                print(f"  Warning: Dataset {name} not found at {path}")
+                datasets[name] = pd.DataFrame()
+        return datasets
+
+    def get_common_features(
+        self,
+        datasets: Dict[str, pd.DataFrame]
+    ) -> List[str]:
+        """
+        Get numeric features common to all valid datasets.
+
+        Only numeric columns are considered features.
+        Known market/target/meta columns are excluded.
+        """
+
+        feature_sets = []
+
+        for tf_name, df in datasets.items():
+
+            if df.empty:
+                continue
+
+            candidates = set(df.columns) - self.ignore_cols
+
+            # Only numeric columns are valid research features.
+            numeric_features = {
+                col
+                for col in candidates
+                if pd.api.types.is_numeric_dtype(df[col])
+            }
+
+            feature_sets.append(numeric_features)
+
+        if not feature_sets:
+            return []
+
+        common = sorted(set.intersection(*feature_sets))
+
+        return common
+
+    def compute_feature_statistics(
+        self,
+        datasets: Dict[str, pd.DataFrame],
+        features: List[str]
+    ) -> pd.DataFrame:
+        """
+        Compute distribution statistics for each feature across timeframes.
+
+        CV is retained as a descriptive statistic, but it is NOT used
+        as the primary distribution stability measure because CV is
+        unstable when feature means are near zero.
+        """
+
+        rows = []
+
+        for feature in features:
+
+            row = {"feature": feature}
+
+            for tf_name, df in datasets.items():
+
+                if df.empty or feature not in df.columns:
+                    continue
+
+                data = pd.to_numeric(
+                    df[feature],
+                    errors="coerce"
+                ).replace([np.inf, -np.inf], np.nan).dropna()
+
+                if len(data) == 0:
+                    continue
+
+                mean_value = float(data.mean())
+                std_value = float(data.std())
+
+                # Descriptive CV only.
+                if abs(mean_value) > 1e-12:
+                    cv_value = float(std_value / abs(mean_value))
+                else:
+                    cv_value = np.nan
+
+                row[f"{tf_name}_count"] = int(len(data))
+                row[f"{tf_name}_mean"] = mean_value
+                row[f"{tf_name}_std"] = std_value
+                row[f"{tf_name}_cv"] = cv_value
+                row[f"{tf_name}_skew"] = float(stats.skew(data))
+                row[f"{tf_name}_kurtosis"] = float(
+                    stats.kurtosis(data)
+                )
+
+            rows.append(row)
+
+        return pd.DataFrame(rows)
+
+    def compute_distribution_consistency(
+        self,
+        datasets: Dict[str, pd.DataFrame],
+        features: List[str]
+    ) -> pd.DataFrame:
+        """
+        Measure feature distribution stability across timeframes.
+
+        Pairwise two-sample KS tests are used.
+
+        KS statistic:
+            0 = identical empirical distributions
+            1 = maximally different empirical distributions
+
+        Therefore:
+
+            distribution_stability = 1 - mean(KS statistic)
+        """
+
+        timeframes = list(datasets.keys())
+
+        rows = []
+
+        for feature in features:
+
+            distributions = {}
+
+            for tf_name in timeframes:
+
+                df = datasets[tf_name]
+
+                if df.empty or feature not in df.columns:
+                    continue
+
+                data = pd.to_numeric(
+                    df[feature],
+                    errors="coerce"
+                ).replace(
+                    [np.inf, -np.inf],
+                    np.nan
+                ).dropna()
+
+                if len(data) < 2:
+                    continue
+
+                distributions[tf_name] = data.to_numpy()
+
+            pairwise_ks = []
+
+            for i in range(len(timeframes)):
+
+                for j in range(i + 1, len(timeframes)):
+
+                    tf1 = timeframes[i]
+                    tf2 = timeframes[j]
+
+                    if tf1 not in distributions:
+                        continue
+
+                    if tf2 not in distributions:
+                        continue
+
+                    data1 = distributions[tf1]
+                    data2 = distributions[tf2]
+
+                    ks_result = stats.ks_2samp(
+                        data1,
+                        data2
+                    )
+
+                    pairwise_ks.append(
+                        float(ks_result.statistic)
+                    )
+
+            if pairwise_ks:
+
+                mean_ks = float(np.mean(pairwise_ks))
+
+                stability = float(
+                    np.clip(
+                        1.0 - mean_ks,
+                        0.0,
+                        1.0
+                    )
+                )
+
+            else:
+
+                mean_ks = np.nan
+                stability = np.nan
+
+            rows.append({
+                "feature": feature,
+                "mean_ks_statistic": mean_ks,
+                "distribution_stability": stability,
+                "distribution_pairs": len(pairwise_ks),
+            })
+
+        return pd.DataFrame(rows)
+
+    def compute_correlation_consistency(
+        self,
+        datasets: Dict[str, pd.DataFrame],
+        features: List[str]
+    ) -> pd.DataFrame:
+        """
+        Measure relationship consistency between each feature and
+        future_breakout across timeframes.
+
+        Three separate concepts are retained:
+
+        1. correlation strength
+        2. correlation direction
+        3. correlation stability
+        """
+
+        rows = []
+
+        for feature in features:
+
+            row = {"feature": feature}
+
+            correlations = []
+
+            for tf_name, df in datasets.items():
+
+                if df.empty:
+                    continue
+
+                if feature not in df.columns:
+                    continue
+
+                if "future_breakout" not in df.columns:
+                    continue
+
+                temp = df[
+                    [feature, "future_breakout"]
+                ].copy()
+
+                temp[feature] = pd.to_numeric(
+                    temp[feature],
+                    errors="coerce"
+                )
+
+                temp["future_breakout"] = pd.to_numeric(
+                    temp["future_breakout"],
+                    errors="coerce"
+                )
+
+                temp = temp.replace(
+                    [np.inf, -np.inf],
+                    np.nan
+                ).dropna()
+
+                if len(temp) < 3:
+                    continue
+
+                corr = temp[feature].corr(
+                    temp["future_breakout"]
+                )
+
+                if pd.isna(corr):
+                    continue
+
+                corr = float(corr)
+
+                row[f"{tf_name}_corr"] = corr
+                row[f"{tf_name}_abs_corr"] = abs(corr)
+
+                correlations.append(corr)
+
+            if correlations:
+
+                correlations_array = np.asarray(
+                    correlations,
+                    dtype=float
+                )
+
+                abs_correlations = np.abs(
+                    correlations_array
+                )
+
+                mean_corr = float(
+                    np.mean(correlations_array)
+                )
+
+                mean_abs_corr = float(
+                    np.mean(abs_correlations)
+                )
+
+                corr_std = float(
+                    np.std(correlations_array)
+                )
+
+                corr_range = float(
+                    np.max(correlations_array)
+                    - np.min(correlations_array)
+                )
+
+                # Direction consistency.
+                signs = np.sign(
+                    correlations_array
+                )
+
+                non_zero_signs = signs[
+                    signs != 0
+                ]
+
+                if len(non_zero_signs) > 0:
+                    positive_fraction = float(
+                        np.mean(
+                            non_zero_signs > 0
+                        )
+                    )
+
+                    negative_fraction = float(
+                        np.mean(
+                            non_zero_signs < 0
+                        )
+                    )
+
+                    direction_consistency = max(
+                        positive_fraction,
+                        negative_fraction
+                    )
+                else:
+                    direction_consistency = 0.0
+
+                # Stability should not reward an essentially zero
+                # relationship merely because it is consistently zero.
+                if mean_abs_corr > 1e-12:
+
+                    relative_variation = (
+                        corr_std /
+                        mean_abs_corr
+                    )
+
+                    corr_stability = float(
+                        np.clip(
+                            1.0 - relative_variation,
+                            0.0,
+                            1.0
+                        )
+                    )
+
+                else:
+
+                    corr_stability = 0.0
+
+                row["corr_mean"] = mean_corr
+                row["corr_mean_abs"] = mean_abs_corr
+                row["corr_std"] = corr_std
+                row["corr_max_diff"] = corr_range
+                row["direction_consistency"] = (
+                    direction_consistency
+                )
+                row["corr_stability"] = (
+                    corr_stability
+                )
+
+            else:
+
+                row["corr_mean"] = np.nan
+                row["corr_mean_abs"] = np.nan
+                row["corr_std"] = np.nan
+                row["corr_max_diff"] = np.nan
+                row["direction_consistency"] = np.nan
+                row["corr_stability"] = 0.0
+
+            rows.append(row)
+
+        return pd.DataFrame(rows)
+
+    def compute_ranking_consistency(
+        self,
+        datasets: Dict[str, pd.DataFrame],
+        correlations: pd.DataFrame,
+        timeframes: List[str]
+    ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        """
+        Compute:
+
+        1. Feature ranking by absolute correlation strength
+        2. Per-feature rank stability
+        3. Global Spearman ranking consistency
+        4. Global Kendall ranking consistency
+        """
+
+        rankings = {}
+        rank_maps = {}
+
+        for tf in timeframes:
+
+            col = f"{tf}_abs_corr"
+
+            if col not in correlations.columns:
+                continue
+
+            ranking_source = correlations[
+                ["feature", col]
+            ].dropna()
+
+            if ranking_source.empty:
+                continue
+
+            sorted_df = ranking_source.sort_values(
+                col,
+                ascending=False
+            ).reset_index(drop=True)
+
+            ranking = sorted_df[
+                "feature"
+            ].tolist()
+
+            rankings[tf] = ranking
+
+            rank_maps[tf] = {
+                feature: rank + 1
+                for rank, feature
+                in enumerate(ranking)
+            }
+
+        # ---------------------------------------------------------
+        # Ranking table
+        # ---------------------------------------------------------
+
+        ranking_df = pd.DataFrame()
+
+        for tf in timeframes:
+
+            if tf in rankings:
+
+                rank_series = pd.Series(
+                    rankings[tf],
+                    name=tf
+                )
+
+                ranking_df = pd.concat(
+                    [
+                        ranking_df,
+                        rank_series
+                    ],
+                    axis=1
+                )
+
+        # ---------------------------------------------------------
+        # Global ranking correlation matrices
+        # ---------------------------------------------------------
+
+        timeframe_list = list(rankings.keys())
+
+        spearman_matrix = pd.DataFrame(
+            np.nan,
+            index=timeframe_list,
+            columns=timeframe_list,
+            dtype=float
+        )
+
+        kendall_matrix = pd.DataFrame(
+            np.nan,
+            index=timeframe_list,
+            columns=timeframe_list,
+            dtype=float
+        )
+
+        for tf1 in timeframe_list:
+
+            for tf2 in timeframe_list:
+
+                if tf1 == tf2:
+
+                    spearman_matrix.loc[
+                        tf1, tf2
+                    ] = 1.0
+
+                    kendall_matrix.loc[
+                        tf1, tf2
+                    ] = 1.0
+
+                    continue
+
+                common = sorted(
+                    set(rank_maps[tf1])
+                    &
+                    set(rank_maps[tf2])
+                )
+
+                if len(common) < 2:
+                    continue
+
+                ranks1 = [
+                    rank_maps[tf1][feature]
+                    for feature in common
+                ]
+
+                ranks2 = [
+                    rank_maps[tf2][feature]
+                    for feature in common
+                ]
+
+                spearman, _ = stats.spearmanr(
+                    ranks1,
+                    ranks2
+                )
+
+                kendall, _ = stats.kendalltau(
+                    ranks1,
+                    ranks2
+                )
+
+                if not pd.isna(spearman):
+
+                    spearman_matrix.loc[
+                        tf1, tf2
+                    ] = float(spearman)
+
+                if not pd.isna(kendall):
+
+                    kendall_matrix.loc[
+                        tf1, tf2
+                    ] = float(kendall)
+
+        # ---------------------------------------------------------
+        # Individual feature rank stability
+        # ---------------------------------------------------------
+
+        rank_rows = []
+
+        all_features = sorted(
+            set().union(
+                *[
+                    set(rank_map.keys())
+                    for rank_map in rank_maps.values()
+                ]
+            )
+        )
+
+        for feature in all_features:
+
+            feature_ranks = []
+
+            for tf in timeframe_list:
+
+                if feature in rank_maps[tf]:
+
+                    feature_ranks.append(
+                        rank_maps[tf][feature]
+                    )
+
+            if len(feature_ranks) < 2:
+
+                rank_stability = np.nan
+
+                rank_std = np.nan
+
+            else:
+
+                rank_std = float(
+                    np.std(feature_ranks)
+                )
+
+                n_features = max(
+                    len(rankings[tf])
+                    for tf in timeframe_list
+                )
+
+                if n_features <= 1:
+
+                    rank_stability = 1.0
+
+                else:
+
+                    # Pairwise normalized rank distance.
+                    pair_scores = []
+
+                    for i in range(
+                        len(feature_ranks)
+                    ):
+
+                        for j in range(
+                            i + 1,
+                            len(feature_ranks)
+                        ):
+
+                            distance = abs(
+                                feature_ranks[i]
+                                -
+                                feature_ranks[j]
+                            )
+
+                            normalized_distance = (
+                                distance /
+                                (n_features - 1)
+                            )
+
+                            pair_scores.append(
+                                1.0
+                                -
+                                normalized_distance
+                            )
+
+                    rank_stability = float(
+                        np.mean(pair_scores)
+                    )
+
+            rank_rows.append({
+                "feature": feature,
+                "rank_std": rank_std,
+                "rank_stability": rank_stability,
+            })
+
+        feature_rank_stability = pd.DataFrame(
+            rank_rows
+        )
+
+        return (
+            ranking_df,
+            spearman_matrix,
+            kendall_matrix,
+            feature_rank_stability
+        )
+
+    def compute_stability_scores(
+        self,
+        feature_stats: pd.DataFrame,
+        correlations: pd.DataFrame,
+        distribution_consistency: pd.DataFrame,
+        feature_rank_stability: pd.DataFrame
+    ) -> pd.DataFrame:
+        """
+        Compute feature-level stability scores.
+
+        Components:
+
+            40% correlation consistency
+            40% individual rank stability
+            20% distribution stability
+        """
+
+        rows = []
+
+        for feature in correlations["feature"].unique():
+
+            corr_row = correlations[
+                correlations["feature"] == feature
+            ]
+
+            if corr_row.empty:
+                continue
+
+            corr_stability = float(
+                corr_row[
+                    "corr_stability"
+                ].iloc[0]
+            )
+
+            rank_row = feature_rank_stability[
+                feature_rank_stability["feature"]
+                == feature
+            ]
+
+            if (
+                not rank_row.empty
+                and not pd.isna(
+                    rank_row["rank_stability"].iloc[0]
+                )
+            ):
+
+                rank_stability = float(
+                    rank_row[
+                        "rank_stability"
+                    ].iloc[0]
+                )
+
+            else:
+
+                rank_stability = 0.0
+
+            dist_row = distribution_consistency[
+                distribution_consistency["feature"]
+                == feature
+            ]
+
+            if (
+                not dist_row.empty
+                and not pd.isna(
+                    dist_row[
+                        "distribution_stability"
+                    ].iloc[0]
+                )
+            ):
+
+                distribution_stability = float(
+                    dist_row[
+                        "distribution_stability"
+                    ].iloc[0]
+                )
+
+            else:
+
+                distribution_stability = 0.0
+
+            stability_score = (
+                0.40 * corr_stability
+                +
+                0.40 * rank_stability
+                +
+                0.20 * distribution_stability
+            ) * 100.0
+
+            corr_mean_abs = corr_row[
+                "corr_mean_abs"
+            ].iloc[0]
+
+            direction_consistency = corr_row[
+                "direction_consistency"
+            ].iloc[0]
+
+            rows.append({
+                "feature": feature,
+
+                "mean_abs_correlation": (
+                    float(corr_mean_abs)
+                    if not pd.isna(corr_mean_abs)
+                    else np.nan
+                ),
+
+                "direction_consistency": (
+                    float(direction_consistency)
+                    if not pd.isna(direction_consistency)
+                    else 0.0
+                ),
+
+                "correlation_consistency": (
+                    corr_stability
+                ),
+
+                "rank_consistency": (
+                    rank_stability
+                ),
+
+                "distribution_consistency": (
+                    distribution_stability
+                ),
+
+                "stability_score": float(
+                    np.clip(
+                        stability_score,
+                        0.0,
+                        100.0
+                    )
+                ),
+            })
+
+        return pd.DataFrame(rows)
+
+    def compute(self, datasets: Optional[Dict[str, pd.DataFrame]] = None) -> CrossTimeframeResult:
+        """Run the full consistency analysis."""
+        if datasets is None:
+            print("\n  Loading datasets...")
+            datasets = self.load_datasets()
+        
+        valid_datasets = {k: v for k, v in datasets.items() if not v.empty}
+        timeframes = sorted(valid_datasets.keys())
+        
+        if not valid_datasets:
+            raise ValueError(
+                "No valid datasets loaded"
+            )
+        
+        if len(valid_datasets) < 2:
+            raise ValueError(
+                "Module 112 requires at least "
+                "two valid timeframes"
+            )
+        
+        # Every timeframe must contain the target.
+        missing_target = [
+            tf
+            for tf, df in valid_datasets.items()
+            if "future_breakout" not in df.columns
+        ]
+        
+        if missing_target:
+            raise ValueError(
+                "Missing required target column "
+                "'future_breakout' in timeframe(s): "
+                f"{missing_target}"
+            )
+        
+        print(f"  Loaded {len(valid_datasets)} datasets: {', '.join(timeframes)}")
+        features = self.get_common_features(valid_datasets)
+        print(f"  Found {len(features)} common features")
+        
+        if not features:
+            raise ValueError("No common features found across datasets")
+        
+        print("  Computing feature statistics...")
+        
+        feature_stats = (
+            self.compute_feature_statistics(
+                valid_datasets,
+                features
+            )
+        )
+        
+        print("  Computing distribution consistency...")
+        
+        distribution_consistency = (
+            self.compute_distribution_consistency(
+                valid_datasets,
+                features
+            )
+        )
+        
+        print("  Computing correlation consistency...")
+        
+        correlations = (
+            self.compute_correlation_consistency(
+                valid_datasets,
+                features
+            )
+        )
+        
+        print("  Computing ranking consistency...")
+        
+        (
+            rankings,
+            spearman_matrix,
+            kendall_matrix,
+            feature_rank_stability
+        ) = self.compute_ranking_consistency(
+            valid_datasets,
+            correlations,
+            timeframes
+        )
+        
+        print("  Computing stability scores...")
+        
+        stability_scores = self.compute_stability_scores(
+            feature_stats,
+            correlations,
+            distribution_consistency,
+            feature_rank_stability
+        )
+        
+        if stability_scores.empty:
+            raise ValueError(
+                "No valid feature stability scores "
+                "could be computed"
+            )
+        
+        stability_index = float(
+            stability_scores[
+                "stability_score"
+            ].mean()
+        )
+        
+        upper_spearman = (
+            spearman_matrix.values[
+                np.triu_indices_from(
+                    spearman_matrix.values,
+                    k=1
+                )
+            ]
+        )
+        
+        upper_kendall = (
+            kendall_matrix.values[
+                np.triu_indices_from(
+                    kendall_matrix.values,
+                    k=1
+                )
+            ]
+        )
+        
+        valid_spearman = upper_spearman[
+            ~np.isnan(upper_spearman)
+        ]
+        
+        valid_kendall = upper_kendall[
+            ~np.isnan(upper_kendall)
+        ]
+        
+        avg_spearman = (
+            float(np.mean(valid_spearman))
+            if len(valid_spearman) > 0
+            else np.nan
+        )
+        
+        avg_kendall = (
+            float(np.mean(valid_kendall))
+            if len(valid_kendall) > 0
+            else np.nan
+        )
+        
+        summary = {
+            "total_features": len(features),
+            "timeframes": timeframes,
+            "stability_index": stability_index,
+            "mean_stability": stability_index,
+            "median_stability": float(
+                stability_scores[
+                    "stability_score"
+                ].median()
+            ),
+            "min_stability": float(
+                stability_scores[
+                    "stability_score"
+                ].min()
+            ),
+            "max_stability": float(
+                stability_scores[
+                    "stability_score"
+                ].max()
+            ),
+            "top_features": (
+                stability_scores
+                .nlargest(
+                    5,
+                    "stability_score"
+                )["feature"]
+                .tolist()
+            ),
+            "bottom_features": (
+                stability_scores
+                .nsmallest(
+                    5,
+                    "stability_score"
+                )["feature"]
+                .tolist()
+            ),
+            "avg_spearman": avg_spearman,
+            "avg_kendall": avg_kendall,
+        }
+        
+        return CrossTimeframeResult(
+            feature_statistics=feature_stats,
+            distribution_consistency=distribution_consistency,
+            feature_correlations=correlations,
+            feature_rankings=rankings,
+            feature_rank_stability=feature_rank_stability,
+            stability_scores=stability_scores,
+            stability_index=stability_index,
+            summary_statistics=summary,
+            spearman_matrix=spearman_matrix,
+            kendall_matrix=kendall_matrix,
+            dataset_identifier="multiple"
+        )

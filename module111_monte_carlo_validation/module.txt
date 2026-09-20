@@ -1,0 +1,399 @@
+"""
+Module 111
+Monte Carlo Validation
+
+Validates whether statistical relationships are statistically robust
+under repeated randomization and resampling.
+
+Pipeline: load data → compute observed score → bootstrap → permutation →
+          robustness tests → statistics → validation → report → export
+
+Two-tier estimator configuration:
+- Observed score:      n_estimators=100, cv_folds=5  (accurate)
+- Monte Carlo tests:   resampling_estimators=30, resampling_cv_folds=3  (faster)
+
+Default: fast_mode=True to activate reduced configuration.
+"""
+
+from typing import Optional, Dict, Any
+import pandas as pd
+import numpy as np
+
+from atlas.core.base_research_module import BaseResearchModule
+from atlas.framework.registry import AtlasRegistry
+
+from .engine import MonteCarloValidationEngine
+from .statistics import MonteCarloValidationStatisticsEngine
+from .validator import run_validation
+from .report import MonteCarloValidationReport
+
+
+class MonteCarloValidationResearch(BaseResearchModule):
+    """Main research module for Monte Carlo validation."""
+    
+    MODULE_OUTPUT = "module111"
+    METADATA = MonteCarloValidationStatisticsEngine.METADATA
+    
+    # Declare target requirements for the target manager
+    REQUIRED_TARGETS = ["future_breakout"]
+    
+    def __init__(
+        self,
+        registry: Optional[AtlasRegistry] = None,
+        n_bootstrap: int = 30,
+        n_permutations: int = 50,
+        n_jobs: int = 4,
+        n_estimators: int = 100,
+        cv_folds: int = 5,
+        resampling_estimators: int = 30,
+        resampling_cv_folds: int = 3,
+        n_shuffles: int = 3,
+        fast_mode: bool = True,
+        metric: str = "roc_auc",
+        price_column: Optional[str] = None,
+        random_state: int = 42,
+    ):
+        super().__init__(
+            module_name="Monte Carlo Validation",
+            module_version=self.METADATA["version"],
+        )
+        
+        self.registry = registry or AtlasRegistry()
+        self.engine = MonteCarloValidationEngine(
+            n_bootstrap=n_bootstrap,
+            n_permutations=n_permutations,
+            n_jobs=n_jobs,
+            n_estimators=n_estimators,
+            cv_folds=cv_folds,
+            resampling_estimators=resampling_estimators,
+            resampling_cv_folds=resampling_cv_folds,
+            n_shuffles=n_shuffles,
+            fast_mode=fast_mode,
+            metric=metric,
+            price_column=price_column,
+            random_state=random_state,
+        )
+        self.stats_engine = MonteCarloValidationStatisticsEngine()
+        self.result_data = None
+        self.statistics = None
+        self.distribution_report = None
+    
+    def _register_pipeline_steps(self):
+        self.pipeline_steps = [
+            ("monte_carlo_validation", self._compute_validation),
+            ("statistics", self._compute_statistics),
+            ("validate", self._validate),
+            ("export", self._export_results),
+        ]
+    
+    def _prepare_data(self) -> Dict[str, Any]:
+        """
+        Prepare feature matrix X and binary target y.
+
+        The future_breakout target intentionally contains NaN values
+        for rows where the target cannot be determined, including rows
+        affected by the volatility lookback and future horizon.
+
+        Those rows must be excluded before statistical validation.
+        """
+
+        required_cols = ["future_breakout"]
+
+        # ---------------------------------------------------------
+        # 1. Validate required target column
+        # ---------------------------------------------------------
+        missing = (
+            set(required_cols)
+            - set(self.df.columns)
+        )
+
+        if missing:
+            raise ValueError(
+                f"Missing required columns: {missing}"
+            )
+
+        # ---------------------------------------------------------
+        # 2. Identify engineered numeric feature columns
+        # ---------------------------------------------------------
+        exclude_cols = [
+            "future_breakout",
+            "timestamp",
+            "date",
+            "time",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+        ]
+
+        feature_cols = [
+            col
+            for col in self.df.columns
+            if (
+                col not in exclude_cols
+                and pd.api.types.is_numeric_dtype(
+                    self.df[col]
+                )
+            )
+        ]
+
+        if not feature_cols:
+            raise ValueError(
+                "No numeric feature columns found"
+            )
+
+        # ---------------------------------------------------------
+        # 3. Build raw target
+        # ---------------------------------------------------------
+        target = self.df["future_breakout"]
+
+        # ---------------------------------------------------------
+        # 4. Validate target semantics
+        #
+        # Valid target values MUST be 0 or 1.
+        # NaN is allowed because the target generator intentionally
+        # produces undefined rows.
+        # ---------------------------------------------------------
+        non_null_target = target.dropna()
+
+        invalid_target_values = (
+            non_null_target[
+                ~non_null_target.isin([0, 1])
+            ]
+        )
+
+        if not invalid_target_values.empty:
+            unique_invalid = sorted(
+                invalid_target_values.unique().tolist()
+            )
+
+            raise ValueError(
+                "future_breakout contains invalid non-binary "
+                f"values: {unique_invalid}"
+            )
+
+        # ---------------------------------------------------------
+        # 5. Remove rows where target is undefined
+        # ---------------------------------------------------------
+        valid_target_mask = target.notna()
+
+        invalid_target_rows = int(
+            (~valid_target_mask).sum()
+        )
+
+        if invalid_target_rows == len(self.df):
+            raise ValueError(
+                "future_breakout contains no valid labeled rows"
+            )
+
+        # ---------------------------------------------------------
+        # 6. Construct X and y using EXACTLY the same mask
+        #
+        # This prevents feature/target misalignment.
+        # ---------------------------------------------------------
+        X = self.df.loc[
+            valid_target_mask,
+            feature_cols
+        ].copy()
+
+        y = target.loc[
+            valid_target_mask
+        ].astype(np.int64).to_numpy()
+
+        # ---------------------------------------------------------
+        # 7. Validate binary target after conversion
+        # ---------------------------------------------------------
+        unique_y = np.unique(y)
+
+        if not np.isin(
+            unique_y,
+            [0, 1]
+        ).all():
+            raise ValueError(
+                "Prepared future_breakout target contains "
+                f"invalid labels: {unique_y.tolist()}"
+            )
+
+        if len(unique_y) < 2:
+            raise ValueError(
+                "future_breakout must contain at least "
+                "two classes after removing undefined rows"
+            )
+
+        # ---------------------------------------------------------
+        # 8. Validate feature matrix
+        # ---------------------------------------------------------
+        if X.empty:
+            raise ValueError(
+                "Feature matrix is empty after target filtering"
+            )
+
+        if X.isnull().any().any():
+            bad_columns = (
+                X.columns[
+                    X.isnull().any()
+                ].tolist()
+            )
+
+            raise ValueError(
+                "Feature matrix contains NaN values in: "
+                f"{bad_columns}"
+            )
+
+        if not np.all(
+            np.isfinite(
+                X.to_numpy(dtype=float)
+            )
+        ):
+            raise ValueError(
+                "Feature matrix contains infinite values"
+            )
+
+        # ---------------------------------------------------------
+        # 9. Prepare price series using the SAME target mask
+        # ---------------------------------------------------------
+        price_series = None
+
+        if "close" in self.df.columns:
+            price_series = (
+                self.df.loc[
+                    valid_target_mask,
+                    "close"
+                ]
+                .copy()
+                .reset_index(drop=True)
+            )
+
+        # ---------------------------------------------------------
+        # 10. Reset X index so X/y are explicitly aligned
+        # ---------------------------------------------------------
+        X.reset_index(
+            drop=True,
+            inplace=True
+        )
+
+        # ---------------------------------------------------------
+        # Diagnostics
+        # ---------------------------------------------------------
+        self.logger.info(
+            f"Feature columns: {feature_cols}"
+        )
+
+        self.logger.info(
+            f"Total rows: {len(self.df)}"
+        )
+
+        self.logger.info(
+            f"Valid target rows: {len(y)}"
+        )
+
+        self.logger.info(
+            f"Excluded undefined target rows: "
+            f"{invalid_target_rows}"
+        )
+
+        self.logger.info(
+            f"Target classes: "
+            f"{np.unique(y).tolist()}"
+        )
+
+        self.logger.info(
+            f"Feature matrix shape: {X.shape}"
+        )
+
+        return {
+            "X": X,
+            "y": y,
+            "price_series": price_series,
+        }
+    
+    def _compute_validation(self) -> Dict[str, Any]:
+        self.logger.info("Step 1: Computing Monte Carlo validation")
+        prepared = self._prepare_data()
+        self.result_data = self.engine.compute(
+            X=prepared["X"],
+            y=prepared["y"],
+            price_series=prepared["price_series"],
+        )
+        
+        self.logger.metric("Observed Score", f"{self.result_data.observed_score:.4f}")
+        self.logger.metric("P-value", f"{self.result_data.p_value:.4f}")
+        self.logger.metric("Z-score", f"{self.result_data.z_score:.2f}")
+        self.logger.metric("Edge Survival", f"{self.result_data.edge_survival_rate:.1%}")
+        self.logger.metric("Bootstrap Bias", f"{self.result_data.robustness_statistics['bootstrap_bias']:.4f}")
+        self.logger.metric("Status", "✅ PASSED" if self.result_data.passed else "❌ FAILED")
+        self.logger.success("Monte Carlo validation computed")
+        
+        self.distribution_report = MonteCarloValidationReport.generate_distribution_report(
+            self.result_data.bootstrap_distribution,
+            self.result_data.permutation_distribution,
+            self.result_data.observed_score,
+            self.result_data.edge_survival_rate
+        )
+        
+        return {
+            "observed_score": self.result_data.observed_score,
+            "p_value": self.result_data.p_value,
+            "z_score": self.result_data.z_score,
+            "edge_survival_rate": self.result_data.edge_survival_rate,
+            "bootstrap_bias": self.result_data.robustness_statistics['bootstrap_bias'],
+            "passed": self.result_data.passed
+        }
+    
+    def _compute_statistics(self) -> Dict[str, Any]:
+        self.logger.info("Step 2: Computing statistics")
+        self.statistics = self.stats_engine.analyze(self.result_data)
+        self.logger.metric("Monte Carlo Mean", f"{self.statistics.monte_carlo_mean:.4f}")
+        self.logger.metric("95% CI", f"({self.statistics.ci_95_lower:.4f}, {self.statistics.ci_95_upper:.4f})")
+        self.logger.metric("Worst Case", f"{self.statistics.worst_case:.4f}")
+        self.logger.metric("Best Case", f"{self.statistics.best_case:.4f}")
+        self.logger.success("Statistics computed")
+        return self.stats_engine.summary_dict(self.statistics)
+    
+    def _validate(self) -> Dict[str, Any]:
+        self.logger.info("Step 3: Validation")
+        software_validation_passed = run_validation(self.result_data, self.statistics)
+        self.logger.success("Software validation complete")
+        return {"software_validation_passed": software_validation_passed}
+    
+    def _export_results(self) -> Dict[str, Any]:
+        self.logger.info("Step 4: Export")
+        
+        self.result.artifacts["bootstrap_distribution"] = self.result_data.bootstrap_distribution
+        self.result.artifacts["permutation_distribution"] = self.result_data.permutation_distribution
+        
+        stats_df = pd.DataFrame([self.result_data.robustness_statistics])
+        self.result.artifacts["robustness_statistics"] = stats_df
+        
+        details_df = pd.DataFrame([self.result_data.validation_details])
+        self.result.artifacts["validation_details"] = details_df
+        
+        main_report = MonteCarloValidationReport.generate(
+            self.statistics,
+            metadata=self.METADATA,
+            dataset_name=self.result.dataset_identifier,
+        )
+        self.result.artifacts["monte_carlo_validation_report"] = main_report
+        self.result.artifacts["distribution_report"] = self.distribution_report
+        
+        self.logger.metric("Artifacts", str(len(self.result.artifacts)))
+        self.logger.success("Export complete")
+        return {
+            "export_status": "complete",
+            "artifact_count": len(self.result.artifacts),
+            "statistical_edge_passed": self.result_data.passed
+        }
+    
+    def compute(self) -> Dict[str, Any]:
+        self.logger.section("Monte Carlo Validation Pipeline")
+        results = self.execute_pipeline()
+        self.result.status = "completed"
+        self.logger.success("Module 111 complete")
+        return results
+    
+    def run(self, filepath: str, output_dir=None):
+        return super().run(filepath, output_dir)
+    
+    def run_dataframe(self, df, dataset_id="in_memory", output_dir=None):
+        return super().run_dataframe(df, dataset_id, output_dir)
