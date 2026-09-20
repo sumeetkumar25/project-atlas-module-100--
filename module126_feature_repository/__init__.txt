@@ -1,0 +1,9 @@
+# atlas/modules/module126_feature_repository/__init__.py
+"""
+Module 126
+Feature Repository
+"""
+
+from .module import FeatureRepositoryResearch
+
+__all__ = ["FeatureRepositoryResearch"]

@@ -1,0 +1,450 @@
+# atlas/modules/module125_feature_stability/engine.py
+"""
+Module 125 - Feature Stability Analysis Engine
+
+Determines whether feature statistical properties remain consistent over time.
+
+Metrics:
+  1. Mean Stability: std of rolling means (normalized by feature std)
+  2. Variance Stability: std of rolling variances (normalized by overall variance)
+  3. Distribution Stability: average KS statistic between windows
+  4. Quantile Stability: stability of quantiles across windows (normalized by feature std)
+  5. Population Stability Index (PSI): feature drift
+
+Output: Stability score and PASS/WARNING/FAIL decision for each feature.
+"""
+
+import numpy as np
+import pandas as pd
+from dataclasses import dataclass
+from typing import Optional, Dict, Any, List, Tuple
+from scipy import stats
+import warnings
+warnings.filterwarnings('ignore')
+
+
+@dataclass
+class FeatureStabilityResult:
+    """Results from feature stability analysis."""
+    stability_table: pd.DataFrame
+    stable_features: List[str]
+    unstable_features: List[str]
+    summary_statistics: Dict[str, Any]
+
+
+class FeatureStabilityAnalysisEngine:
+    """Core engine for feature stability analysis."""
+
+    # Columns to ignore (not features)
+    IGNORE_COLS = {
+        "timestamp", "date", "time", "index",
+        "open", "high", "low", "close", "volume",
+        "future_breakout"
+    }
+
+    # Stability thresholds
+    PASS_THRESHOLD = 0.70
+    WARNING_THRESHOLD = 0.50
+
+    # Default number of windows
+    N_WINDOWS = 5
+
+    # Quantiles to track
+    QUANTILES = [0.10, 0.25, 0.50, 0.75, 0.90]
+
+    def __init__(
+        self,
+        pass_threshold: float = 0.70,
+        warning_threshold: float = 0.50,
+        n_windows: int = 5,
+        min_samples_per_window: int = 50
+    ):
+        """
+        Initialize the feature stability analysis engine.
+        
+        Args:
+            pass_threshold: Score above this threshold = PASS
+            warning_threshold: Score above this threshold = WARNING
+            n_windows: Number of windows to split data into
+            min_samples_per_window: Minimum samples required per window
+        """
+        self.pass_threshold = pass_threshold
+        self.warning_threshold = warning_threshold
+        self.n_windows = n_windows
+        self.min_samples_per_window = min_samples_per_window
+
+    def get_feature_columns(self, df: pd.DataFrame) -> List[str]:
+        """
+        Identify feature columns (exclude metadata and target).
+        """
+        features = [
+            c for c in df.columns
+            if c not in self.IGNORE_COLS
+            and pd.api.types.is_numeric_dtype(df[c])
+            and df[c].nunique() > 1
+        ]
+        return features
+
+    def create_windows(self, df: pd.DataFrame) -> List[pd.DataFrame]:
+        """
+        Split data into chronological windows.
+        """
+        n = len(df)
+        window_size = n // self.n_windows
+        
+        windows = []
+        for i in range(self.n_windows):
+            start = i * window_size
+            if i == self.n_windows - 1:
+                end = n
+            else:
+                end = (i + 1) * window_size
+            windows.append(df.iloc[start:end].copy())
+        
+        return windows
+
+    def compute_mean_stability(self, feature_series: pd.Series) -> float:
+        """
+        Compute mean stability across windows.
+        
+        Lower variation of rolling means = higher stability.
+        Normalized by feature std to be scale-independent.
+        """
+        windows = self.create_windows(
+            pd.DataFrame({feature_series.name: feature_series})
+        )
+        
+        window_means = [
+            w[feature_series.name].mean()
+            for w in windows
+            if len(w) >= self.min_samples_per_window
+        ]
+        
+        if len(window_means) < 2:
+            return 0.0
+        
+        mean_std = np.std(window_means)
+        
+        feature_std = feature_series.std()
+        
+        if feature_std < 1e-12:
+            feature_std = 1e-12
+        
+        normalized = mean_std / feature_std
+        
+        score = 1.0 - min(1.0, normalized)
+        
+        return float(np.clip(score, 0.0, 1.0))
+
+    def compute_variance_stability(self, feature_series: pd.Series) -> float:
+        """
+        Compute variance stability across windows.
+        
+        Lower variation of rolling variances = higher stability.
+        Normalized by overall variance.
+        """
+        windows = self.create_windows(
+            pd.DataFrame({feature_series.name: feature_series})
+        )
+        
+        window_variances = [
+            w[feature_series.name].var()
+            for w in windows
+            if len(w) >= self.min_samples_per_window
+        ]
+        
+        if len(window_variances) < 2:
+            return 0.0
+        
+        std_variances = np.std(window_variances)
+        
+        overall_var = feature_series.var()
+        if overall_var == 0:
+            overall_var = 1e-12
+        
+        normalized = std_variances / overall_var
+        
+        score = 1.0 - min(1.0, normalized)
+        
+        return float(np.clip(score, 0.0, 1.0))
+
+    def compute_ks_stability(self, feature_series: pd.Series) -> float:
+        """
+        Compute distribution stability using KS test between consecutive windows.
+        
+        Lower average KS statistic = more stable.
+        """
+        windows = self.create_windows(
+            pd.DataFrame({feature_series.name: feature_series})
+        )
+        
+        ks_stats = []
+        
+        for i in range(len(windows) - 1):
+            w1 = windows[i][feature_series.name].dropna()
+            w2 = windows[i + 1][feature_series.name].dropna()
+            
+            if len(w1) < self.min_samples_per_window or len(w2) < self.min_samples_per_window:
+                continue
+            
+            ks_stat, p_value = stats.ks_2samp(w1, w2)
+            ks_stats.append(ks_stat)
+        
+        if len(ks_stats) < 1:
+            return 0.0
+        
+        avg_ks = np.mean(ks_stats)
+        
+        # Convert to stability score (higher = more stable)
+        return 1.0 - min(1.0, avg_ks)
+
+    def compute_quantile_stability(self, feature_series: pd.Series) -> float:
+        """
+        Compute quantile stability across windows.
+        
+        Lower variation of quantiles = higher stability.
+        Normalized by feature std to be scale-independent.
+        """
+        windows = self.create_windows(
+            pd.DataFrame({feature_series.name: feature_series})
+        )
+        
+        feature_std = feature_series.std()
+        if feature_std < 1e-12:
+            feature_std = 1e-12
+        
+        quantile_stabilities = []
+        
+        for quantile in self.QUANTILES:
+            quantile_values = []
+            
+            for window in windows:
+                if len(window) >= self.min_samples_per_window:
+                    quantile_values.append(window[feature_series.name].quantile(quantile))
+            
+            if len(quantile_values) < 2:
+                continue
+            
+            std_q = np.std(quantile_values)
+            
+            # Normalize by feature std (scale-independent)
+            normalized = std_q / feature_std
+            quantile_stabilities.append(1.0 - min(1.0, normalized))
+        
+        if len(quantile_stabilities) < 1:
+            return 0.0
+        
+        return float(np.mean(quantile_stabilities))
+
+    def compute_psi(self, feature_series: pd.Series) -> float:
+        """
+        Compute Population Stability Index (PSI) between windows.
+        
+        Lower PSI = more stable.
+        """
+        windows = self.create_windows(
+            pd.DataFrame({feature_series.name: feature_series})
+        )
+        
+        if len(windows) < 2:
+            return 0.0
+        
+        # Use first window as baseline
+        baseline = windows[0][feature_series.name].dropna()
+        
+        psi_values = []
+        
+        for i in range(1, len(windows)):
+            current = windows[i][feature_series.name].dropna()
+            
+            if len(baseline) < 10 or len(current) < 10:
+                continue
+            
+            # Create bins for PSI calculation
+            all_values = pd.concat([baseline, current])
+            bins = np.percentile(all_values, np.linspace(0, 100, 11))
+            bins = np.unique(bins)
+            
+            if len(bins) < 2:
+                continue
+            
+            # Calculate PSI
+            baseline_hist, bin_edges = np.histogram(baseline, bins=bins)
+            current_hist, _ = np.histogram(current, bins=bins)
+            
+            baseline_pct = baseline_hist / len(baseline)
+            current_pct = current_hist / len(current)
+            
+            # Add small epsilon to avoid log(0)
+            baseline_pct = np.clip(baseline_pct, 1e-12, 1.0)
+            current_pct = np.clip(current_pct, 1e-12, 1.0)
+            
+            psi = np.sum((current_pct - baseline_pct) * np.log(current_pct / baseline_pct))
+            psi_values.append(psi)
+        
+        if len(psi_values) < 1:
+            return 0.0
+        
+        avg_psi = np.mean(psi_values)
+        
+        # Convert to stability score (higher = more stable)
+        # PSI > 0.25 is considered significant drift
+        return max(0.0, 1.0 - min(1.0, avg_psi / 0.25))
+
+    def compute_stability_score(self, metrics: Dict[str, float]) -> float:
+        """
+        Compute overall stability score.
+        """
+        weights = {
+            'mean_stability': 0.25,
+            'variance_stability': 0.20,
+            'ks_stability': 0.20,
+            'quantile_stability': 0.20,
+            'psi': 0.15
+        }
+        
+        score = (
+            weights['mean_stability'] * metrics.get('mean_stability', 0) +
+            weights['variance_stability'] * metrics.get('variance_stability', 0) +
+            weights['ks_stability'] * metrics.get('ks_stability', 0) +
+            weights['quantile_stability'] * metrics.get('quantile_stability', 0) +
+            weights['psi'] * metrics.get('psi', 0)
+        )
+        
+        return np.clip(score, 0.0, 1.0)
+
+    def make_decision(self, score: float) -> str:
+        """Make PASS/WARNING/FAIL decision based on stability score."""
+        if score >= self.pass_threshold:
+            return "PASS"
+        elif score >= self.warning_threshold:
+            return "WARNING"
+        else:
+            return "FAIL"
+
+    def compute_statistics(
+        self,
+        stability_table: pd.DataFrame,
+        stable_features: List[str],
+        unstable_features: List[str]
+    ) -> Dict[str, Any]:
+        """Compute summary statistics."""
+        total = len(stability_table)
+        scores = stability_table['stability_score']
+        
+        stats_dict = {
+            'total_features': total,
+            'stable_count': len(stable_features),
+            'unstable_count': len(unstable_features),
+            'stable_percentage': len(stable_features) / total * 100 if total > 0 else 0,
+            'unstable_percentage': len(unstable_features) / total * 100 if total > 0 else 0,
+            'average_stability': float(scores.mean()),
+            'median_stability': float(scores.median()),
+            'min_stability': float(scores.min()),
+            'max_stability': float(scores.max()),
+            'best_feature': stability_table.iloc[0]['feature'] if not stability_table.empty else None,
+            'worst_feature': stability_table.iloc[-1]['feature'] if not stability_table.empty else None,
+            'best_score': float(stability_table.iloc[0]['stability_score']) if not stability_table.empty else 0,
+            'worst_score': float(stability_table.iloc[-1]['stability_score']) if not stability_table.empty else 0,
+            'avg_mean_stability': float(stability_table['mean_stability'].mean()) if not stability_table.empty else 0,
+            'avg_ks_stability': float(stability_table['ks_stability'].mean()) if not stability_table.empty else 0,
+            'avg_psi': float(stability_table['psi'].mean()) if not stability_table.empty else 0
+        }
+        
+        return stats_dict
+
+    def compute(self, df: pd.DataFrame) -> FeatureStabilityResult:
+        """Main computation method."""
+        print("\n  Computing Feature Stability...")
+        
+        # Get features
+        features = self.get_feature_columns(df)
+        print(f"  Found {len(features)} features")
+        
+        if not features:
+            return FeatureStabilityResult(
+                stability_table=pd.DataFrame(),
+                stable_features=[],
+                unstable_features=[],
+                summary_statistics={
+                    'total_features': 0,
+                    'stable_count': 0,
+                    'unstable_count': 0,
+                    'stable_percentage': 0,
+                    'unstable_percentage': 0,
+                    'average_stability': 0,
+                    'median_stability': 0,
+                    'min_stability': 0,
+                    'max_stability': 0,
+                    'best_feature': None,
+                    'worst_feature': None,
+                    'best_score': 0,
+                    'worst_score': 0,
+                    'avg_mean_stability': 0,
+                    'avg_ks_stability': 0,
+                    'avg_psi': 0
+                }
+            )
+        
+        rows = []
+        stable = []
+        unstable = []
+        
+        for feature in features:
+            series = df[feature]
+            
+            # Compute stability metrics
+            mean_stability = self.compute_mean_stability(series)
+            variance_stability = self.compute_variance_stability(series)
+            ks_stability = self.compute_ks_stability(series)
+            quantile_stability = self.compute_quantile_stability(series)
+            psi = self.compute_psi(series)
+            
+            # Compile metrics
+            metrics = {
+                'mean_stability': mean_stability,
+                'variance_stability': variance_stability,
+                'ks_stability': ks_stability,
+                'quantile_stability': quantile_stability,
+                'psi': psi
+            }
+            
+            # Compute overall stability score
+            stability_score = self.compute_stability_score(metrics)
+            decision = self.make_decision(stability_score)
+            
+            # Track decisions
+            if decision == "PASS":
+                stable.append(feature)
+            else:
+                unstable.append(feature)
+            
+            rows.append({
+                'feature': feature,
+                'mean_stability': mean_stability,
+                'variance_stability': variance_stability,
+                'ks_stability': ks_stability,
+                'quantile_stability': quantile_stability,
+                'psi': psi,
+                'stability_score': stability_score,
+                'decision': decision
+            })
+        
+        # Create stability table
+        stability_table = pd.DataFrame(rows)
+        stability_table = stability_table.sort_values('stability_score', ascending=False).reset_index(drop=True)
+        
+        # Compute statistics
+        stats = self.compute_statistics(stability_table, stable, unstable)
+        
+        print(f"\n  Stability Results:")
+        print(f"    PASS:   {len(stable)} features")
+        print(f"    FAIL:   {len(unstable)} features")
+        print(f"    Average Stability: {stats['average_stability']:.3f}")
+        
+        return FeatureStabilityResult(
+            stability_table=stability_table,
+            stable_features=stable,
+            unstable_features=unstable,
+            summary_statistics=stats
+        )

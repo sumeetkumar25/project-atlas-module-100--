@@ -1,0 +1,42 @@
+# atlas/modules/module125_feature_stability/exporter.py
+"""
+Module 125 - Feature Stability Exporter
+"""
+
+import pandas as pd
+from pathlib import Path
+
+
+class FeatureStabilityExporter:
+    """Exporter for feature stability results."""
+    
+    @staticmethod
+    def export_stability_table(df: pd.DataFrame, filepath: str):
+        """Export stability table to CSV."""
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(path, index=False)
+    
+    @staticmethod
+    def export_stable_features(features: list, filepath: str):
+        """Export stable features to CSV."""
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        df = pd.DataFrame({'feature': features})
+        df.to_csv(path, index=False)
+    
+    @staticmethod
+    def export_unstable_features(features: list, filepath: str):
+        """Export unstable features to CSV."""
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        df = pd.DataFrame({'feature': features})
+        df.to_csv(path, index=False)
+    
+    @staticmethod
+    def export_summary(summary: dict, filepath: str):
+        """Export summary to CSV."""
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        df = pd.DataFrame([summary])
+        df.to_csv(path, index=False)

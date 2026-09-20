@@ -1,0 +1,1 @@
+python -m atlas.modules.module126_feature_repository.test_module

@@ -1,0 +1,69 @@
+# atlas/modules/module125_feature_stability/statistics.py
+"""
+Module 125 - Feature Stability Statistics
+"""
+
+from dataclasses import dataclass, asdict
+import pandas as pd
+from .engine import FeatureStabilityResult
+
+
+@dataclass
+class FeatureStabilityStatistics:
+    """High-level statistics from feature stability analysis."""
+    total_features: int
+    stable_count: int
+    unstable_count: int
+    stable_percentage: float
+    unstable_percentage: float
+    average_stability: float
+    median_stability: float
+    min_stability: float
+    max_stability: float
+    best_feature: str
+    worst_feature: str
+    best_score: float
+    worst_score: float
+    avg_mean_stability: float
+    avg_ks_stability: float
+    avg_psi: float
+
+
+class FeatureStabilityStatisticsEngine:
+    """Engine for generating high-level statistics."""
+    
+    METADATA = {
+        "module": 125,
+        "name": "Feature Stability Analysis",
+        "version": "1.0.0",
+        "description": "Determines whether feature statistical properties remain consistent over time"
+    }
+    
+    def analyze(self, result: FeatureStabilityResult) -> FeatureStabilityStatistics:
+        """Analyze results and generate high-level statistics."""
+        return FeatureStabilityStatistics(
+            total_features=result.summary_statistics['total_features'],
+            stable_count=result.summary_statistics['stable_count'],
+            unstable_count=result.summary_statistics['unstable_count'],
+            stable_percentage=result.summary_statistics['stable_percentage'],
+            unstable_percentage=result.summary_statistics['unstable_percentage'],
+            average_stability=result.summary_statistics['average_stability'],
+            median_stability=result.summary_statistics['median_stability'],
+            min_stability=result.summary_statistics['min_stability'],
+            max_stability=result.summary_statistics['max_stability'],
+            best_feature=result.summary_statistics['best_feature'],
+            worst_feature=result.summary_statistics['worst_feature'],
+            best_score=result.summary_statistics['best_score'],
+            worst_score=result.summary_statistics['worst_score'],
+            avg_mean_stability=result.summary_statistics['avg_mean_stability'],
+            avg_ks_stability=result.summary_statistics['avg_ks_stability'],
+            avg_psi=result.summary_statistics['avg_psi']
+        )
+    
+    def summary_dataframe(self, stats: FeatureStabilityStatistics) -> pd.DataFrame:
+        """Convert statistics to DataFrame."""
+        return pd.DataFrame([asdict(stats)])
+    
+    def summary_dict(self, stats: FeatureStabilityStatistics) -> dict:
+        """Convert statistics to dictionary."""
+        return asdict(stats)

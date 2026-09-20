@@ -1,0 +1,63 @@
+# atlas/modules/module126_feature_repository/statistics.py
+"""
+Module 126 - Feature Repository Statistics
+"""
+
+from dataclasses import dataclass, asdict
+import pandas as pd
+from .engine import FeatureRepositoryResult
+
+
+@dataclass
+class FeatureRepositoryStatistics:
+    """High-level statistics from feature repository."""
+    total_rows: int
+    total_features: int
+    total_columns: int
+    memory_usage_mb: float
+    feature_density: float
+    missing_percentage: float
+    duplicate_timestamps: int
+    constant_features: int
+    time_range_start: str
+    time_range_end: str
+    time_range_duration_days: int
+    fill_method: str
+
+
+class FeatureRepositoryStatisticsEngine:
+    """Engine for generating high-level statistics."""
+    
+    METADATA = {
+        "module": 126,
+        "name": "Feature Repository",
+        "version": "1.0.0",
+        "description": "Collects every engineered feature into one standardized dataframe"
+    }
+    
+    def analyze(self, result: FeatureRepositoryResult) -> FeatureRepositoryStatistics:
+        """Analyze results and generate high-level statistics."""
+        time_range = result.summary_statistics.get('time_range')
+        
+        return FeatureRepositoryStatistics(
+            total_rows=result.summary_statistics['total_rows'],
+            total_features=result.summary_statistics['total_features'],
+            total_columns=result.summary_statistics['total_columns'],
+            memory_usage_mb=result.summary_statistics['memory_usage_mb'],
+            feature_density=result.summary_statistics['feature_density'],
+            missing_percentage=result.summary_statistics['missing_percentage'],
+            duplicate_timestamps=result.summary_statistics['duplicate_timestamps'],
+            constant_features=result.summary_statistics['constant_features'],
+            time_range_start=str(time_range['start']) if time_range else "N/A",
+            time_range_end=str(time_range['end']) if time_range else "N/A",
+            time_range_duration_days=time_range['duration_days'] if time_range else 0,
+            fill_method=result.summary_statistics['fill_method']
+        )
+    
+    def summary_dataframe(self, stats: FeatureRepositoryStatistics) -> pd.DataFrame:
+        """Convert statistics to DataFrame."""
+        return pd.DataFrame([asdict(stats)])
+    
+    def summary_dict(self, stats: FeatureRepositoryStatistics) -> dict:
+        """Convert statistics to dictionary."""
+        return asdict(stats)
