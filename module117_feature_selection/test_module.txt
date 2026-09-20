@@ -1,0 +1,468 @@
+"""
+Module 117 - Integration Test
+
+Tests feature selection engine, statistics, validator, report, and pipeline.
+"""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+
+import numpy as np
+import pandas as pd
+
+from atlas.modules.module117_feature_selection.engine import FeatureSelectionEngine
+from atlas.modules.module117_feature_selection.statistics import FeatureSelectionStatisticsEngine
+from atlas.modules.module117_feature_selection.validator import run_validation
+from atlas.modules.module117_feature_selection.module import FeatureSelectionResearch
+
+
+def create_test_data(n_features=10):
+    """Create synthetic test data with scores for features."""
+    np.random.seed(42)
+    
+    features = [f'feature_{i}' for i in range(n_features)]
+    
+    # Create scores with some structure
+    importance = np.random.uniform(0.3, 0.9, n_features)
+    stability = np.random.uniform(0.2, 0.95, n_features)
+    redundancy = np.random.uniform(0.0, 0.8, n_features)
+    interaction = np.random.uniform(0.0, 0.7, n_features)
+    
+    # Make some features clearly good, some clearly bad
+    importance[0] = 0.85  # Good
+    importance[1] = 0.80  # Good
+    importance[7] = 0.25  # Bad
+    importance[8] = 0.30  # Bad
+    
+    stability[0] = 0.90
+    stability[1] = 0.85
+    stability[7] = 0.15
+    stability[8] = 0.20
+    
+    redundancy[0] = 0.1  # Low redundancy
+    redundancy[1] = 0.15
+    redundancy[7] = 0.7  # High redundancy
+    redundancy[8] = 0.75
+    
+    interaction[0] = 0.6
+    interaction[1] = 0.55
+    interaction[7] = 0.1
+    interaction[8] = 0.15
+    
+    df = pd.DataFrame({
+        'feature': features,
+        'importance': importance,
+        'stability': stability,
+        'redundancy': redundancy,
+        'interaction': interaction
+    })
+    
+    return df
+
+
+def test_engine_selection_scores():
+    """Test 1: Selection score computation."""
+    print("\n" + "=" * 60)
+    print("TEST 1: Selection Score Computation")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeatureSelectionEngine()
+    
+    importance = df.set_index('feature')['importance']
+    stability = df.set_index('feature')['stability']
+    redundancy = df.set_index('feature')['redundancy']
+    interaction = df.set_index('feature')['interaction']
+    
+    score_df = engine.compute_selection_scores(
+        importance, stability, redundancy, interaction
+    )
+    
+    assert not score_df.empty
+    assert 'final_score' in score_df.columns
+    assert score_df['final_score'].between(0, 1).all()
+    assert len(score_df) == len(df)
+    
+    print(f"  Scores computed for {len(score_df)} features")
+    print("  ✓ Selection score test passed")
+    return True
+
+
+def test_engine_decisions():
+    """Test 2: Decision making."""
+    print("\n" + "=" * 60)
+    print("TEST 2: Decision Making")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeatureSelectionEngine(
+        keep_threshold=0.70,
+        review_threshold=0.50
+    )
+    
+    importance = df.set_index('feature')['importance']
+    stability = df.set_index('feature')['stability']
+    redundancy = df.set_index('feature')['redundancy']
+    interaction = df.set_index('feature')['interaction']
+    
+    score_df = engine.compute_selection_scores(
+        importance, stability, redundancy, interaction
+    )
+    
+    selection_table, kept, removed, review = engine.make_decisions(score_df)
+    
+    assert 'decision' in selection_table.columns
+    assert len(kept) + len(removed) + len(review) == len(selection_table)
+    assert all(d in ['KEEP', 'REMOVE', 'REVIEW'] for d in selection_table['decision'])
+    
+    print(f"  Kept: {len(kept)}, Removed: {len(removed)}, Review: {len(review)}")
+    print("  ✓ Decision making test passed")
+    return True
+
+
+def test_engine_normalization():
+    """Test 3: Score normalization."""
+    print("\n" + "=" * 60)
+    print("TEST 3: Score Normalization")
+    print("=" * 60)
+    
+    engine = FeatureSelectionEngine()
+    
+    # Test with varying scores
+    scores = pd.Series([0.2, 0.5, 0.8, 1.0])
+    normalized = engine.normalize_scores(scores)
+    assert abs(normalized.min()) < 1e-10
+    assert abs(normalized.max() - 1.0) < 1e-10
+    
+    # Test with constant scores
+    scores = pd.Series([0.5, 0.5, 0.5, 0.5])
+    normalized = engine.normalize_scores(scores)
+    assert all(normalized == 0.5)
+    
+    print("  ✓ Normalization test passed")
+    return True
+
+
+def test_engine_weights():
+    """Test 4: Configurable weights."""
+    print("\n" + "=" * 60)
+    print("TEST 4: Configurable Weights")
+    print("=" * 60)
+    
+    df = create_test_data()
+    
+    # Default weights
+    engine_default = FeatureSelectionEngine()
+    
+    # Custom weights (more importance on stability)
+    custom_weights = {
+        "importance": 0.20,
+        "stability": 0.60,
+        "interaction": 0.10,
+        "redundancy": -0.10
+    }
+    engine_custom = FeatureSelectionEngine(weights=custom_weights)
+    
+    importance = df.set_index('feature')['importance']
+    stability = df.set_index('feature')['stability']
+    redundancy = df.set_index('feature')['redundancy']
+    interaction = df.set_index('feature')['interaction']
+    
+    result_default = engine_default.compute_selection_scores(
+        importance, stability, redundancy, interaction
+    )
+    result_custom = engine_custom.compute_selection_scores(
+        importance, stability, redundancy, interaction
+    )
+    
+    # Scores should differ
+    assert not result_default['final_score'].equals(result_custom['final_score'])
+    
+    print("  ✓ Configurable weights test passed")
+    return True
+
+
+def test_engine_weight_validation():
+    """Test 5: Weight validation."""
+    print("\n" + "=" * 60)
+    print("TEST 5: Weight Validation")
+    print("=" * 60)
+    
+    # Test missing weights
+    invalid_weights = {"importance": 0.5, "stability": 0.5}
+    try:
+        FeatureSelectionEngine(weights=invalid_weights)
+        assert False, "Should have raised ValueError"
+    except ValueError as e:
+        print(f"  Caught expected error: {str(e)[:50]}...")
+    
+    # Test incorrect sum
+    invalid_weights = {
+        "importance": 0.5,
+        "stability": 0.5,
+        "interaction": 0.5,
+        "redundancy": -0.5
+    }
+    try:
+        FeatureSelectionEngine(weights=invalid_weights)
+        assert False, "Should have raised ValueError"
+    except ValueError as e:
+        print(f"  Caught expected error: {str(e)[:50]}...")
+    
+    # Test valid weights
+    valid_weights = {
+        "importance": 0.4,
+        "stability": 0.3,
+        "interaction": 0.2,
+        "redundancy": -0.1
+    }
+    engine = FeatureSelectionEngine(weights=valid_weights)
+    assert engine.weights == valid_weights
+    
+    print("  ✓ Weight validation test passed")
+    return True
+
+
+def test_engine_compute():
+    """Test 6: Full engine computation."""
+    print("\n" + "=" * 60)
+    print("TEST 6: Full Engine Computation")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeatureSelectionEngine()
+    
+    importance = df.set_index('feature')['importance']
+    stability = df.set_index('feature')['stability']
+    redundancy = df.set_index('feature')['redundancy']
+    interaction = df.set_index('feature')['interaction']
+    
+    result = engine.compute(importance, stability, redundancy, interaction)
+    
+    assert not result.selection_table.empty
+    assert len(result.kept_features) > 0
+    assert len(result.removed_features) > 0
+    assert len(result.review_features) >= 0
+    assert result.summary_statistics['total_features'] > 0
+    
+    print(f"  Kept: {len(result.kept_features)}")
+    print(f"  Removed: {len(result.removed_features)}")
+    print(f"  Review: {len(result.review_features)}")
+    print(f"  Reduction: {result.summary_statistics['feature_space_reduction']:.1f}%")
+    print("  ✓ Full engine test passed")
+    return True
+
+
+def test_statistics():
+    """Test 7: Statistics engine."""
+    print("\n" + "=" * 60)
+    print("TEST 7: Statistics Engine")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeatureSelectionEngine()
+    stats_engine = FeatureSelectionStatisticsEngine()
+    
+    importance = df.set_index('feature')['importance']
+    stability = df.set_index('feature')['stability']
+    redundancy = df.set_index('feature')['redundancy']
+    interaction = df.set_index('feature')['interaction']
+    
+    result = engine.compute(importance, stability, redundancy, interaction)
+    stats = stats_engine.analyze(result)
+    
+    assert stats.total_features == result.summary_statistics['total_features']
+    assert stats.kept_count == len(result.kept_features)
+    assert stats.removed_count == len(result.removed_features)
+    assert stats.review_count == len(result.review_features)
+    assert stats.best_feature is not None
+    
+    print(f"  Kept: {stats.kept_count}")
+    print(f"  Removed: {stats.removed_count}")
+    print(f"  Review: {stats.review_count}")
+    print("  ✓ Statistics test passed")
+    return True
+
+
+def test_validator():
+    """Test 8: Validator."""
+    print("\n" + "=" * 60)
+    print("TEST 8: Validator")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeatureSelectionEngine()
+    stats_engine = FeatureSelectionStatisticsEngine()
+    
+    importance = df.set_index('feature')['importance']
+    stability = df.set_index('feature')['stability']
+    redundancy = df.set_index('feature')['redundancy']
+    interaction = df.set_index('feature')['interaction']
+    
+    result = engine.compute(importance, stability, redundancy, interaction)
+    stats = stats_engine.analyze(result)
+    
+    passed = run_validation(result, stats)
+    assert passed
+    
+    print("  ✓ Validator test passed")
+    return True
+
+
+def test_pipeline():
+    """Test 9: Full pipeline."""
+    print("\n" + "=" * 60)
+    print("TEST 9: Full Pipeline")
+    print("=" * 60)
+    
+    df = create_test_data()
+    
+    research = FeatureSelectionResearch()
+    
+    result = research.run_dataframe(df, dataset_id="pipeline_test")
+    
+    assert result.status == "completed"
+    assert "selection_table" in result.artifacts
+    assert "selection_score" in result.artifacts
+    assert "kept_features" in result.artifacts
+    assert "removed_features" in result.artifacts
+    assert "review_features" in result.artifacts
+    assert "feature_selection_report" in result.artifacts
+    assert "top_report" in result.artifacts
+    assert "bottom_report" in result.artifacts
+    assert result.statistics.get("software_validation_passed") == True
+    
+    print(f"  Kept: {result.statistics.get('kept_count')}")
+    print(f"  Removed: {result.statistics.get('removed_count')}")
+    print(f"  Review: {result.statistics.get('review_count')}")
+    print("  ✓ Full pipeline test passed")
+    return True
+
+
+def test_threshold_boundaries():
+    """Test 10: Threshold boundaries."""
+    print("\n" + "=" * 60)
+    print("TEST 10: Threshold Boundaries")
+    print("=" * 60)
+    
+    engine = FeatureSelectionEngine(
+        keep_threshold=0.70,
+        review_threshold=0.50
+    )
+    
+    # Test scores at boundaries
+    scores = [0.69, 0.70, 0.71, 0.49, 0.50, 0.51]
+    expected = ['REVIEW', 'KEEP', 'KEEP', 'REMOVE', 'REVIEW', 'REVIEW']
+    
+    for score, expected_decision in zip(scores, expected):
+        # Create a simple score_df
+        score_df = pd.DataFrame({
+            'feature': ['test'],
+            'final_score': [score],
+            'importance_normalized': [0.5],
+            'stability_normalized': [0.5],
+            'redundancy_normalized': [0.5],
+            'interaction_normalized': [0.5]
+        })
+        
+        selection_table, _, _, _ = engine.make_decisions(score_df)
+        decision = selection_table.iloc[0]['decision']
+        assert decision == expected_decision, f"Score {score} -> {decision}, expected {expected_decision}"
+    
+    print("  ✓ Threshold boundaries test passed")
+    return True
+
+
+def test_missing_feature_handling():
+    """Test 11: Missing feature handling."""
+    print("\n" + "=" * 60)
+    print("TEST 11: Missing Feature Handling")
+    print("=" * 60)
+    
+    # Create data with different feature sets
+    importance = pd.Series([0.8, 0.7, 0.6, 0.5], index=['A', 'B', 'C', 'D'])
+    stability = pd.Series([0.9, 0.8, 0.7], index=['A', 'B', 'C'])
+    redundancy = pd.Series([0.1, 0.2, 0.3, 0.4], index=['A', 'B', 'C', 'D'])
+    interaction = pd.Series([0.5, 0.6, 0.7, 0.8], index=['A', 'B', 'C', 'D'])
+    
+    engine = FeatureSelectionEngine()
+    
+    # Should only use common features (A, B, C)
+    score_df = engine.compute_selection_scores(
+        importance, stability, redundancy, interaction
+    )
+    
+    # Only A, B, C are common across all series
+    expected_features = ['A', 'B', 'C']
+    assert len(score_df) == len(expected_features)
+    assert set(score_df['feature']) == set(expected_features)
+    
+    # 'D' should not be included (missing in stability)
+    assert 'D' not in score_df['feature'].values
+    
+    # Test with completely mismatched sets
+    importance_mismatch = pd.Series([0.8], index=['X'])
+    stability_mismatch = pd.Series([0.9], index=['Y'])
+    redundancy_mismatch = pd.Series([0.1], index=['Z'])
+    interaction_mismatch = pd.Series([0.5], index=['W'])
+    
+    try:
+        engine.compute_selection_scores(
+            importance_mismatch,
+            stability_mismatch,
+            redundancy_mismatch,
+            interaction_mismatch
+        )
+        assert False, "Should have raised ValueError for no common features"
+    except ValueError as e:
+        print(f"  Caught expected error: {str(e)}")
+    
+    print("  ✓ Missing feature handling test passed")
+    return True
+
+
+def main():
+    """Run all tests."""
+    print("\n" + "=" * 70)
+    print("PROJECT ATLAS - MODULE 117 INTEGRATION TEST")
+    print("Feature Selection")
+    print("=" * 70)
+    
+    results = {}
+    
+    results["selection_scores"] = test_engine_selection_scores()
+    results["decisions"] = test_engine_decisions()
+    results["normalization"] = test_engine_normalization()
+    results["weights"] = test_engine_weights()
+    results["weight_validation"] = test_engine_weight_validation()
+    results["full_engine"] = test_engine_compute()
+    results["statistics"] = test_statistics()
+    results["validator"] = test_validator()
+    results["pipeline"] = test_pipeline()
+    results["threshold_boundaries"] = test_threshold_boundaries()
+    results["missing_features"] = test_missing_feature_handling()
+    
+    print("\n" + "=" * 70)
+    print("RESULTS")
+    print("=" * 70)
+    
+    for name, ok in results.items():
+        print(f"  {'✓' if ok else '✗'} {name}")
+    
+    passed = sum(results.values())
+    total = len(results)
+    
+    print(f"\n  {passed}/{total} tests passed")
+    
+    if passed == total:
+        print("\n✓ Module 117 VALIDATED")
+        return 0
+    else:
+        print("\n⚠ Some tests failed")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

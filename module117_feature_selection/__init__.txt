@@ -1,0 +1,9 @@
+# atlas/modules/module117_feature_selection/__init__.py
+"""
+Module 117
+Feature Selection
+"""
+
+from .module import FeatureSelectionResearch
+
+__all__ = ["FeatureSelectionResearch"]

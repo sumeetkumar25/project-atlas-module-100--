@@ -1,0 +1,129 @@
+"""
+Module 117 - Feature Selection Validator
+"""
+
+import numpy as np
+import pandas as pd
+from .engine import FeatureSelectionResult
+from .statistics import FeatureSelectionStatistics
+
+
+class FeatureSelectionValidator:
+    """Validator for feature selection results."""
+    
+    def validate(
+        self,
+        result: FeatureSelectionResult,
+        statistics: FeatureSelectionStatistics
+    ) -> bool:
+        """Validate results and statistics."""
+        issues = []
+        warnings = []
+        
+        # Check selection table
+        if result.selection_table.empty:
+            issues.append("Selection table is empty")
+        else:
+            required_cols = ['feature', 'final_score', 'decision']
+            missing = set(required_cols) - set(result.selection_table.columns)
+            if missing:
+                issues.append(f"Missing columns in selection table: {missing}")
+            
+            # Check no duplicate features
+            if 'feature' in result.selection_table.columns:
+                if result.selection_table['feature'].duplicated().any():
+                    issues.append("Duplicate features found in selection table")
+            
+            # Check scores are in [0, 1]
+            if 'final_score' in result.selection_table.columns:
+                if not np.all((0 <= result.selection_table['final_score']) & 
+                            (result.selection_table['final_score'] <= 1)):
+                    issues.append("Scores outside [0, 1] range")
+            
+            # Check decisions are valid
+            if 'decision' in result.selection_table.columns:
+                valid_decisions = {'KEEP', 'REMOVE', 'REVIEW'}
+                invalid = set(result.selection_table['decision'].unique()) - valid_decisions
+                if invalid:
+                    issues.append(f"Invalid decisions found: {invalid}")
+        
+        # Check feature lists
+        total_decision_count = len(result.kept_features) + len(result.removed_features) + len(result.review_features)
+        if total_decision_count != len(result.selection_table):
+            issues.append(
+                f"Decision count mismatch: {total_decision_count} vs {len(result.selection_table)}"
+            )
+        
+        # Check no duplicates across decision lists
+        all_decisions = set(result.kept_features) | set(result.removed_features) | set(result.review_features)
+        if len(all_decisions) != len(result.selection_table):
+            issues.append("Features appear in multiple decision lists")
+        
+        # Check best feature exists in selection table
+        if result.summary_statistics['best_feature'] is not None:
+            if result.summary_statistics['best_feature'] not in result.selection_table['feature'].values:
+                issues.append("Best feature missing from selection table")
+        
+        # Check statistics match result
+        if statistics.total_features != result.summary_statistics['total_features']:
+            issues.append(
+                f"Total features mismatch: stats={statistics.total_features}, "
+                f"result={result.summary_statistics['total_features']}"
+            )
+        
+        if statistics.kept_count != len(result.kept_features):
+            issues.append(
+                f"Kept count mismatch: stats={statistics.kept_count}, "
+                f"result={len(result.kept_features)}"
+            )
+        
+        if statistics.removed_count != len(result.removed_features):
+            issues.append(
+                f"Removed count mismatch: stats={statistics.removed_count}, "
+                f"result={len(result.removed_features)}"
+            )
+        
+        if statistics.review_count != len(result.review_features):
+            issues.append(
+                f"Review count mismatch: stats={statistics.review_count}, "
+                f"result={len(result.review_features)}"
+            )
+        
+        # Warnings (non-fatal)
+        if statistics.kept_percentage < 20:
+            warnings.append(f"Low keep percentage: {statistics.kept_percentage:.1f}%")
+        
+        if statistics.feature_space_reduction > 80:
+            warnings.append(f"High feature reduction: {statistics.feature_space_reduction:.1f}%")
+        
+        if warnings:
+            print("\n  WARNINGS:")
+            for warning in warnings:
+                print(f"    ⚠ {warning}")
+        
+        if issues:
+            raise ValueError(
+                f"Feature Selection validation failed with {len(issues)} issue(s):\n" +
+                "\n".join(f"  - {issue}" for issue in issues)
+            )
+        
+        return True
+
+
+def run_validation(result, statistics):
+    """Run validation with user-friendly output."""
+    validator = FeatureSelectionValidator()
+    
+    print("\n" + "=" * 60)
+    print("FEATURE SELECTION VALIDATION")
+    print("=" * 60)
+    
+    try:
+        validator.validate(result, statistics)
+        print("\n  ✓ All validation checks passed")
+        print("=" * 60)
+        return True
+    except ValueError as e:
+        print(e)
+        print("=" * 60)
+        return False

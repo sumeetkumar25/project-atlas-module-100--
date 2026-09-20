@@ -1,0 +1,267 @@
+"""
+Module 117 - Feature Selection Engine
+
+Decision module that combines:
+  - Feature Importance (Module 113)
+  - Feature Stability (Module 114)
+  - Feature Redundancy (Module 115)
+  - Feature Interaction (Module 116)
+
+Output: KEEP, REMOVE, or REVIEW for every feature.
+"""
+
+import numpy as np
+import pandas as pd
+from dataclasses import dataclass
+from typing import Optional, Dict, Any, List, Tuple
+import warnings
+warnings.filterwarnings('ignore')
+
+
+@dataclass
+class FeatureSelectionResult:
+    """Results from feature selection."""
+    selection_table: pd.DataFrame
+    kept_features: List[str]
+    removed_features: List[str]
+    review_features: List[str]
+    selection_score: pd.DataFrame
+    summary_statistics: Dict[str, Any]
+
+
+class FeatureSelectionEngine:
+    """Core engine for feature selection."""
+
+    # Default weights for final score
+    DEFAULT_WEIGHTS = {
+        "importance": 0.40,
+        "stability": 0.30,
+        "interaction": 0.20,
+        "redundancy": -0.10  # Negative weight (penalty)
+    }
+
+    # Decision thresholds
+    KEEP_THRESHOLD = 0.70
+    REVIEW_THRESHOLD = 0.50
+
+    def __init__(
+        self,
+        weights: Optional[Dict[str, float]] = None,
+        keep_threshold: float = 0.70,
+        review_threshold: float = 0.50
+    ):
+        """
+        Initialize the feature selection engine.
+        
+        Args:
+            weights: Dictionary of weights for each component
+            keep_threshold: Score above this threshold = KEEP
+            review_threshold: Score above this threshold = REVIEW, below = REMOVE
+        """
+        self.weights = weights or self.DEFAULT_WEIGHTS.copy()
+        self.keep_threshold = keep_threshold
+        self.review_threshold = review_threshold
+        
+        # Validate weights
+        self._validate_weights()
+
+    def _validate_weights(self) -> None:
+        """
+        Validate that weights are properly configured.
+        """
+        required = {"importance", "stability", "interaction", "redundancy"}
+        
+        if set(self.weights.keys()) != required:
+            raise ValueError(
+                f"Weights must contain exactly: {required}. "
+                f"Got: {set(self.weights.keys())}"
+            )
+        
+        # Calculate total absolute weight sum
+        total = (
+            self.weights["importance"] +
+            self.weights["stability"] +
+            self.weights["interaction"] +
+            abs(self.weights["redundancy"])
+        )
+        
+        if abs(total - 1.0) > 1e-9:
+            raise ValueError(
+                f"Weights must sum to 1.0 (using absolute value for redundancy). "
+                f"Got total: {total:.4f}"
+            )
+
+    def normalize_scores(self, series: pd.Series) -> pd.Series:
+        """
+        Normalize series to [0, 1] range.
+        """
+        if series.max() == series.min():
+            return pd.Series(0.5, index=series.index)
+        return (series - series.min()) / (series.max() - series.min())
+
+    def compute_selection_scores(
+        self,
+        importance_scores: pd.Series,
+        stability_scores: pd.Series,
+        redundancy_scores: pd.Series,
+        interaction_scores: pd.Series
+    ) -> pd.DataFrame:
+        """
+        Compute final selection scores from all components.
+        
+        Returns:
+            DataFrame with normalized component scores and final score
+        """
+        # Ensure all series have same index
+        common_features = set(importance_scores.index) & set(stability_scores.index) & \
+                         set(redundancy_scores.index) & set(interaction_scores.index)
+        
+        if not common_features:
+            raise ValueError("No common features found across all modules")
+        
+        common_features = sorted(common_features)
+        
+        # Normalize each component to [0, 1]
+        imp_norm = self.normalize_scores(importance_scores[common_features])
+        stab_norm = self.normalize_scores(stability_scores[common_features])
+        red_norm = self.normalize_scores(redundancy_scores[common_features])
+        int_norm = self.normalize_scores(interaction_scores[common_features])
+        
+        # Compute final score
+        final_score = (
+            self.weights.get("importance", 0.40) * imp_norm +
+            self.weights.get("stability", 0.30) * stab_norm +
+            self.weights.get("interaction", 0.20) * int_norm +
+            self.weights.get("redundancy", -0.10) * red_norm
+        )
+        
+        # Clip to [0, 1]
+        final_score = np.clip(final_score, 0, 1)
+        
+        # Create DataFrame
+        result_df = pd.DataFrame({
+            'feature': common_features,
+            'importance_normalized': imp_norm.values,
+            'stability_normalized': stab_norm.values,
+            'redundancy_normalized': red_norm.values,
+            'interaction_normalized': int_norm.values,
+            'final_score': final_score.values
+        })
+        
+        # Sort by final score descending
+        result_df = result_df.sort_values('final_score', ascending=False).reset_index(drop=True)
+        
+        return result_df
+
+    def make_decisions(
+        self,
+        score_df: pd.DataFrame
+    ) -> Tuple[pd.DataFrame, List[str], List[str], List[str]]:
+        """
+        Make KEEP/REMOVE/REVIEW decisions based on final scores.
+        """
+        decisions = []
+        kept = []
+        removed = []
+        review = []
+        
+        for _, row in score_df.iterrows():
+            score = row['final_score']
+            feature = row['feature']
+            
+            if score >= self.keep_threshold:
+                decision = "KEEP"
+                kept.append(feature)
+            elif score >= self.review_threshold:
+                decision = "REVIEW"
+                review.append(feature)
+            else:
+                decision = "REMOVE"
+                removed.append(feature)
+            
+            decisions.append(decision)
+        
+        score_df['decision'] = decisions
+        
+        return score_df, kept, removed, review
+
+    def compute_statistics(
+        self,
+        selection_table: pd.DataFrame,
+        kept: List[str],
+        removed: List[str],
+        review: List[str]
+    ) -> Dict[str, Any]:
+        """
+        Compute summary statistics.
+        """
+        total = len(selection_table)
+        
+        # Feature space reduction = percentage of features removed
+        feature_space_reduction = (len(removed) / total * 100) if total > 0 else 0
+        
+        stats = {
+            'total_features': total,
+            'kept_count': len(kept),
+            'removed_count': len(removed),
+            'review_count': len(review),
+            'kept_percentage': len(kept) / total * 100 if total > 0 else 0,
+            'removed_percentage': len(removed) / total * 100 if total > 0 else 0,
+            'review_percentage': len(review) / total * 100 if total > 0 else 0,
+            'average_score': float(selection_table['final_score'].mean()),
+            'median_score': float(selection_table['final_score'].median()),
+            'min_score': float(selection_table['final_score'].min()),
+            'max_score': float(selection_table['final_score'].max()),
+            'best_feature': selection_table.iloc[0]['feature'] if not selection_table.empty else None,
+            'worst_feature': selection_table.iloc[-1]['feature'] if not selection_table.empty else None,
+            'best_score': float(selection_table.iloc[0]['final_score']) if not selection_table.empty else 0,
+            'worst_score': float(selection_table.iloc[-1]['final_score']) if not selection_table.empty else 0,
+            'feature_space_reduction': feature_space_reduction
+        }
+        
+        return stats
+
+    def compute(
+        self,
+        importance_scores: pd.Series,
+        stability_scores: pd.Series,
+        redundancy_scores: pd.Series,
+        interaction_scores: pd.Series
+    ) -> FeatureSelectionResult:
+        """
+        Main computation method.
+        """
+        print("\n  Computing Feature Selection...")
+        print(f"  Importance: {len(importance_scores)} features")
+        print(f"  Stability: {len(stability_scores)} features")
+        print(f"  Redundancy: {len(redundancy_scores)} features")
+        print(f"  Interaction: {len(interaction_scores)} features")
+        
+        # Compute selection scores
+        score_df = self.compute_selection_scores(
+            importance_scores,
+            stability_scores,
+            redundancy_scores,
+            interaction_scores
+        )
+        
+        # Make decisions
+        selection_table, kept, removed, review = self.make_decisions(score_df)
+        
+        # Compute statistics
+        stats = self.compute_statistics(selection_table, kept, removed, review)
+        
+        print(f"\n  Selection Results:")
+        print(f"    KEEP:   {len(kept)} features")
+        print(f"    REVIEW: {len(review)} features")
+        print(f"    REMOVE: {len(removed)} features")
+        print(f"\n  Feature space reduction: {stats['feature_space_reduction']:.1f}%")
+        
+        return FeatureSelectionResult(
+            selection_table=selection_table,
+            kept_features=kept,
+            removed_features=removed,
+            review_features=review,
+            selection_score=score_df,
+            summary_statistics=stats
+        )

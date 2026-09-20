@@ -1,0 +1,260 @@
+# atlas/modules/module117_feature_selection/module.py
+"""
+Module 117
+Feature Selection
+
+Decision module that combines:
+  - Feature Importance (Module 113)
+  - Feature Stability (Module 114)
+  - Feature Redundancy (Module 115)
+  - Feature Interaction (Module 116)
+
+Output: KEEP, REMOVE, or REVIEW for every feature.
+"""
+
+from typing import Optional, Dict, Any, List
+import pandas as pd
+from pathlib import Path
+
+from atlas.core.base_research_module import BaseResearchModule
+from atlas.framework.registry import AtlasRegistry
+
+from .engine import FeatureSelectionEngine
+from .statistics import FeatureSelectionStatisticsEngine
+from .validator import run_validation
+from .report import FeatureSelectionReport
+from .exporter import FeatureSelectionExporter
+
+
+class FeatureSelectionResearch(BaseResearchModule):
+    """Main research module for feature selection."""
+    
+    MODULE_OUTPUT = "module117"
+    METADATA = FeatureSelectionStatisticsEngine.METADATA
+    
+    def __init__(
+        self,
+        registry: Optional[AtlasRegistry] = None,
+        weights: Optional[Dict[str, float]] = None,
+        keep_threshold: float = 0.70,
+        review_threshold: float = 0.50
+    ):
+        """
+        Initialize the feature selection module.
+        
+        Args:
+            registry: Optional Atlas registry
+            weights: Dictionary of weights for each component
+            keep_threshold: Score above this threshold = KEEP
+            review_threshold: Score above this threshold = REVIEW
+        """
+        super().__init__(
+            module_name="Feature Selection",
+            module_version=self.METADATA["version"],
+        )
+        
+        self.registry = registry or AtlasRegistry()
+        self.engine = FeatureSelectionEngine(
+            weights=weights,
+            keep_threshold=keep_threshold,
+            review_threshold=review_threshold
+        )
+        self.stats_engine = FeatureSelectionStatisticsEngine()
+        self.result_data = None
+        self.statistics = None
+        self.top_report = None
+        self.bottom_report = None
+        self._output_dir = None
+
+    def _register_pipeline_steps(self):
+        """Register pipeline steps."""
+        self.pipeline_steps = [
+            ("feature_selection", self._compute_selection),
+            ("statistics", self._compute_statistics),
+            ("validate", self._validate),
+            ("export", self._export_results),
+        ]
+    
+    def _prepare_data(self) -> Dict[str, Any]:
+        """Prepare data from DataFrame."""
+        # Expecting pre-computed scores from other modules
+        required_cols = ['feature', 'importance', 'stability', 'redundancy', 'interaction']
+        missing = set(required_cols) - set(self.df.columns)
+        if missing:
+            raise ValueError(f"Missing required columns: {missing}")
+        
+        # Extract scores as Series
+        importance_scores = self.df.set_index('feature')['importance']
+        stability_scores = self.df.set_index('feature')['stability']
+        redundancy_scores = self.df.set_index('feature')['redundancy']
+        interaction_scores = self.df.set_index('feature')['interaction']
+        
+        return {
+            'importance': importance_scores,
+            'stability': stability_scores,
+            'redundancy': redundancy_scores,
+            'interaction': interaction_scores
+        }
+    
+    def _compute_selection(self) -> Dict[str, Any]:
+        """Step 1: Compute feature selection."""
+        self.logger.info("Step 1: Computing feature selection")
+        
+        prepared = self._prepare_data()
+        
+        self.result_data = self.engine.compute(
+            importance_scores=prepared['importance'],
+            stability_scores=prepared['stability'],
+            redundancy_scores=prepared['redundancy'],
+            interaction_scores=prepared['interaction']
+        )
+        
+        self.logger.metric(
+            "Kept",
+            f"{len(self.result_data.kept_features)} features"
+        )
+        self.logger.metric(
+            "Removed",
+            f"{len(self.result_data.removed_features)} features"
+        )
+        self.logger.metric(
+            "Review",
+            f"{len(self.result_data.review_features)} features"
+        )
+        self.logger.metric(
+            "Reduction",
+            f"{self.result_data.summary_statistics['feature_space_reduction']:.1f}%"
+        )
+        self.logger.success("Feature selection computed")
+        
+        # Generate reports
+        self.top_report = FeatureSelectionReport.generate_top_features(
+            self.result_data.selection_table,
+            top_n=10
+        )
+        
+        self.bottom_report = FeatureSelectionReport.generate_bottom_features(
+            self.result_data.selection_table,
+            bottom_n=10
+        )
+        
+        return {
+            "kept_count": len(self.result_data.kept_features),
+            "removed_count": len(self.result_data.removed_features),
+            "review_count": len(self.result_data.review_features),
+            "reduction": self.result_data.summary_statistics['feature_space_reduction']
+        }
+    
+    def _compute_statistics(self) -> Dict[str, Any]:
+        """Step 2: Compute statistics."""
+        self.logger.info("Step 2: Computing statistics")
+        self.statistics = self.stats_engine.analyze(self.result_data)
+        
+        self.logger.metric(
+            "Best Feature",
+            self.statistics.best_feature
+        )
+        self.logger.metric(
+            "Avg Score",
+            f"{self.statistics.average_score:.3f}"
+        )
+        self.logger.success("Statistics computed")
+        
+        return self.stats_engine.summary_dict(self.statistics)
+    
+    def _validate(self) -> Dict[str, Any]:
+        """Step 3: Validation."""
+        self.logger.info("Step 3: Validation")
+        passed = run_validation(self.result_data, self.statistics)
+        self.logger.success("Validation complete")
+        return {"software_validation_passed": passed}
+    
+    def _export_results(self) -> Dict[str, Any]:
+        """Step 4: Export."""
+        self.logger.info("Step 4: Export")
+        
+        # Register DataFrames as artifacts
+        self.result.artifacts["selection_table"] = self.result_data.selection_table
+        self.result.artifacts["selection_score"] = self.result_data.selection_score
+        
+        # Store feature lists as DataFrames
+        kept_df = pd.DataFrame({'feature': self.result_data.kept_features})
+        removed_df = pd.DataFrame({'feature': self.result_data.removed_features})
+        review_df = pd.DataFrame({'feature': self.result_data.review_features})
+        
+        self.result.artifacts["kept_features"] = kept_df
+        self.result.artifacts["removed_features"] = removed_df
+        self.result.artifacts["review_features"] = review_df
+        
+        # Store summary
+        summary_df = pd.DataFrame([self.result_data.summary_statistics])
+        self.result.artifacts["selection_summary"] = summary_df
+        
+        # Generate and register reports
+        main_report = FeatureSelectionReport.generate(
+            self.statistics,
+            metadata=self.METADATA,
+            dataset_name=self.result.dataset_identifier,
+        )
+        self.result.artifacts["feature_selection_report"] = main_report
+        self.result.artifacts["top_report"] = self.top_report
+        self.result.artifacts["bottom_report"] = self.bottom_report
+        
+        # Export to files
+        if self._output_dir is not None:
+            export_dir = self._output_dir / "exports"
+            export_dir.mkdir(parents=True, exist_ok=True)
+            
+            FeatureSelectionExporter.export_selection_table(
+                self.result_data.selection_table,
+                export_dir / "selection_table.csv"
+            )
+            
+            FeatureSelectionExporter.export_kept_features(
+                self.result_data.kept_features,
+                export_dir / "kept_features.csv"
+            )
+            
+            FeatureSelectionExporter.export_removed_features(
+                self.result_data.removed_features,
+                export_dir / "removed_features.csv"
+            )
+            
+            FeatureSelectionExporter.export_review_features(
+                self.result_data.review_features,
+                export_dir / "review_features.csv"
+            )
+            
+            FeatureSelectionExporter.export_summary(
+                self.result_data.summary_statistics,
+                export_dir / "selection_summary.csv"
+            )
+        
+        self.logger.metric("Artifacts", str(len(self.result.artifacts)))
+        self.logger.success("Export complete")
+        
+        return {
+            "export_status": "complete",
+            "artifact_count": len(self.result.artifacts),
+            "kept_count": len(self.result_data.kept_features),
+            "removed_count": len(self.result_data.removed_features),
+            "review_count": len(self.result_data.review_features)
+        }
+    
+    def compute(self) -> Dict[str, Any]:
+        """Run the full computation pipeline."""
+        self.logger.section("Feature Selection Pipeline")
+        results = self.execute_pipeline()
+        self.result.status = "completed"
+        self.logger.success("Module 117 complete")
+        return results
+    
+    def run(self, filepath: str, output_dir=None):
+        """Run module on file."""
+        self._output_dir = Path(output_dir) if output_dir else None
+        return super().run(filepath, output_dir)
+    
+    def run_dataframe(self, df, dataset_id="in_memory", output_dir=None):
+        """Run module on DataFrame."""
+        self._output_dir = Path(output_dir) if output_dir else None
+        return super().run_dataframe(df, dataset_id, output_dir)

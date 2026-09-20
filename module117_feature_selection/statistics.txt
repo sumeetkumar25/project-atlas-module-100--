@@ -1,0 +1,69 @@
+# atlas/modules/module117_feature_selection/statistics.py
+"""
+Module 117 - Feature Selection Statistics
+"""
+
+from dataclasses import dataclass, asdict
+import pandas as pd
+from .engine import FeatureSelectionResult
+
+
+@dataclass
+class FeatureSelectionStatistics:
+    """High-level statistics from feature selection."""
+    total_features: int
+    kept_count: int
+    removed_count: int
+    review_count: int
+    kept_percentage: float
+    removed_percentage: float
+    review_percentage: float
+    average_score: float
+    median_score: float
+    min_score: float
+    max_score: float
+    best_feature: str
+    worst_feature: str
+    best_score: float
+    worst_score: float
+    feature_space_reduction: float
+
+
+class FeatureSelectionStatisticsEngine:
+    """Engine for generating high-level statistics."""
+    
+    METADATA = {
+        "module": 117,
+        "name": "Feature Selection",
+        "version": "1.0.0",
+        "description": "Decision module for selecting features"
+    }
+    
+    def analyze(self, result: FeatureSelectionResult) -> FeatureSelectionStatistics:
+        """Analyze results and generate high-level statistics."""
+        return FeatureSelectionStatistics(
+            total_features=result.summary_statistics['total_features'],
+            kept_count=result.summary_statistics['kept_count'],
+            removed_count=result.summary_statistics['removed_count'],
+            review_count=result.summary_statistics['review_count'],
+            kept_percentage=result.summary_statistics['kept_percentage'],
+            removed_percentage=result.summary_statistics['removed_percentage'],
+            review_percentage=result.summary_statistics['review_percentage'],
+            average_score=result.summary_statistics['average_score'],
+            median_score=result.summary_statistics['median_score'],
+            min_score=result.summary_statistics['min_score'],
+            max_score=result.summary_statistics['max_score'],
+            best_feature=result.summary_statistics['best_feature'],
+            worst_feature=result.summary_statistics['worst_feature'],
+            best_score=result.summary_statistics['best_score'],
+            worst_score=result.summary_statistics['worst_score'],
+            feature_space_reduction=result.summary_statistics['feature_space_reduction']
+        )
+    
+    def summary_dataframe(self, stats: FeatureSelectionStatistics) -> pd.DataFrame:
+        """Convert statistics to DataFrame."""
+        return pd.DataFrame([asdict(stats)])
+    
+    def summary_dict(self, stats: FeatureSelectionStatistics) -> dict:
+        """Convert statistics to dictionary."""
+        return asdict(stats)
