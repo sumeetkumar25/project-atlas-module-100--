@@ -1,0 +1,63 @@
+# atlas/modules/module118_feature_transformation/statistics.py
+"""
+Module 118 - Feature Transformation Statistics
+"""
+
+from dataclasses import dataclass, asdict
+import pandas as pd
+from .engine import FeatureTransformationResult
+
+
+@dataclass
+class FeatureTransformationStatistics:
+    """High-level statistics from feature transformation."""
+    total_features: int
+    transformed_features: int
+    unchanged_features: int
+    average_skew_before: float
+    average_skew_after: float
+    average_kurtosis_before: float
+    average_kurtosis_after: float
+    average_std_before: float
+    average_std_after: float
+    best_transformation: str
+    best_transformation_feature: str
+    transform_counts: dict
+    total_rows: int
+
+
+class FeatureTransformationStatisticsEngine:
+    """Engine for generating high-level statistics."""
+    
+    METADATA = {
+        "module": 118,
+        "name": "Feature Transformation",
+        "version": "1.0.0",
+        "description": "Converts selected features into standardized, model-ready variables"
+    }
+    
+    def analyze(self, result: FeatureTransformationResult) -> FeatureTransformationStatistics:
+        """Analyze results and generate high-level statistics."""
+        return FeatureTransformationStatistics(
+            total_features=result.statistics['total_features'],
+            transformed_features=result.statistics['transformed_features'],
+            unchanged_features=result.statistics['unchanged_features'],
+            average_skew_before=result.statistics['average_skew_before'],
+            average_skew_after=result.statistics['average_skew_after'],
+            average_kurtosis_before=result.statistics['average_kurtosis_before'],
+            average_kurtosis_after=result.statistics['average_kurtosis_after'],
+            average_std_before=result.statistics['average_std_before'],
+            average_std_after=result.statistics['average_std_after'],
+            best_transformation=result.statistics['best_transformation'],
+            best_transformation_feature=result.statistics['best_transformation_feature'],
+            transform_counts=result.statistics['transform_counts'],
+            total_rows=result.statistics['total_rows']
+        )
+    
+    def summary_dataframe(self, stats: FeatureTransformationStatistics) -> pd.DataFrame:
+        """Convert statistics to DataFrame."""
+        return pd.DataFrame([asdict(stats)])
+    
+    def summary_dict(self, stats: FeatureTransformationStatistics) -> dict:
+        """Convert statistics to dictionary."""
+        return asdict(stats)

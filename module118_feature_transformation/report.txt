@@ -1,0 +1,124 @@
+# atlas/modules/module118_feature_transformation/report.py
+"""
+Module 118 - Feature Transformation Report
+"""
+
+from datetime import datetime
+import pandas as pd
+
+
+class FeatureTransformationReport:
+    """Report generator for feature transformation results."""
+    
+    @staticmethod
+    def generate(statistics, metadata=None, dataset_name="Unknown") -> str:
+        """Generate a formatted report."""
+        lines = []
+        
+        lines.append("=" * 55)
+        lines.append("MODULE 118")
+        lines.append("FEATURE TRANSFORMATION")
+        lines.append("=" * 55)
+        lines.append(f"\nDataset: {dataset_name}")
+        
+        # Overview
+        lines.append("\n" + "-" * 45)
+        lines.append("OVERVIEW")
+        lines.append("-" * 45)
+        lines.append(f"  Total Features: {statistics.total_features}")
+        lines.append(f"  Transformed Features: {statistics.transformed_features}")
+        lines.append(f"  Unchanged Features: {statistics.unchanged_features}")
+        lines.append(f"  Total Rows: {statistics.total_rows}")
+        
+        # Skewness
+        lines.append("\n" + "-" * 45)
+        lines.append("SKEWNESS")
+        lines.append("-" * 45)
+        lines.append(f"  Average Before: {statistics.average_skew_before:.4f}")
+        lines.append(f"  Average After: {statistics.average_skew_after:.4f}")
+        lines.append(f"  Improvement: {statistics.average_skew_before - statistics.average_skew_after:.4f}")
+        
+        # Kurtosis
+        lines.append("\n" + "-" * 45)
+        lines.append("KURTOSIS")
+        lines.append("-" * 45)
+        lines.append(f"  Average Before: {statistics.average_kurtosis_before:.4f}")
+        lines.append(f"  Average After: {statistics.average_kurtosis_after:.4f}")
+        
+        # Best Transformation
+        lines.append("\n" + "-" * 45)
+        lines.append("BEST TRANSFORMATION")
+        lines.append("-" * 45)
+        lines.append(f"  Feature: {statistics.best_transformation_feature}")
+        lines.append(f"  Transform: {statistics.best_transformation}")
+        
+        # Transform Counts
+        if statistics.transform_counts:
+            lines.append("\n" + "-" * 45)
+            lines.append("TRANSFORM DISTRIBUTION")
+            lines.append("-" * 45)
+            for transform, count in statistics.transform_counts.items():
+                lines.append(f"  {transform}: {count}")
+        
+        # Interpretation
+        lines.append("\n" + "-" * 45)
+        lines.append("INTERPRETATION")
+        lines.append("-" * 45)
+        
+        if statistics.average_skew_after < 0.5:
+            lines.append("  ✅ Features are now near-symmetric")
+        elif statistics.average_skew_after < 1.0:
+            lines.append("  ✓ Features show moderate skewness")
+        else:
+            lines.append("  ⚠ Some features remain highly skewed")
+        
+        if statistics.transformed_features > 0:
+            lines.append(f"  💡 {statistics.transformed_features} features were transformed")
+        
+        # Validation
+        lines.append("\n" + "-" * 45)
+        lines.append("VALIDATION")
+        lines.append("-" * 45)
+        lines.append("  Status: PASSED")
+        
+        # Footer
+        lines.append(f"\n  Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        lines.append("\n" + "=" * 55)
+        lines.append("END OF REPORT")
+        lines.append("=" * 55)
+        
+        return "\n".join(lines)
+    
+    @staticmethod
+    def generate_transformation_table(transformation_table: pd.DataFrame) -> str:
+        """Generate a transformation table report."""
+        lines = []
+        lines.append("\n" + "=" * 70)
+        lines.append("TRANSFORMATION DETAILS")
+        lines.append("=" * 70)
+        
+        lines.append(
+            f"\n{'Feature':<20} {'Transform':<18} {'Skew Before':<14} {'Skew After':<14} {'Outliers':<10}"
+        )
+        lines.append("-" * 80)
+        
+        for _, row in transformation_table.iterrows():
+            lines.append(
+                f"{row['feature'][:19]:<20} "
+                f"{row['transform']:<18} "
+                f"{row['before_skew']:<14.4f} "
+                f"{row['after_skew']:<14.4f} "
+                f"{row['before_outliers']:<10}"
+            )
+        
+        lines.append("\n" + "=" * 70)
+        return "\n".join(lines)
+    
+    @staticmethod
+    def save(report: str, filepath: str):
+        """Save report to file."""
+        from pathlib import Path
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(report)

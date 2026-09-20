@@ -1,0 +1,9 @@
+# atlas/modules/module118_feature_transformation/__init__.py
+"""
+Module 118
+Feature Transformation
+"""
+
+from .module import FeatureTransformationResearch
+
+__all__ = ["FeatureTransformationResearch"]

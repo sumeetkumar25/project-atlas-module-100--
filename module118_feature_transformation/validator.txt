@@ -1,0 +1,106 @@
+# atlas/modules/module118_feature_transformation/validator.py
+"""
+Module 118 - Feature Transformation Validator
+"""
+
+import numpy as np
+import pandas as pd
+from .engine import FeatureTransformationResult
+from .statistics import FeatureTransformationStatistics
+
+
+class FeatureTransformationValidator:
+    """Validator for feature transformation results."""
+    
+    def validate(
+        self,
+        result: FeatureTransformationResult,
+        statistics: FeatureTransformationStatistics
+    ) -> bool:
+        """Validate results and statistics."""
+        issues = []
+        warnings = []
+        
+        # Check transformed dataframe
+        if result.transformed_dataframe.empty:
+            issues.append("Transformed dataframe is empty")
+        else:
+            # Check no NaN introduced (except where original had NaN)
+            for col in result.transformed_dataframe.columns:
+                if col.endswith('_transformed'):
+                    original_col = col.replace('_transformed', '')
+                    if original_col in result.transformed_dataframe.columns:
+                        orig_nan = result.transformed_dataframe[original_col].isna()
+                        trans_nan = result.transformed_dataframe[col].isna()
+                        if not orig_nan.equals(trans_nan):
+                            warnings.append(f"NaN mismatch in {col}")
+        
+        # Check transformation table
+        if result.transformation_table.empty:
+            issues.append("Transformation table is empty")
+        else:
+            required_cols = ['feature', 'transform', 'before_skew', 'after_skew']
+            missing = set(required_cols) - set(result.transformation_table.columns)
+            if missing:
+                issues.append(f"Missing columns in transformation table: {missing}")
+        
+        # Check statistics
+        if statistics.total_features < 1:
+            issues.append("Total features must be > 0")
+        
+        if statistics.transformed_features < 0:
+            issues.append("Transformed features cannot be negative")
+        
+        # Check best transformation exists
+        if statistics.best_transformation == "None" and statistics.transformed_features > 0:
+            warnings.append("No features were transformed")
+        
+        # Check transform counts match transformed features
+        if statistics.transform_counts:
+            total_transformed = sum(statistics.transform_counts.values())
+            if total_transformed != statistics.transformed_features:
+                issues.append(
+                    f"Transform count mismatch: {total_transformed} vs {statistics.transformed_features}"
+                )
+        
+        # Check row count preserved
+        if result.transformed_dataframe.shape[0] != statistics.total_rows:
+            issues.append(
+                f"Row count mismatch: {result.transformed_dataframe.shape[0]} vs {statistics.total_rows}"
+            )
+        
+        # Warnings (non-fatal)
+        if statistics.average_skew_after > statistics.average_skew_before:
+            warnings.append("Average skew increased after transformation")
+        
+        if warnings:
+            print("\n  WARNINGS:")
+            for warning in warnings:
+                print(f"    ⚠ {warning}")
+        
+        if issues:
+            raise ValueError(
+                f"Feature Transformation validation failed with {len(issues)} issue(s):\n" +
+                "\n".join(f"  - {issue}" for issue in issues)
+            )
+        
+        return True
+
+
+def run_validation(result, statistics):
+    """Run validation with user-friendly output."""
+    validator = FeatureTransformationValidator()
+    
+    print("\n" + "=" * 60)
+    print("FEATURE TRANSFORMATION VALIDATION")
+    print("=" * 60)
+    
+    try:
+        validator.validate(result, statistics)
+        print("\n  ✓ All validation checks passed")
+        print("=" * 60)
+        return True
+    except ValueError as e:
+        print(e)
+        print("=" * 60)
+        return False

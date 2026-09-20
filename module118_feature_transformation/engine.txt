@@ -1,0 +1,527 @@
+# atlas/modules/module118_feature_transformation/engine.py
+"""
+Module 118 - Feature Transformation Engine
+
+Converts KEEP features from Module 117 into standardized, model-ready variables.
+
+Transformations:
+  - Log Transform: For highly skewed features
+  - Z-Score: For normally distributed features
+  - Robust Scaler: For features with outliers
+  - Min-Max Scaler: For bounded features
+  - None: For already standardized features
+"""
+
+import numpy as np
+import pandas as pd
+from dataclasses import dataclass
+from typing import Optional, Dict, Any, List, Tuple
+from abc import ABC, abstractmethod
+from scipy import stats
+import warnings
+warnings.filterwarnings('ignore')
+
+
+@dataclass
+class FeatureTransformationResult:
+    """Results from feature transformation."""
+    transformed_dataframe: pd.DataFrame
+    transformation_table: pd.DataFrame
+    statistics: Dict[str, Any]
+    summary: Dict[str, Any]
+
+
+class TransformationStrategy(ABC):
+    """Base class for transformation strategies."""
+    
+    @abstractmethod
+    def fit(self, series: pd.Series) -> 'TransformationStrategy':
+        """Fit the transformation to the series."""
+        pass
+    
+    @abstractmethod
+    def transform(self, series: pd.Series) -> pd.Series:
+        """Apply the transformation to the series."""
+        pass
+    
+    @abstractmethod
+    def inverse_transform(self, series: pd.Series) -> pd.Series:
+        """Apply inverse transformation."""
+        pass
+    
+    @abstractmethod
+    def get_name(self) -> str:
+        """Get the transformation name."""
+        pass
+    
+    @abstractmethod
+    def get_params(self) -> Dict[str, Any]:
+        """Get transformation parameters."""
+        pass
+
+
+class ZScoreStrategy(TransformationStrategy):
+    """Z-score standardization (mean=0, std=1)."""
+    
+    def __init__(self):
+        self.mean = None
+        self.std = None
+    
+    def fit(self, series: pd.Series) -> 'ZScoreStrategy':
+        self.mean = series.mean()
+        self.std = series.std()
+        if self.std == 0:
+            self.std = 1e-12
+        return self
+    
+    def transform(self, series: pd.Series) -> pd.Series:
+        return (series - self.mean) / self.std
+    
+    def inverse_transform(self, series: pd.Series) -> pd.Series:
+        return series * self.std + self.mean
+    
+    def get_name(self) -> str:
+        return "Z-Score"
+    
+    def get_params(self) -> Dict[str, Any]:
+        return {"mean": self.mean, "std": self.std}
+
+
+class RobustStrategy(TransformationStrategy):
+    """Robust scaling (median=0, IQR=1)."""
+    
+    def __init__(self):
+        self.median = None
+        self.iqr = None
+    
+    def fit(self, series: pd.Series) -> 'RobustStrategy':
+        self.median = series.median()
+        q75 = series.quantile(0.75)
+        q25 = series.quantile(0.25)
+        self.iqr = q75 - q25
+        if self.iqr == 0:
+            self.iqr = 1e-12
+        return self
+    
+    def transform(self, series: pd.Series) -> pd.Series:
+        return (series - self.median) / self.iqr
+    
+    def inverse_transform(self, series: pd.Series) -> pd.Series:
+        return series * self.iqr + self.median
+    
+    def get_name(self) -> str:
+        return "Robust Scaler"
+    
+    def get_params(self) -> Dict[str, Any]:
+        return {"median": self.median, "iqr": self.iqr}
+
+
+class LogStrategy(TransformationStrategy):
+    """Log transformation for skewed features."""
+    
+    def __init__(self, shift: float = 0.0):
+        self.shift = shift
+    
+    def fit(self, series: pd.Series) -> 'LogStrategy':
+        min_val = series.min()
+        if min_val <= 0:
+            self.shift = abs(min_val) + 1e-12
+        else:
+            self.shift = 0.0
+        return self
+    
+    def transform(self, series: pd.Series) -> pd.Series:
+        return np.log(series + self.shift)
+    
+    def inverse_transform(self, series: pd.Series) -> pd.Series:
+        return np.exp(series) - self.shift
+    
+    def get_name(self) -> str:
+        return "Log Transform"
+    
+    def get_params(self) -> Dict[str, Any]:
+        return {"shift": self.shift}
+
+
+class MinMaxStrategy(TransformationStrategy):
+    """Min-Max scaling (0 to 1)."""
+    
+    def __init__(self):
+        self.min = None
+        self.max = None
+    
+    def fit(self, series: pd.Series) -> 'MinMaxStrategy':
+        self.min = series.min()
+        self.max = series.max()
+        if self.max == self.min:
+            self.max = self.min + 1e-12
+        return self
+    
+    def transform(self, series: pd.Series) -> pd.Series:
+        return (series - self.min) / (self.max - self.min)
+    
+    def inverse_transform(self, series: pd.Series) -> pd.Series:
+        return series * (self.max - self.min) + self.min
+    
+    def get_name(self) -> str:
+        return "Min-Max Scaler"
+    
+    def get_params(self) -> Dict[str, Any]:
+        return {"min": self.min, "max": self.max}
+
+
+class NoneStrategy(TransformationStrategy):
+    """No transformation."""
+    
+    def __init__(self):
+        pass
+    
+    def fit(self, series: pd.Series) -> 'NoneStrategy':
+        return self
+    
+    def transform(self, series: pd.Series) -> pd.Series:
+        return series.copy()
+    
+    def inverse_transform(self, series: pd.Series) -> pd.Series:
+        return series.copy()
+    
+    def get_name(self) -> str:
+        return "None"
+    
+    def get_params(self) -> Dict[str, Any]:
+        return {}
+
+
+class FeatureTransformationEngine:
+    """Core engine for feature transformation."""
+    
+    # Columns to ignore (not features)
+    IGNORE_COLS = {
+        "timestamp", "date", "time", "index",
+        "open", "high", "low", "close", "volume",
+        "future_breakout"
+    }
+    
+    # Skew threshold for log transform
+    SKEW_THRESHOLD = 0.5
+    # Outlier threshold (IQR multiplier)
+    OUTLIER_THRESHOLD = 1.5
+    
+    def __init__(
+        self,
+        selected_features: Optional[List[str]] = None,
+        skew_threshold: float = 0.5,
+        outlier_threshold: float = 1.5
+    ):
+        """
+        Initialize the feature transformation engine.
+        
+        Args:
+            selected_features: List of features to transform (from Module 117 KEEP)
+            skew_threshold: Threshold for recommending log transform
+            outlier_threshold: IQR multiplier for outlier detection
+        """
+        self.selected_features = selected_features or []
+        self.skew_threshold = skew_threshold
+        self.outlier_threshold = outlier_threshold
+        self.transformers = {}
+
+    def get_feature_columns(self, df: pd.DataFrame) -> List[str]:
+        """Identify feature columns (exclude metadata and target)."""
+        features = [
+            c for c in df.columns
+            if c not in self.IGNORE_COLS
+            and pd.api.types.is_numeric_dtype(df[c])
+            and df[c].nunique() > 1
+        ]
+        return features
+
+    def analyze_distribution(self, series: pd.Series) -> Dict[str, Any]:
+        """
+        Analyze distribution of a series.
+        
+        Returns:
+            Dictionary with skewness, kurtosis, outliers, etc.
+        """
+        clean_series = series.dropna()
+        
+        if len(clean_series) == 0:
+            return {
+                'skewness': 0.0,
+                'kurtosis': 0.0,
+                'outlier_count': 0,
+                'outlier_percentage': 0.0,
+                'min': np.nan,
+                'max': np.nan,
+                'mean': np.nan,
+                'std': np.nan,
+                'median': np.nan,
+                'q25': np.nan,
+                'q75': np.nan,
+                'iqr': np.nan,
+                'n_unique': 0,
+                'n_total': len(series),
+                'n_non_null': 0
+            }
+        
+        skewness = stats.skew(clean_series)
+        kurtosis = stats.kurtosis(clean_series)
+        
+        q75 = clean_series.quantile(0.75)
+        q25 = clean_series.quantile(0.25)
+        iqr = q75 - q25
+        
+        lower_bound = q25 - self.outlier_threshold * iqr
+        upper_bound = q75 + self.outlier_threshold * iqr
+        
+        outliers = clean_series[(clean_series < lower_bound) | (clean_series > upper_bound)]
+        
+        return {
+            'skewness': float(skewness),
+            'kurtosis': float(kurtosis),
+            'outlier_count': len(outliers),
+            'outlier_percentage': len(outliers) / len(clean_series) * 100,
+            'min': float(clean_series.min()),
+            'max': float(clean_series.max()),
+            'mean': float(clean_series.mean()),
+            'std': float(clean_series.std()),
+            'median': float(clean_series.median()),
+            'q25': float(q25),
+            'q75': float(q75),
+            'iqr': float(iqr),
+            'n_unique': clean_series.nunique(),
+            'n_total': len(series),
+            'n_non_null': len(clean_series)
+        }
+
+    def recommend_transform(self, stats: Dict[str, Any]) -> Tuple[str, TransformationStrategy]:
+        """
+        Recommend transformation based on distribution analysis.
+        
+        Returns:
+            (transform_name, transformation_strategy)
+        """
+        skewness = abs(stats['skewness'])
+        outlier_pct = stats['outlier_percentage']
+        n_unique = stats['n_unique']
+        
+        # If feature has very few unique values, use None
+        if n_unique < 10:
+            return "None", NoneStrategy()
+        
+        # If highly skewed, use log transform
+        if skewness > self.skew_threshold:
+            return "Log Transform", LogStrategy()
+        
+        # If many outliers, use robust scaler
+        if outlier_pct > 5:
+            return "Robust Scaler", RobustStrategy()
+        
+        # If bounded (min=0, max=1 or similar), use min-max
+        if stats['min'] >= 0 and stats['max'] <= 1:
+            return "Min-Max Scaler", MinMaxStrategy()
+        
+        # If already normal-looking, use z-score
+        if skewness < 0.2 and stats['std'] > 0:
+            return "Z-Score", ZScoreStrategy()
+        
+        # Default: z-score
+        return "Z-Score", ZScoreStrategy()
+
+    def apply_transform(
+        self,
+        series: pd.Series,
+        strategy: TransformationStrategy
+    ) -> Tuple[pd.Series, TransformationStrategy]:
+        """
+        Apply transformation to a series.
+        
+        Returns:
+            (transformed_series, fitted_strategy)
+        """
+        fitted_strategy = strategy.fit(series)
+        transformed = fitted_strategy.transform(series)
+        return transformed, fitted_strategy
+
+    def compute_transformation_table(
+        self,
+        df: pd.DataFrame,
+        features: List[str]
+    ) -> pd.DataFrame:
+        """
+        Compute transformation table for selected features.
+        """
+        rows = []
+        
+        for feature in features:
+            if feature not in df.columns:
+                continue
+            
+            series = df[feature]
+            
+            # Analyze before
+            before_stats = self.analyze_distribution(series)
+            
+            # Recommend transform
+            transform_name, strategy = self.recommend_transform(before_stats)
+            
+            # Apply transform
+            transformed_series, fitted_strategy = self.apply_transform(series, strategy)
+            
+            # Analyze after
+            after_stats = self.analyze_distribution(transformed_series)
+            
+            # Store transformer
+            self.transformers[feature] = fitted_strategy
+            
+            rows.append({
+                'feature': feature,
+                'transform': transform_name,
+                'before_skew': before_stats['skewness'],
+                'after_skew': after_stats['skewness'],
+                'before_kurtosis': before_stats['kurtosis'],
+                'after_kurtosis': after_stats['kurtosis'],
+                'before_outliers': before_stats['outlier_count'],
+                'after_outliers': after_stats['outlier_count'],
+                'before_mean': before_stats['mean'],
+                'after_mean': after_stats['mean'],
+                'before_std': before_stats['std'],
+                'after_std': after_stats['std'],
+                'before_min': before_stats['min'],
+                'after_min': after_stats['min'],
+                'before_max': before_stats['max'],
+                'after_max': after_stats['max'],
+                'params': str(fitted_strategy.get_params())
+            })
+        
+        return pd.DataFrame(rows)
+
+    def build_transformed_dataframe(
+        self,
+        df: pd.DataFrame,
+        features: List[str]
+    ) -> pd.DataFrame:
+        """
+        Build transformed dataframe.
+        
+        Keeps all original columns plus transformed versions.
+        """
+        transformed_df = df.copy()
+        
+        for feature in features:
+            if feature in self.transformers:
+                transformed_df[f'{feature}_transformed'] = self.transformers[feature].transform(df[feature])
+        
+        return transformed_df
+
+    def compute_statistics(
+        self,
+        transformation_table: pd.DataFrame,
+        transformed_df: pd.DataFrame,
+        original_df: pd.DataFrame,
+        features: List[str]
+    ) -> Dict[str, Any]:
+        """
+        Compute summary statistics.
+        """
+        transformed_features = len(transformation_table)
+        unchanged_features = len(features) - transformed_features
+        
+        # Compute averages
+        avg_skew_before = transformation_table['before_skew'].mean() if not transformation_table.empty else 0
+        avg_skew_after = transformation_table['after_skew'].mean() if not transformation_table.empty else 0
+        avg_kurtosis_before = transformation_table['before_kurtosis'].mean() if not transformation_table.empty else 0
+        avg_kurtosis_after = transformation_table['after_kurtosis'].mean() if not transformation_table.empty else 0
+        avg_std_before = transformation_table['before_std'].mean() if not transformation_table.empty else 0
+        avg_std_after = transformation_table['after_std'].mean() if not transformation_table.empty else 0
+        
+        # Find best transformation
+        if not transformation_table.empty:
+            best_idx = transformation_table['after_skew'].abs().idxmin()
+            best_transform = transformation_table.iloc[best_idx]['transform']
+            best_feature = transformation_table.iloc[best_idx]['feature']
+        else:
+            best_transform = "None"
+            best_feature = "None"
+        
+        # Count transformations by type
+        transform_counts = transformation_table['transform'].value_counts().to_dict()
+        
+        stats = {
+            'total_features': len(features),
+            'transformed_features': transformed_features,
+            'unchanged_features': unchanged_features,
+            'average_skew_before': float(avg_skew_before),
+            'average_skew_after': float(avg_skew_after),
+            'average_kurtosis_before': float(avg_kurtosis_before),
+            'average_kurtosis_after': float(avg_kurtosis_after),
+            'average_std_before': float(avg_std_before),
+            'average_std_after': float(avg_std_after),
+            'best_transformation': best_transform,
+            'best_transformation_feature': best_feature,
+            'transform_counts': transform_counts,
+            'total_rows': len(original_df),
+            'original_columns': len(original_df.columns),
+            'transformed_columns': len(transformed_df.columns)
+        }
+        
+        return stats
+
+    def compute(
+        self,
+        df: pd.DataFrame,
+        selected_features: Optional[List[str]] = None
+    ) -> FeatureTransformationResult:
+        """
+        Main computation method.
+        """
+        print("\n  Computing Feature Transformation...")
+        
+        # Use provided selected_features or auto-detect
+        if selected_features is not None:
+            features = selected_features
+        elif self.selected_features:
+            features = self.selected_features
+        else:
+            features = self.get_feature_columns(df)
+        
+        print(f"  Processing {len(features)} features...")
+        
+        # Compute transformation table
+        transformation_table = self.compute_transformation_table(df, features)
+        
+        # Build transformed dataframe
+        transformed_df = self.build_transformed_dataframe(df, features)
+        
+        # Compute statistics
+        statistics = self.compute_statistics(
+            transformation_table,
+            transformed_df,
+            df,
+            features
+        )
+        
+        # Summary
+        summary = {
+            'total_features': len(features),
+            'transformed_features': len(transformation_table),
+            'unchanged_features': len(features) - len(transformation_table),
+            'total_rows': len(df),
+            'transform_counts': statistics['transform_counts']
+        }
+        
+        print(f"\n  Transformation Results:")
+        print(f"    Transformed: {len(transformation_table)} features")
+        print(f"    Unchanged: {len(features) - len(transformation_table)} features")
+        
+        if len(transformation_table) > 0:
+            best = statistics['best_transformation']
+            best_feature = statistics['best_transformation_feature']
+            print(f"    Best Transform: {best} on {best_feature}")
+        
+        return FeatureTransformationResult(
+            transformed_dataframe=transformed_df,
+            transformation_table=transformation_table,
+            statistics=statistics,
+            summary=summary
+        )

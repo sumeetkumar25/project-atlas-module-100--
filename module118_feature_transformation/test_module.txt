@@ -1,0 +1,454 @@
+"""
+Module 118 - Integration Test
+
+Tests feature transformation engine, statistics, validator, report, and pipeline.
+"""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+
+import numpy as np
+import pandas as pd
+
+from atlas.modules.module118_feature_transformation.engine import (
+    FeatureTransformationEngine,
+    ZScoreStrategy,
+    RobustStrategy,
+    LogStrategy,
+    MinMaxStrategy,
+    NoneStrategy
+)
+from atlas.modules.module118_feature_transformation.statistics import FeatureTransformationStatisticsEngine
+from atlas.modules.module118_feature_transformation.validator import run_validation
+from atlas.modules.module118_feature_transformation.module import FeatureTransformationResearch
+
+
+def create_test_data(n=500, seed=42):
+    """Create synthetic test data with various distributions."""
+    np.random.seed(seed)
+    
+    # Normal distribution
+    normal = np.random.randn(n) * 10 + 50
+    
+    # Skewed distribution
+    skewed = np.random.exponential(2, n) * 10 + 10
+    
+    # Uniform bounded distribution
+    bounded = np.random.uniform(0, 1, n)
+    
+    # Distribution with outliers
+    outliers = np.random.randn(n) * 5 + 50
+    outliers[:10] = 200  # Add outliers
+    
+    # Constant feature
+    constant = np.ones(n) * 5
+    
+    df = pd.DataFrame({
+        'timestamp': pd.date_range('2020-01-01', periods=n, freq='1h'),
+        'open': 100 + np.random.randn(n) * 10,
+        'high': 100 + np.random.randn(n) * 10 + np.abs(np.random.randn(n) * 2),
+        'low': 100 + np.random.randn(n) * 10 - np.abs(np.random.randn(n) * 2),
+        'close': 100 + np.random.randn(n) * 10,
+        'volume': np.random.randn(n) * 100 + 1000,
+        'normal_feature': normal,
+        'skewed_feature': skewed,
+        'bounded_feature': bounded,
+        'outlier_feature': outliers,
+        'constant_feature': constant,
+        'future_breakout': np.random.randint(0, 2, n)
+    })
+    
+    return df
+
+
+def test_engine_feature_detection():
+    """Test 1: Feature detection."""
+    print("\n" + "=" * 60)
+    print("TEST 1: Feature Detection")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeatureTransformationEngine()
+    
+    features = engine.get_feature_columns(df)
+    
+    # Should detect these features
+    assert 'normal_feature' in features
+    assert 'skewed_feature' in features
+    assert 'bounded_feature' in features
+    assert 'outlier_feature' in features
+    
+    # Constant feature should be excluded (nunique == 1)
+    assert 'constant_feature' not in features
+    
+    # OHLCV columns should be excluded
+    assert 'close' not in features
+    assert 'future_breakout' not in features
+    
+    # Should only have 4 features (excludes constant_feature)
+    assert len(features) == 4
+    
+    print(f"  Found {len(features)} features: {features}")
+    print("  ✓ Feature detection test passed")
+    return True
+
+
+def test_engine_analyze_distribution():
+    """Test 2: Distribution analysis."""
+    print("\n" + "=" * 60)
+    print("TEST 2: Distribution Analysis")
+    print("=" * 60)
+    
+    engine = FeatureTransformationEngine()
+    
+    # Normal distribution
+    normal = pd.Series(np.random.randn(1000) * 10 + 50)
+    stats_normal = engine.analyze_distribution(normal)
+    assert abs(stats_normal['skewness']) < 0.3
+    
+    # Skewed distribution
+    skewed = pd.Series(np.random.exponential(2, 1000) * 10 + 10)
+    stats_skewed = engine.analyze_distribution(skewed)
+    assert stats_skewed['skewness'] > 0.5
+    
+    print(f"  Normal skew: {stats_normal['skewness']:.4f}")
+    print(f"  Skewed skew: {stats_skewed['skewness']:.4f}")
+    print("  ✓ Distribution analysis test passed")
+    return True
+
+
+def test_engine_recommend_transform():
+    """Test 3: Transformation recommendation."""
+    print("\n" + "=" * 60)
+    print("TEST 3: Transformation Recommendation")
+    print("=" * 60)
+    
+    engine = FeatureTransformationEngine()
+    
+    # Normal distribution -> Z-Score
+    normal_stats = {'skewness': 0.05, 'outlier_percentage': 1.0, 'n_unique': 100, 'min': -10, 'max': 10, 'std': 1}
+    transform_name, strategy = engine.recommend_transform(normal_stats)
+    assert transform_name == "Z-Score"
+    
+    # Highly skewed -> Log Transform
+    skewed_stats = {'skewness': 2.0, 'outlier_percentage': 1.0, 'n_unique': 100, 'min': 0.1, 'max': 10, 'std': 1}
+    transform_name, strategy = engine.recommend_transform(skewed_stats)
+    assert transform_name == "Log Transform"
+    
+    # Many outliers -> Robust Scaler
+    outlier_stats = {'skewness': 0.1, 'outlier_percentage': 10.0, 'n_unique': 100, 'min': -10, 'max': 10, 'std': 1}
+    transform_name, strategy = engine.recommend_transform(outlier_stats)
+    assert transform_name == "Robust Scaler"
+    
+    # Bounded -> Min-Max
+    bounded_stats = {'skewness': 0.1, 'outlier_percentage': 1.0, 'n_unique': 100, 'min': 0, 'max': 1, 'std': 0.3}
+    transform_name, strategy = engine.recommend_transform(bounded_stats)
+    assert transform_name == "Min-Max Scaler"
+    
+    # Constant -> None
+    constant_stats = {'skewness': 0.0, 'outlier_percentage': 0.0, 'n_unique': 1, 'min': 5, 'max': 5, 'std': 0}
+    transform_name, strategy = engine.recommend_transform(constant_stats)
+    assert transform_name == "None"
+    
+    print("  ✓ Transformation recommendation test passed")
+    return True
+
+
+def test_engine_zscore_transform():
+    """Test 4: Z-score transformation."""
+    print("\n" + "=" * 60)
+    print("TEST 4: Z-Score Transformation")
+    print("=" * 60)
+    
+    series = pd.Series(np.random.randn(100) * 10 + 50)
+    strategy = ZScoreStrategy().fit(series)
+    transformed = strategy.transform(series)
+    
+    assert abs(transformed.mean()) < 1e-10
+    assert abs(transformed.std() - 1.0) < 0.1
+    
+    # Inverse transform
+    inverse = strategy.inverse_transform(transformed)
+    assert np.allclose(series.values, inverse.values, rtol=1e-10)
+    
+    print(f"  Mean: {transformed.mean():.6f}")
+    print(f"  Std: {transformed.std():.6f}")
+    print("  ✓ Z-score transform test passed")
+    return True
+
+
+def test_engine_robust_transform():
+    """Test 5: Robust scaling."""
+    print("\n" + "=" * 60)
+    print("TEST 5: Robust Scaling")
+    print("=" * 60)
+    
+    series = pd.Series(np.random.randn(100) * 10 + 50)
+    series.iloc[0] = 200  # Add outlier
+    strategy = RobustStrategy().fit(series)
+    transformed = strategy.transform(series)
+    
+    assert abs(transformed.median()) < 1e-10
+    assert abs(transformed.std() - 1.0) < 0.5
+    
+    # Inverse transform
+    inverse = strategy.inverse_transform(transformed)
+    assert np.allclose(series.values, inverse.values, rtol=1e-10)
+    
+    print("  ✓ Robust scaling test passed")
+    return True
+
+
+def test_engine_log_transform():
+    """Test 6: Log transformation."""
+    print("\n" + "=" * 60)
+    print("TEST 6: Log Transformation")
+    print("=" * 60)
+    
+    series = pd.Series(np.random.exponential(2, 100) * 10 + 10)
+    strategy = LogStrategy().fit(series)
+    transformed = strategy.transform(series)
+    
+    assert np.all(transformed > 0)
+    
+    # Inverse transform
+    inverse = strategy.inverse_transform(transformed)
+    assert np.allclose(series.values, inverse.values, rtol=1e-10)
+    
+    # Check skewness reduction
+    before_skew = series.skew()
+    after_skew = transformed.skew()
+    assert after_skew < before_skew
+    
+    print(f"  Before skew: {before_skew:.4f}")
+    print(f"  After skew: {after_skew:.4f}")
+    print("  ✓ Log transform test passed")
+    return True
+
+
+def test_engine_minmax_transform():
+    """Test 7: Min-Max scaling."""
+    print("\n" + "=" * 60)
+    print("TEST 7: Min-Max Scaling")
+    print("=" * 60)
+    
+    series = pd.Series(np.random.uniform(10, 100, 100))
+    strategy = MinMaxStrategy().fit(series)
+    transformed = strategy.transform(series)
+    
+    assert transformed.min() >= 0
+    assert transformed.max() <= 1
+    
+    # Inverse transform
+    inverse = strategy.inverse_transform(transformed)
+    assert np.allclose(series.values, inverse.values, rtol=1e-10)
+    
+    print(f"  Min: {transformed.min():.4f}")
+    print(f"  Max: {transformed.max():.4f}")
+    print("  ✓ Min-Max scaling test passed")
+    return True
+
+
+def test_engine_constant_feature():
+    """Test 8: Constant feature handling."""
+    print("\n" + "=" * 60)
+    print("TEST 8: Constant Feature Handling")
+    print("=" * 60)
+    
+    engine = FeatureTransformationEngine()
+    series = pd.Series([5] * 100)
+    stats = engine.analyze_distribution(series)
+    
+    assert stats['n_unique'] == 1
+    
+    # Should recommend None
+    transform_name, strategy = engine.recommend_transform(stats)
+    assert transform_name == "None"
+    
+    transformed = strategy.transform(series)
+    assert all(transformed == 5)
+    
+    print("  ✓ Constant feature test passed")
+    return True
+
+
+def test_engine_compute():
+    """Test 9: Full engine computation."""
+    print("\n" + "=" * 60)
+    print("TEST 9: Full Engine Computation")
+    print("=" * 60)
+    
+    df = create_test_data()
+    selected_features = ['normal_feature', 'skewed_feature', 'bounded_feature', 'outlier_feature']
+    engine = FeatureTransformationEngine(selected_features=selected_features)
+    
+    result = engine.compute(df)
+    
+    assert not result.transformed_dataframe.empty
+    assert not result.transformation_table.empty
+    assert result.statistics['total_features'] > 0
+    assert result.statistics['transformed_features'] > 0
+    
+    # Check transformed columns exist
+    for feature in selected_features:
+        assert f'{feature}_transformed' in result.transformed_dataframe.columns
+    
+    print(f"  Transformed features: {result.statistics['transformed_features']}")
+    print(f"  Best transform: {result.statistics['best_transformation']}")
+    print("  ✓ Full engine test passed")
+    return True
+
+
+def test_statistics():
+    """Test 10: Statistics engine."""
+    print("\n" + "=" * 60)
+    print("TEST 10: Statistics Engine")
+    print("=" * 60)
+    
+    df = create_test_data()
+    selected_features = ['normal_feature', 'skewed_feature', 'bounded_feature', 'outlier_feature']
+    engine = FeatureTransformationEngine(selected_features=selected_features)
+    stats_engine = FeatureTransformationStatisticsEngine()
+    
+    result = engine.compute(df)
+    stats = stats_engine.analyze(result)
+    
+    assert stats.total_features == result.statistics['total_features']
+    assert stats.transformed_features == result.statistics['transformed_features']
+    assert stats.best_transformation == result.statistics['best_transformation']
+    
+    print(f"  Total features: {stats.total_features}")
+    print(f"  Transformed: {stats.transformed_features}")
+    print("  ✓ Statistics test passed")
+    return True
+
+
+def test_validator():
+    """Test 11: Validator."""
+    print("\n" + "=" * 60)
+    print("TEST 11: Validator")
+    print("=" * 60)
+    
+    df = create_test_data()
+    selected_features = ['normal_feature', 'skewed_feature', 'bounded_feature', 'outlier_feature']
+    engine = FeatureTransformationEngine(selected_features=selected_features)
+    stats_engine = FeatureTransformationStatisticsEngine()
+    
+    result = engine.compute(df)
+    stats = stats_engine.analyze(result)
+    
+    passed = run_validation(result, stats)
+    assert passed
+    
+    print("  ✓ Validator test passed")
+    return True
+
+
+def test_pipeline():
+    """Test 12: Full pipeline."""
+    print("\n" + "=" * 60)
+    print("TEST 12: Full Pipeline")
+    print("=" * 60)
+    
+    df = create_test_data()
+    selected_features = ['normal_feature', 'skewed_feature', 'bounded_feature', 'outlier_feature']
+    
+    research = FeatureTransformationResearch(
+        selected_features=selected_features
+    )
+    
+    result = research.run_dataframe(df, dataset_id="pipeline_test")
+    
+    assert result.status == "completed"
+    assert "transformed_dataframe" in result.artifacts
+    assert "transformation_table" in result.artifacts
+    assert "feature_transformation_report" in result.artifacts
+    assert "transformation_report" in result.artifacts
+    assert result.statistics.get("software_validation_passed") == True
+    
+    print(f"  Transformed features: {result.statistics.get('transformed_features')}")
+    print(f"  Best transform: {result.statistics.get('best_transformation')}")
+    print("  ✓ Full pipeline test passed")
+    return True
+
+
+def test_transformation_reproducibility():
+    """Test 13: Transformation reproducibility."""
+    print("\n" + "=" * 60)
+    print("TEST 13: Transformation Reproducibility")
+    print("=" * 60)
+    
+    df = create_test_data()
+    selected_features = ['normal_feature', 'skewed_feature', 'bounded_feature', 'outlier_feature']
+    
+    # First run
+    engine1 = FeatureTransformationEngine(selected_features=selected_features)
+    result1 = engine1.compute(df)
+    
+    # Second run
+    engine2 = FeatureTransformationEngine(selected_features=selected_features)
+    result2 = engine2.compute(df)
+    
+    # Should produce identical results
+    pd.testing.assert_frame_equal(
+        result1.transformed_dataframe,
+        result2.transformed_dataframe,
+        check_dtype=False
+    )
+    pd.testing.assert_frame_equal(
+        result1.transformation_table,
+        result2.transformation_table,
+        check_dtype=False
+    )
+    
+    print("  ✓ Transformation reproducibility test passed")
+    return True
+
+
+def main():
+    """Run all tests."""
+    print("\n" + "=" * 70)
+    print("PROJECT ATLAS - MODULE 118 INTEGRATION TEST")
+    print("Feature Transformation")
+    print("=" * 70)
+    
+    results = {}
+    
+    results["feature_detection"] = test_engine_feature_detection()
+    results["distribution_analysis"] = test_engine_analyze_distribution()
+    results["recommend_transform"] = test_engine_recommend_transform()
+    results["zscore_transform"] = test_engine_zscore_transform()
+    results["robust_transform"] = test_engine_robust_transform()
+    results["log_transform"] = test_engine_log_transform()
+    results["minmax_transform"] = test_engine_minmax_transform()
+    results["constant_feature"] = test_engine_constant_feature()
+    results["full_engine"] = test_engine_compute()
+    results["statistics"] = test_statistics()
+    results["validator"] = test_validator()
+    results["pipeline"] = test_pipeline()
+    results["reproducibility"] = test_transformation_reproducibility()
+    
+    print("\n" + "=" * 70)
+    print("RESULTS")
+    print("=" * 70)
+    
+    for name, ok in results.items():
+        print(f"  {'✓' if ok else '✗'} {name}")
+    
+    passed = sum(results.values())
+    total = len(results)
+    
+    print(f"\n  {passed}/{total} tests passed")
+    
+    if passed == total:
+        print("\n✓ Module 118 VALIDATED")
+        return 0
+    else:
+        print("\n⚠ Some tests failed")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
