@@ -1,0 +1,114 @@
+# atlas/modules/module114_temporal_stability/validator.py
+"""
+Module 114 - Temporal Stability Validator
+"""
+
+import numpy as np
+import pandas as pd
+from .engine import TemporalStabilityResult
+from .statistics import TemporalStabilityStatistics
+
+
+class TemporalStabilityValidator:
+    """Validator for temporal stability results."""
+    
+    def validate(
+        self,
+        result: TemporalStabilityResult,
+        statistics: TemporalStabilityStatistics
+    ) -> bool:
+        """Validate results and statistics."""
+        issues = []
+        warnings = []
+        
+        # Check window scores
+        if result.window_scores.empty:
+            issues.append("Window scores DataFrame is empty")
+        else:
+            # Check required columns
+            required_cols = ['window', 'feature', 'score', 'samples']
+            missing = set(required_cols) - set(result.window_scores.columns)
+            if missing:
+                issues.append(f"Missing columns in window scores: {missing}")
+            
+            # Check scores are in [0, 1]
+            if 'score' in result.window_scores.columns:
+                if not np.all((0 <= result.window_scores['score']) & 
+                            (result.window_scores['score'] <= 1)):
+                    issues.append("Scores outside [0, 1] range")
+        
+        # Check temporal statistics
+        if result.temporal_statistics.empty:
+            issues.append("Temporal statistics DataFrame is empty")
+        else:
+            # Check temporal scores are in [0, 100]
+            if 'temporal_score' in result.temporal_statistics.columns:
+                if not np.all((0 <= result.temporal_statistics['temporal_score']) & 
+                            (result.temporal_statistics['temporal_score'] <= 100)):
+                    issues.append("Temporal scores outside [0, 100] range")
+        
+        # Check window summary
+        if result.window_summary.empty:
+            issues.append("Window summary DataFrame is empty")
+        else:
+            # Check number of windows
+            if len(result.window_summary) != statistics.windows:
+                # Allow if some windows had no data
+                if len(result.window_summary) < statistics.windows:
+                    warnings.append(f"Only {len(result.window_summary)}/{statistics.windows} windows had data")
+        
+        # Check temporal index
+        if not (0 <= result.temporal_index <= 100):
+            issues.append(f"Temporal index outside [0, 100]: {result.temporal_index}")
+        
+        # Check statistics match result
+        if statistics.total_features != result.temporal_summary['total_features']:
+            issues.append(
+                f"Total features mismatch: stats={statistics.total_features}, "
+                f"result={result.temporal_summary['total_features']}"
+            )
+        
+        if statistics.temporal_index != result.temporal_summary['temporal_index']:
+            issues.append(
+                f"Temporal index mismatch: stats={statistics.temporal_index}, "
+                f"result={result.temporal_summary['temporal_index']}"
+            )
+        
+        # Warnings (non-fatal)
+        if result.temporal_index < 50:
+            warnings.append(f"Low temporal index: {result.temporal_index:.2f}/100")
+        
+        if result.temporal_summary['average_drift'] < -0.01:
+            warnings.append(f"Negative average drift: {result.temporal_summary['average_drift']:.4f}")
+        
+        if warnings:
+            print("\n  WARNINGS:")
+            for warning in warnings:
+                print(f"    ⚠ {warning}")
+        
+        if issues:
+            raise ValueError(
+                f"Temporal Stability validation failed with {len(issues)} issue(s):\n" +
+                "\n".join(f"  - {issue}" for issue in issues)
+            )
+        
+        return True
+
+
+def run_validation(result, statistics):
+    """Run validation with user-friendly output."""
+    validator = TemporalStabilityValidator()
+    
+    print("\n" + "=" * 60)
+    print("TEMPORAL STABILITY VALIDATION")
+    print("=" * 60)
+    
+    try:
+        validator.validate(result, statistics)
+        print("\n  ✓ All validation checks passed")
+        print("=" * 60)
+        return True
+    except ValueError as e:
+        print(e)
+        print("=" * 60)
+        return False

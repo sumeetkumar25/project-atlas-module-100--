@@ -1,0 +1,227 @@
+# atlas/modules/module114_temporal_stability/module.py
+"""
+Module 114
+Temporal Stability
+
+Measures whether feature predictive power remains stable over time.
+
+Pipeline: create windows → compute window scores → temporal statistics →
+          temporal index → validation → report → export
+"""
+
+from typing import Optional, Dict, Any
+import pandas as pd
+from pathlib import Path
+
+from atlas.core.base_research_module import BaseResearchModule
+from atlas.framework.registry import AtlasRegistry
+
+from .engine import TemporalStabilityEngine
+from .statistics import TemporalStabilityStatisticsEngine
+from .validator import run_validation
+from .report import TemporalStabilityReport
+from .exporter import TemporalStabilityExporter
+
+
+class TemporalStabilityResearch(BaseResearchModule):
+    """Main research module for temporal stability analysis."""
+    
+    MODULE_OUTPUT = "module114"
+    METADATA = TemporalStabilityStatisticsEngine.METADATA
+    
+    def __init__(
+        self,
+        registry: Optional[AtlasRegistry] = None,
+        scoring_metric: str = "auc",
+        n_windows: int = 5,
+        min_samples: int = 200,
+        price_column: str = "close",
+        target_column: str = "future_breakout"
+    ):
+        """
+        Initialize the temporal stability module.
+        
+        Args:
+            registry: Optional Atlas registry
+            scoring_metric: Metric to use ('auc', 'correlation', 'mutual_information')
+            n_windows: Number of chronological windows
+            min_samples: Minimum samples per window
+            price_column: Column name for price data
+            target_column: Column name for target variable
+        """
+        super().__init__(
+            module_name="Temporal Stability",
+            module_version=self.METADATA["version"],
+        )
+        
+        self.registry = registry or AtlasRegistry()
+        self.engine = TemporalStabilityEngine(
+            scoring_metric=scoring_metric,
+            n_windows=n_windows,
+            min_samples=min_samples,
+            price_column=price_column,
+            target_column=target_column
+        )
+        self.stats_engine = TemporalStabilityStatisticsEngine()
+        self.result_data = None
+        self.statistics = None
+        self.window_report = None
+        self.feature_report = None
+        self._output_dir = None
+    
+    def _register_pipeline_steps(self):
+        """Register pipeline steps."""
+        self.pipeline_steps = [
+            ("temporal_stability", self._compute_stability),
+            ("statistics", self._compute_statistics),
+            ("validate", self._validate),
+            ("export", self._export_results),
+        ]
+    
+    def _prepare_data(self) -> Dict[str, Any]:
+        """Prepare data from DataFrame."""
+        return {"df": self.df}
+    
+    def _compute_stability(self) -> Dict[str, Any]:
+        """Step 1: Compute temporal stability."""
+        self.logger.info("Step 1: Computing temporal stability")
+        
+        prepared = self._prepare_data()
+        
+        self.result_data = self.engine.compute(
+            df=prepared["df"]
+        )
+        
+        self.logger.metric(
+            "Temporal Index",
+            f"{self.result_data.temporal_index:.2f}/100"
+        )
+        self.logger.metric(
+            "Total Features",
+            str(self.result_data.temporal_summary["total_features"])
+        )
+        self.logger.metric(
+            "Best Feature",
+            self.result_data.temporal_summary["best_feature"]
+        )
+        self.logger.metric(
+            "Scoring Metric",
+            self.result_data.temporal_summary["scoring_metric"]
+        )
+        self.logger.success("Temporal stability computed")
+        
+        # Generate reports
+        self.window_report = TemporalStabilityReport.generate_window_report(
+            self.result_data.window_summary
+        )
+        
+        self.feature_report = TemporalStabilityReport.generate_feature_report(
+            self.result_data.stability_scores,
+            top_n=10
+        )
+        
+        return {
+            "temporal_index": self.result_data.temporal_index,
+            "total_features": self.result_data.temporal_summary["total_features"],
+            "best_feature": self.result_data.temporal_summary["best_feature"],
+            "average_drift": self.result_data.temporal_summary["average_drift"]
+        }
+    
+    def _compute_statistics(self) -> Dict[str, Any]:
+        """Step 2: Compute statistics."""
+        self.logger.info("Step 2: Computing statistics")
+        self.statistics = self.stats_engine.analyze(self.result_data)
+        
+        self.logger.metric(
+            "Average Score",
+            f"{self.statistics.average_score:.2f}"
+        )
+        self.logger.metric(
+            "Average Decay",
+            f"{self.statistics.average_decay:.4f}"
+        )
+        self.logger.success("Statistics computed")
+        
+        return self.stats_engine.summary_dict(self.statistics)
+    
+    def _validate(self) -> Dict[str, Any]:
+        """Step 3: Validation."""
+        self.logger.info("Step 3: Validation")
+        passed = run_validation(self.result_data, self.statistics)
+        self.logger.success("Validation complete")
+        return {"software_validation_passed": passed}
+    
+    def _export_results(self) -> Dict[str, Any]:
+        """Step 4: Export."""
+        self.logger.info("Step 4: Export")
+        
+        # Register DataFrames as artifacts
+        self.result.artifacts["window_scores"] = self.result_data.window_scores
+        self.result.artifacts["temporal_statistics"] = self.result_data.temporal_statistics
+        self.result.artifacts["window_summary"] = self.result_data.window_summary
+        
+        # Store summary
+        summary_df = pd.DataFrame([self.result_data.temporal_summary])
+        self.result.artifacts["temporal_summary"] = summary_df
+        
+        # Generate and register reports
+        main_report = TemporalStabilityReport.generate(
+            self.statistics,
+            metadata=self.METADATA,
+            dataset_name=self.result.dataset_identifier,
+        )
+        self.result.artifacts["temporal_stability_report"] = main_report
+        self.result.artifacts["window_report"] = self.window_report
+        self.result.artifacts["feature_report"] = self.feature_report
+        
+        # Export to files
+        if self._output_dir is not None:
+            export_dir = self._output_dir / "exports"
+            export_dir.mkdir(parents=True, exist_ok=True)
+            
+            TemporalStabilityExporter.export_window_scores(
+                self.result_data.window_scores,
+                export_dir / "window_scores.csv"
+            )
+            
+            TemporalStabilityExporter.export_temporal_statistics(
+                self.result_data.temporal_statistics,
+                export_dir / "temporal_statistics.csv"
+            )
+            
+            TemporalStabilityExporter.export_window_summary(
+                self.result_data.window_summary,
+                export_dir / "window_summary.csv"
+            )
+            
+            TemporalStabilityExporter.export_temporal_summary(
+                self.result_data.temporal_summary,
+                export_dir / "temporal_summary.csv"
+            )
+        
+        self.logger.metric("Artifacts", str(len(self.result.artifacts)))
+        self.logger.success("Export complete")
+        
+        return {
+            "export_status": "complete",
+            "artifact_count": len(self.result.artifacts),
+            "temporal_index": self.result_data.temporal_index
+        }
+    
+    def compute(self) -> Dict[str, Any]:
+        """Run the full computation pipeline."""
+        self.logger.section("Temporal Stability Pipeline")
+        results = self.execute_pipeline()
+        self.result.status = "completed"
+        self.logger.success("Module 114 complete")
+        return results
+    
+    def run(self, filepath: str, output_dir=None):
+        """Run module on file."""
+        self._output_dir = Path(output_dir) if output_dir else None
+        return super().run(filepath, output_dir)
+    
+    def run_dataframe(self, df, dataset_id="in_memory", output_dir=None):
+        """Run module on DataFrame."""
+        self._output_dir = Path(output_dir) if output_dir else None
+        return super().run_dataframe(df, dataset_id, output_dir)

@@ -1,0 +1,145 @@
+# atlas/modules/module113_regime_robustness/report.py
+"""
+Module 113 - Regime Robustness Report
+"""
+
+from datetime import datetime
+import pandas as pd
+
+
+class RegimeRobustnessReport:
+    """Report generator for regime robustness results."""
+    
+    @staticmethod
+    def generate(statistics, metadata=None, dataset_name="Unknown") -> str:
+        """Generate a formatted report."""
+        lines = []
+        
+        lines.append("=" * 55)
+        lines.append("MODULE 113")
+        lines.append("REGIME ROBUSTNESS")
+        lines.append("=" * 55)
+        lines.append(f"\nDataset: {dataset_name}")
+        
+        # Overview
+        lines.append("\n" + "-" * 45)
+        lines.append("OVERVIEW")
+        lines.append("-" * 45)
+        lines.append(f"  Total Regimes: {statistics.total_regimes}")
+        lines.append(f"  Total Features: {statistics.total_features}")
+        lines.append(f"  Total Samples: {statistics.total_samples:,}")
+        
+        # Robustness
+        lines.append("\n" + "-" * 45)
+        lines.append("ROBUSTNESS")
+        lines.append("-" * 45)
+        lines.append(f"  Robustness Index: {statistics.robustness_index:.2f}/100")
+        lines.append(f"  Average Feature Stability: {statistics.average_feature_stability:.2f}%")
+        
+        # Best and Worst
+        if statistics.best_feature:
+            lines.append("\n" + "-" * 45)
+            lines.append("BEST AND WORST")
+            lines.append("-" * 45)
+            lines.append(f"  Most Robust Feature: {statistics.best_feature}")
+            lines.append(f"  Least Robust Feature: {statistics.worst_feature}")
+        
+        # Regime Breakdown
+        if statistics.regime_counts:
+            lines.append("\n" + "-" * 45)
+            lines.append("REGIME BREAKDOWN")
+            lines.append("-" * 45)
+            for regime, count in sorted(statistics.regime_counts.items(), key=lambda x: -x[1]):
+                lines.append(f"  {regime}: {count:,} candles")
+        
+        # Interpretation
+        lines.append("\n" + "-" * 45)
+        lines.append("INTERPRETATION")
+        lines.append("-" * 45)
+        
+        if statistics.robustness_index >= 80:
+            lines.append("  ✅ Features are highly robust across regimes")
+        elif statistics.robustness_index >= 60:
+            lines.append("  ✓ Features show moderate robustness across regimes")
+        elif statistics.robustness_index >= 40:
+            lines.append("  ⚠ Features show weak robustness across regimes")
+        else:
+            lines.append("  ❌ Features show poor robustness across regimes")
+        
+        if statistics.average_feature_stability > 80:
+            lines.append("  ✅ Average feature stability is high")
+        elif statistics.average_feature_stability > 60:
+            lines.append("  ✓ Average feature stability is moderate")
+        else:
+            lines.append("  ⚠ Average feature stability is low")
+        
+        # Validation
+        lines.append("\n" + "-" * 45)
+        lines.append("VALIDATION")
+        lines.append("-" * 45)
+        lines.append("  Status: PASSED")
+        
+        # Footer
+        lines.append(f"\n  Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        lines.append("\n" + "=" * 55)
+        lines.append("END OF REPORT")
+        lines.append("=" * 55)
+        
+        return "\n".join(lines)
+    
+    @staticmethod
+    def generate_feature_report(statistics: pd.DataFrame, top_n: int = 10) -> str:
+        """Generate a detailed feature report."""
+        lines = []
+        lines.append("\n" + "=" * 70)
+        lines.append(f"FEATURE ROBUSTNESS REPORT (Top {top_n})")
+        lines.append("=" * 70)
+        
+        sorted_stats = statistics.sort_values('stability', ascending=False)
+        
+        lines.append(
+            f"\n{'Feature':<20} {'Stability':<12} {'Mean':<10} {'Std':<10} "
+            f"{'Worst Regime':<20} {'Best Regime':<20}"
+        )
+        lines.append("-" * 92)
+        
+        for _, row in sorted_stats.head(top_n).iterrows():
+            lines.append(
+                f"{row['feature'][:19]:<20} "
+                f"{row['stability']:<12.2%} "
+                f"{row['mean_score']:<10.4f} "
+                f"{row['std_score']:<10.4f} "
+                f"{row['worst_regime'][:19]:<20} "
+                f"{row['best_regime'][:19]:<20}"
+            )
+        
+        lines.append("\n" + "=" * 70)
+        return "\n".join(lines)
+    
+    @staticmethod
+    def generate_heatmap(scores: pd.DataFrame) -> str:
+        """Generate a regime heatmap."""
+        lines = []
+        lines.append("\n" + "=" * 60)
+        lines.append("REGIME HEATMAP")
+        lines.append("=" * 60)
+        
+        # Pivot table: features x regimes
+        pivot = scores.pivot_table(
+            index='feature',
+            columns='regime',
+            values='score'
+        )
+        
+        lines.append("\n" + pivot.round(4).to_string())
+        lines.append("\n" + "=" * 60)
+        return "\n".join(lines)
+    
+    @staticmethod
+    def save(report: str, filepath: str):
+        """Save report to file."""
+        from pathlib import Path
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(report)

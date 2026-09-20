@@ -1,0 +1,9 @@
+# atlas/modules/module114_temporal_stability/__init__.py
+"""
+Module 114
+Temporal Stability
+"""
+
+from .module import TemporalStabilityResearch
+
+__all__ = ["TemporalStabilityResearch"]

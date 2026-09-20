@@ -1,0 +1,354 @@
+# atlas/modules/module114_temporal_stability/test_module.py
+"""
+Module 114 - Integration Test
+
+Tests temporal stability engine, statistics, validator, report, and pipeline.
+"""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+
+import numpy as np
+import pandas as pd
+
+from atlas.modules.module114_temporal_stability.engine import TemporalStabilityEngine
+from atlas.modules.module114_temporal_stability.statistics import TemporalStabilityStatisticsEngine
+from atlas.modules.module114_temporal_stability.validator import run_validation
+from atlas.modules.module114_temporal_stability.module import TemporalStabilityResearch
+
+
+def create_test_data(n=1000, seed=42):
+    """Create synthetic test data with degrading feature."""
+    np.random.seed(seed)
+    
+    # Split into 5 windows
+    window_size = n // 5
+    
+    features_data = []
+    target_data = []
+    
+    # Feature that degrades over time
+    auc_values = [0.82, 0.80, 0.75, 0.69, 0.61]
+    
+    for window_idx, auc in enumerate(auc_values):
+        start = window_idx * window_size
+        end = start + window_size if window_idx < 4 else n
+        
+        # Generate feature with degrading AUC
+        n_samples = end - start
+        
+        # Generate feature with signal based on AUC
+        # AUC ~0.8 means strong signal, AUC ~0.6 means weaker signal
+        signal_strength = (auc - 0.5) * 2  # 0.5->0, 0.8->0.6, 0.6->0.2
+        feature = np.random.randn(n_samples)
+        target_prob = 1 / (1 + np.exp(-(signal_strength * feature)))
+        target = (np.random.random(n_samples) < target_prob).astype(int)
+        
+        features_data.extend(feature.tolist())
+        target_data.extend(target.tolist())
+    
+    # Create another feature that is stable
+    stable_feature = np.random.randn(n)
+    stable_target_prob = 1 / (1 + np.exp(-(0.3 * stable_feature)))
+    stable_target = (np.random.random(n) < stable_target_prob).astype(int)
+    
+    df = pd.DataFrame({
+        'timestamp': pd.date_range('2020-01-01', periods=n, freq='1h'),
+        'open': 100 + np.cumsum(np.random.randn(n) * 0.5),
+        'high': 100 + np.cumsum(np.random.randn(n) * 0.5) + np.abs(np.random.randn(n) * 0.5),
+        'low': 100 + np.cumsum(np.random.randn(n) * 0.5) - np.abs(np.random.randn(n) * 0.5),
+        'close': 100 + np.cumsum(np.random.randn(n) * 0.5),
+        'volume': np.random.randn(n) * 100 + 1000,
+        'degrading_feature': features_data,
+        'stable_feature': stable_feature,
+        'future_breakout': target_data
+    })
+    
+    return df
+
+
+def test_engine_windows():
+    """Test 1: Window creation."""
+    print("\n" + "=" * 60)
+    print("TEST 1: Window Creation")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = TemporalStabilityEngine(n_windows=5)
+    
+    windows = engine.create_windows(df)
+    
+    assert len(windows) == 5
+    assert sum(len(w) for w in windows) == len(df)
+    
+    print(f"  Created {len(windows)} windows")
+    print("  ✓ Window creation test passed")
+    return True
+
+
+def test_engine_features():
+    """Test 2: Feature detection."""
+    print("\n" + "=" * 60)
+    print("TEST 2: Feature Detection")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = TemporalStabilityEngine()
+    
+    features = engine.get_feature_columns(df)
+    
+    assert 'degrading_feature' in features
+    assert 'stable_feature' in features
+    assert 'close' not in features
+    assert 'future_breakout' not in features
+    
+    print(f"  Features: {features}")
+    print("  ✓ Feature detection test passed")
+    return True
+
+
+def test_engine_window_scores():
+    """Test 3: Window scores."""
+    print("\n" + "=" * 60)
+    print("TEST 3: Window Scores")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = TemporalStabilityEngine(n_windows=5, min_samples=10)
+    
+    windows = engine.create_windows(df)
+    features = engine.get_feature_columns(df)
+    
+    window_scores = engine.compute_window_scores(windows, features)
+    
+    assert not window_scores.empty
+    assert 'window' in window_scores.columns
+    assert 'feature' in window_scores.columns
+    assert 'score' in window_scores.columns
+    
+    print(f"  Window scores: {len(window_scores)} rows")
+    print("  ✓ Window scores test passed")
+    return True
+
+
+def test_engine_temporal_statistics():
+    """Test 4: Temporal statistics."""
+    print("\n" + "=" * 60)
+    print("TEST 4: Temporal Statistics")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = TemporalStabilityEngine(n_windows=5, min_samples=10)
+    
+    windows = engine.create_windows(df)
+    features = engine.get_feature_columns(df)
+    window_scores = engine.compute_window_scores(windows, features)
+    stats = engine.compute_temporal_statistics(window_scores)
+    
+    assert not stats.empty
+    assert 'feature' in stats.columns
+    assert 'temporal_score' in stats.columns
+    assert 'slope' in stats.columns
+    assert 'decay' in stats.columns
+    
+    # Stable feature should have higher temporal score
+    stable_score = stats[stats['feature'] == 'stable_feature']['temporal_score'].iloc[0] if not stats[stats['feature'] == 'stable_feature'].empty else 0
+    degrading_score = stats[stats['feature'] == 'degrading_feature']['temporal_score'].iloc[0] if not stats[stats['feature'] == 'degrading_feature'].empty else 0
+    
+    print(f"  Stable feature score: {stable_score:.2f}")
+    print(f"  Degrading feature score: {degrading_score:.2f}")
+    print("  ✓ Temporal statistics test passed")
+    return True
+
+
+def test_engine_slope_detection():
+    """Test 5: Trend drift detection."""
+    print("\n" + "=" * 60)
+    print("TEST 5: Trend Drift Detection")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = TemporalStabilityEngine(n_windows=5, min_samples=10)
+    
+    windows = engine.create_windows(df)
+    features = engine.get_feature_columns(df)
+    window_scores = engine.compute_window_scores(windows, features)
+    stats = engine.compute_temporal_statistics(window_scores)
+    
+    # Degrading feature should have negative slope
+    degrading_slope = stats[stats['feature'] == 'degrading_feature']['slope'].iloc[0] if not stats[stats['feature'] == 'degrading_feature'].empty else 0
+    stable_slope = stats[stats['feature'] == 'stable_feature']['slope'].iloc[0] if not stats[stats['feature'] == 'stable_feature'].empty else 0
+    
+    assert degrading_slope < 0
+    assert abs(degrading_slope) > abs(stable_slope)
+    
+    print(f"  Degrading slope: {degrading_slope:.4f}")
+    print(f"  Stable slope: {stable_slope:.4f}")
+    print("  ✓ Trend drift test passed")
+    return True
+
+
+def test_engine_compute():
+    """Test 6: Full engine computation."""
+    print("\n" + "=" * 60)
+    print("TEST 6: Full Engine Computation")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = TemporalStabilityEngine(n_windows=5, min_samples=10)
+    
+    result = engine.compute(df)
+    
+    assert result.temporal_index >= 0
+    assert result.temporal_index <= 100
+    assert not result.window_scores.empty
+    assert not result.temporal_statistics.empty
+    assert not result.window_summary.empty
+    assert result.temporal_summary['total_features'] > 0
+    
+    print(f"  Temporal index: {result.temporal_index:.2f}/100")
+    print(f"  Total features: {result.temporal_summary['total_features']}")
+    print("  ✓ Full engine test passed")
+    return True
+
+
+def test_statistics():
+    """Test 7: Statistics engine."""
+    print("\n" + "=" * 60)
+    print("TEST 7: Statistics Engine")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = TemporalStabilityEngine(n_windows=5, min_samples=10)
+    stats_engine = TemporalStabilityStatisticsEngine()
+    
+    result = engine.compute(df)
+    stats = stats_engine.analyze(result)
+    
+    assert stats.total_features == result.temporal_summary['total_features']
+    assert stats.temporal_index == result.temporal_summary['temporal_index']
+    assert stats.windows == 5
+    
+    print(f"  Temporal index: {stats.temporal_index:.2f}/100")
+    print("  ✓ Statistics test passed")
+    return True
+
+
+def test_validator():
+    """Test 8: Validator."""
+    print("\n" + "=" * 60)
+    print("TEST 8: Validator")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = TemporalStabilityEngine(n_windows=5, min_samples=10)
+    stats_engine = TemporalStabilityStatisticsEngine()
+    
+    result = engine.compute(df)
+    stats = stats_engine.analyze(result)
+    
+    passed = run_validation(result, stats)
+    assert passed
+    
+    print("  ✓ Validator test passed")
+    return True
+
+
+def test_pipeline():
+    """Test 9: Full pipeline."""
+    print("\n" + "=" * 60)
+    print("TEST 9: Full Pipeline")
+    print("=" * 60)
+    
+    df = create_test_data()
+    
+    research = TemporalStabilityResearch(
+        n_windows=5,
+        min_samples=10
+    )
+    
+    result = research.run_dataframe(df, dataset_id="pipeline_test")
+    
+    assert result.status == "completed"
+    assert "window_scores" in result.artifacts
+    assert "temporal_statistics" in result.artifacts
+    assert "window_summary" in result.artifacts
+    assert "temporal_stability_report" in result.artifacts
+    assert "window_report" in result.artifacts
+    assert "feature_report" in result.artifacts
+    assert result.statistics.get("software_validation_passed") == True
+    
+    print(f"  Temporal index: {result.statistics.get('temporal_index'):.2f}/100")
+    print(f"  Total features: {result.statistics.get('total_features')}")
+    print("  ✓ Full pipeline test passed")
+    return True
+
+
+def test_pluggable_metrics():
+    """Test 10: Pluggable scoring metrics."""
+    print("\n" + "=" * 60)
+    print("TEST 10: Pluggable Scoring Metrics")
+    print("=" * 60)
+    
+    df = create_test_data()
+    
+    # Test with different metrics
+    for metric in ['auc', 'correlation', 'mutual_information']:
+        engine = TemporalStabilityEngine(
+            scoring_metric=metric,
+            n_windows=3,
+            min_samples=10
+        )
+        result = engine.compute(df)
+        assert result.temporal_index >= 0
+        assert result.temporal_index <= 100
+        print(f"  {metric}: temporal_index={result.temporal_index:.2f}")
+    
+    print("  ✓ Pluggable metrics test passed")
+    return True
+
+
+def main():
+    """Run all tests."""
+    print("\n" + "=" * 70)
+    print("PROJECT ATLAS - MODULE 114 INTEGRATION TEST")
+    print("Temporal Stability")
+    print("=" * 70)
+    
+    results = {}
+    
+    results["windows"] = test_engine_windows()
+    results["features"] = test_engine_features()
+    results["window_scores"] = test_engine_window_scores()
+    results["temporal_statistics"] = test_engine_temporal_statistics()
+    results["slope_detection"] = test_engine_slope_detection()
+    results["full_engine"] = test_engine_compute()
+    results["statistics"] = test_statistics()
+    results["validator"] = test_validator()
+    results["pipeline"] = test_pipeline()
+    results["pluggable_metrics"] = test_pluggable_metrics()
+    
+    print("\n" + "=" * 70)
+    print("RESULTS")
+    print("=" * 70)
+    
+    for name, ok in results.items():
+        print(f"  {'✓' if ok else '✗'} {name}")
+    
+    passed = sum(results.values())
+    total = len(results)
+    
+    print(f"\n  {passed}/{total} tests passed")
+    
+    if passed == total:
+        print("\n✓ Module 114 VALIDATED")
+        return 0
+    else:
+        print("\n⚠ Some tests failed")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

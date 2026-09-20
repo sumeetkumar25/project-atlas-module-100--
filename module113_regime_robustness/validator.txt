@@ -1,0 +1,118 @@
+# atlas/modules/module113_regime_robustness/validator.py
+"""
+Module 113 - Regime Robustness Validator
+"""
+
+import numpy as np
+import pandas as pd
+from .engine import RegimeRobustnessResult
+from .statistics import RegimeRobustnessStatistics
+
+
+class RegimeRobustnessValidator:
+    """Validator for regime robustness results."""
+    
+    def validate(
+        self,
+        result: RegimeRobustnessResult,
+        statistics: RegimeRobustnessStatistics
+    ) -> bool:
+        """Validate results and statistics."""
+        issues = []
+        warnings = []
+        
+        # Check regime scores
+        if result.regime_scores.empty:
+            issues.append("Regime scores DataFrame is empty")
+        else:
+            # Check required columns
+            required_cols = ['regime', 'feature', 'score', 'sample_size']
+            missing = set(required_cols) - set(result.regime_scores.columns)
+            if missing:
+                issues.append(f"Missing columns in regime scores: {missing}")
+            
+            # Check scores are in [0, 1]
+            if 'score' in result.regime_scores.columns:
+                if not np.all((0 <= result.regime_scores['score']) & 
+                            (result.regime_scores['score'] <= 1)):
+                    issues.append("Scores outside [0, 1] range")
+        
+        # Check regime statistics
+        if result.regime_statistics.empty:
+            issues.append("Regime statistics DataFrame is empty")
+        else:
+            # Check stability values
+            if 'stability' in result.regime_statistics.columns:
+                if not np.all((0 <= result.regime_statistics['stability']) & 
+                            (result.regime_statistics['stability'] <= 1)):
+                    issues.append("Stability values outside [0, 1] range")
+        
+        # Check regime breakdown
+        if result.regime_breakdown.empty:
+            issues.append("Regime breakdown DataFrame is empty")
+        else:
+            # Check no empty regimes
+            if 'count' in result.regime_breakdown.columns:
+                if (result.regime_breakdown['count'] == 0).any():
+                    issues.append("Empty regimes found")
+            
+            # Check percentages sum to ~100
+            if 'percentage' in result.regime_breakdown.columns:
+                if not np.isclose(result.regime_breakdown['percentage'].sum(), 100, atol=1):
+                    issues.append("Percentages do not sum to 100")
+        
+        # Check robustness index
+        if not (0 <= result.robustness_index <= 100):
+            issues.append(f"Robustness index outside [0, 100]: {result.robustness_index}")
+        
+        # Check statistics match result
+        if statistics.total_regimes != result.summary_statistics['total_regimes']:
+            issues.append(
+                f"Total regimes mismatch: stats={statistics.total_regimes}, "
+                f"result={result.summary_statistics['total_regimes']}"
+            )
+        
+        if statistics.robustness_index != result.summary_statistics['robustness_index']:
+            issues.append(
+                f"Robustness index mismatch: stats={statistics.robustness_index}, "
+                f"result={result.summary_statistics['robustness_index']}"
+            )
+        
+        # Warnings (non-fatal)
+        if result.robustness_index < 50:
+            warnings.append(f"Low robustness index: {result.robustness_index:.2f}/100")
+        
+        if len(result.regime_breakdown) < 3:
+            warnings.append(f"Only {len(result.regime_breakdown)} regimes detected")
+        
+        if warnings:
+            print("\n  WARNINGS:")
+            for warning in warnings:
+                print(f"    ⚠ {warning}")
+        
+        if issues:
+            raise ValueError(
+                f"Regime Robustness validation failed with {len(issues)} issue(s):\n" +
+                "\n".join(f"  - {issue}" for issue in issues)
+            )
+        
+        return True
+
+
+def run_validation(result, statistics):
+    """Run validation with user-friendly output."""
+    validator = RegimeRobustnessValidator()
+    
+    print("\n" + "=" * 60)
+    print("REGIME ROBUSTNESS VALIDATION")
+    print("=" * 60)
+    
+    try:
+        validator.validate(result, statistics)
+        print("\n  ✓ All validation checks passed")
+        print("=" * 60)
+        return True
+    except ValueError as e:
+        print(e)
+        print("=" * 60)
+        return False

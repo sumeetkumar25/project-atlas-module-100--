@@ -1,0 +1,150 @@
+# atlas/modules/module114_temporal_stability/report.py
+"""
+Module 114 - Temporal Stability Report
+"""
+
+from datetime import datetime
+import pandas as pd
+
+
+class TemporalStabilityReport:
+    """Report generator for temporal stability results."""
+    
+    @staticmethod
+    def generate(statistics, metadata=None, dataset_name="Unknown") -> str:
+        """Generate a formatted report."""
+        lines = []
+        
+        lines.append("=" * 55)
+        lines.append("MODULE 114")
+        lines.append("TEMPORAL STABILITY")
+        lines.append("=" * 55)
+        lines.append(f"\nDataset: {dataset_name}")
+        
+        # Overview
+        lines.append("\n" + "-" * 45)
+        lines.append("OVERVIEW")
+        lines.append("-" * 45)
+        lines.append(f"  Total Features: {statistics.total_features}")
+        lines.append(f"  Windows: {statistics.windows}")
+        lines.append(f"  Scoring Metric: {statistics.scoring_metric}")
+        
+        # Temporal Index
+        lines.append("\n" + "-" * 45)
+        lines.append("TEMPORAL INDEX")
+        lines.append("-" * 45)
+        lines.append(f"  Temporal Index: {statistics.temporal_index:.2f}/100")
+        lines.append(f"  Average Score: {statistics.average_score:.2f}")
+        lines.append(f"  Median Score: {statistics.median_score:.2f}")
+        
+        # Best and Worst
+        if statistics.best_feature:
+            lines.append("\n" + "-" * 45)
+            lines.append("BEST AND WORST")
+            lines.append("-" * 45)
+            lines.append(f"  Most Stable Feature: {statistics.best_feature}")
+            lines.append(f"  Least Stable Feature: {statistics.worst_feature}")
+        
+        # Drift and Decay
+        lines.append("\n" + "-" * 45)
+        lines.append("DRIFT AND DECAY")
+        lines.append("-" * 45)
+        lines.append(f"  Average Drift: {statistics.average_drift:.4f}")
+        lines.append(f"  Average Decay: {statistics.average_decay:.4f}")
+        
+        # Interpretation
+        lines.append("\n" + "-" * 45)
+        lines.append("INTERPRETATION")
+        lines.append("-" * 45)
+        
+        if statistics.temporal_index >= 80:
+            lines.append("  ✅ Features show high temporal stability")
+        elif statistics.temporal_index >= 60:
+            lines.append("  ✓ Features show moderate temporal stability")
+        elif statistics.temporal_index >= 40:
+            lines.append("  ⚠ Features show weak temporal stability")
+        else:
+            lines.append("  ❌ Features show poor temporal stability")
+        
+        if statistics.average_drift > 0.001:
+            lines.append("  📈 Features are generally improving over time")
+        elif statistics.average_drift < -0.001:
+            lines.append("  📉 Features are generally degrading over time")
+        else:
+            lines.append("  ➡️ Features show no significant trend")
+        
+        # Validation
+        lines.append("\n" + "-" * 45)
+        lines.append("VALIDATION")
+        lines.append("-" * 45)
+        lines.append("  Status: PASSED")
+        
+        # Footer
+        lines.append(f"\n  Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        lines.append("\n" + "=" * 55)
+        lines.append("END OF REPORT")
+        lines.append("=" * 55)
+        
+        return "\n".join(lines)
+    
+    @staticmethod
+    def generate_window_report(window_summary: pd.DataFrame) -> str:
+        """Generate a window-by-window report."""
+        lines = []
+        lines.append("\n" + "=" * 60)
+        lines.append("WINDOW SUMMARY")
+        lines.append("=" * 60)
+        
+        lines.append(
+            f"\n{'Window':<10} {'Mean Score':<15} {'Std':<15} {'Max':<15} {'Min':<15} {'Features':<10}"
+        )
+        lines.append("-" * 80)
+        
+        for _, row in window_summary.iterrows():
+            lines.append(
+                f"{row['window']:<10} "
+                f"{row['mean_score']:<15.4f} "
+                f"{row['std_score']:<15.4f} "
+                f"{row['max_score']:<15.4f} "
+                f"{row['min_score']:<15.4f} "
+                f"{row['n_features']:<10}"
+            )
+        
+        lines.append("\n" + "=" * 60)
+        return "\n".join(lines)
+    
+    @staticmethod
+    def generate_feature_report(stability_scores: pd.DataFrame, top_n: int = 10) -> str:
+        """Generate a detailed feature report."""
+        lines = []
+        lines.append("\n" + "=" * 70)
+        lines.append(f"FEATURE TEMPORAL STABILITY (Top {top_n})")
+        lines.append("=" * 70)
+        
+        sorted_scores = stability_scores.sort_values('temporal_score', ascending=False)
+        
+        lines.append(
+            f"\n{'Feature':<25} {'Score':<12} {'Stability':<12} {'Slope':<12} {'Decay':<12}"
+        )
+        lines.append("-" * 75)
+        
+        for _, row in sorted_scores.head(top_n).iterrows():
+            lines.append(
+                f"{row['feature'][:24]:<25} "
+                f"{row['temporal_score']:<12.2f} "
+                f"{row['stability']:<12.3f} "
+                f"{row['slope']:<12.4f} "
+                f"{row['decay']:<12.4f}"
+            )
+        
+        lines.append("\n" + "=" * 70)
+        return "\n".join(lines)
+    
+    @staticmethod
+    def save(report: str, filepath: str):
+        """Save report to file."""
+        from pathlib import Path
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(report)

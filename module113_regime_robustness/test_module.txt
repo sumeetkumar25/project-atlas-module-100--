@@ -1,0 +1,346 @@
+# atlas/modules/module113_regime_robustness/test_module.py
+"""
+Module 113 - Integration Test
+
+Tests regime robustness engine, statistics, validator, report, and pipeline.
+"""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+
+import numpy as np
+import pandas as pd
+
+from atlas.modules.module113_regime_robustness.engine import RegimeRobustnessEngine
+from atlas.modules.module113_regime_robustness.statistics import RegimeRobustnessStatisticsEngine
+from atlas.modules.module113_regime_robustness.validator import run_validation
+from atlas.modules.module113_regime_robustness.module import RegimeRobustnessResearch
+
+
+def create_test_data(n=1000, seed=42):
+    """Create synthetic test data with regimes."""
+    np.random.seed(seed)
+    
+    # Generate price data with trends
+    trend = np.cumsum(np.random.randn(n) * 0.5)
+    close = 100 + trend
+    
+    high = close + np.abs(np.random.randn(n) * 1.0)
+    low = close - np.abs(np.random.randn(n) * 1.0)
+    volume = np.random.randn(n) * 100 + 1000
+    
+    # Create features with varying regime stability
+    atr = np.random.randn(n) * 2 + 50
+    rsi = np.random.randn(n) * 10 + 50
+    trend_feature = np.random.randn(n) * 5 + 0
+    
+    # Target with some signal
+    future_breakout = ((atr > 50) & (rsi > 50)).astype(int)
+    
+    df = pd.DataFrame({
+        'open': 100 + np.random.randn(n) * 10,
+        'high': high,
+        'low': low,
+        'close': close,
+        'volume': volume,
+        'ATR': atr,
+        'RSI': rsi,
+        'trend': trend_feature,
+        'future_breakout': future_breakout
+    })
+    
+    return df
+
+
+def test_engine_trend_regime():
+    """Test 1: Trend regime classification."""
+    print("\n" + "=" * 60)
+    print("TEST 1: Trend Regime Classification")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = RegimeRobustnessEngine()
+    
+    trend = engine.compute_trend_regime(df)
+    
+    # Check all values are valid
+    assert set(trend.unique()).issubset({'Bull', 'Bear', 'Sideways'})
+    assert len(trend) == len(df)
+    
+    print(f"  Trend regimes: {trend.unique().tolist()}")
+    print("  ✓ Trend regime test passed")
+    return True
+
+
+def test_engine_volatility_regime():
+    """Test 2: Volatility regime classification."""
+    print("\n" + "=" * 60)
+    print("TEST 2: Volatility Regime Classification")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = RegimeRobustnessEngine()
+    
+    vol = engine.compute_volatility_regime(df)
+    
+    # Check all values are valid
+    assert set(vol.unique()).issubset({'Low Vol', 'Medium Vol', 'High Vol'})
+    assert len(vol) == len(df)
+    
+    print(f"  Volatility regimes: {vol.unique().tolist()}")
+    print("  ✓ Volatility regime test passed")
+    return True
+
+
+def test_engine_volume_regime():
+    """Test 3: Volume regime classification."""
+    print("\n" + "=" * 60)
+    print("TEST 3: Volume Regime Classification")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = RegimeRobustnessEngine()
+    
+    volume = engine.compute_volume_regime(df)
+    
+    # Check all values are valid
+    assert set(volume.unique()).issubset({'Low Volume', 'Medium Volume', 'High Volume'})
+    assert len(volume) == len(df)
+    
+    print(f"  Volume regimes: {volume.unique().tolist()}")
+    print("  ✓ Volume regime test passed")
+    return True
+
+
+def test_engine_combined_regime():
+    """Test 4: Combined regime classification."""
+    print("\n" + "=" * 60)
+    print("TEST 4: Combined Regime Classification")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = RegimeRobustnessEngine()
+    
+    combined = engine.compute_combined_regime(df)
+    
+    # Check all values are valid
+    assert len(combined) == len(df)
+    assert len(combined.unique()) > 0
+    
+    print(f"  Combined regimes: {len(combined.unique())} unique")
+    print("  ✓ Combined regime test passed")
+    return True
+
+
+def test_engine_feature_columns():
+    """Test 5: Feature column detection."""
+    print("\n" + "=" * 60)
+    print("TEST 5: Feature Column Detection")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = RegimeRobustnessEngine()
+    
+    features = engine.get_feature_columns(df)
+    
+    # Should detect ATR, RSI, trend
+    assert 'ATR' in features
+    assert 'RSI' in features
+    assert 'trend' in features
+    assert 'close' not in features
+    assert 'future_breakout' not in features
+    
+    print(f"  Features: {features}")
+    print("  ✓ Feature column test passed")
+    return True
+
+
+def test_engine_regime_scores():
+    """Test 6: Regime score computation."""
+    print("\n" + "=" * 60)
+    print("TEST 6: Regime Score Computation")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = RegimeRobustnessEngine(min_samples_per_regime=10)
+    
+    regimes = engine.compute_combined_regime(df)
+    features = engine.get_feature_columns(df)
+    
+    scores = engine.compute_regime_scores(df, regimes, features)
+    
+    assert not scores.empty
+    assert 'regime' in scores.columns
+    assert 'feature' in scores.columns
+    assert 'score' in scores.columns
+    
+    print(f"  Regime scores: {len(scores)} rows")
+    print("  ✓ Regime score test passed")
+    return True
+
+
+def test_engine_statistics():
+    """Test 7: Regime statistics computation."""
+    print("\n" + "=" * 60)
+    print("TEST 7: Regime Statistics Computation")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = RegimeRobustnessEngine(min_samples_per_regime=10)
+    
+    regimes = engine.compute_combined_regime(df)
+    features = engine.get_feature_columns(df)
+    
+    scores = engine.compute_regime_scores(df, regimes, features)
+    stats = engine.compute_regime_statistics(scores)
+    
+    assert not stats.empty
+    assert 'feature' in stats.columns
+    assert 'stability' in stats.columns
+    assert 'mean_score' in stats.columns
+    
+    print(f"  Regime statistics: {len(stats)} rows")
+    print("  ✓ Regime statistics test passed")
+    return True
+
+
+def test_engine_compute():
+    """Test 8: Full engine computation."""
+    print("\n" + "=" * 60)
+    print("TEST 8: Full Engine Computation")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = RegimeRobustnessEngine(min_samples_per_regime=10)
+    
+    result = engine.compute(df)
+    
+    assert result.robustness_index >= 0
+    assert result.robustness_index <= 100
+    assert not result.regime_scores.empty
+    assert not result.regime_statistics.empty
+    assert not result.regime_breakdown.empty
+    assert result.summary_statistics['total_features'] > 0
+    
+    print(f"  Robustness index: {result.robustness_index:.2f}/100")
+    print(f"  Total regimes: {result.summary_statistics['total_regimes']}")
+    print("  ✓ Full engine test passed")
+    return True
+
+
+def test_statistics():
+    """Test 9: Statistics engine."""
+    print("\n" + "=" * 60)
+    print("TEST 9: Statistics Engine")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = RegimeRobustnessEngine(min_samples_per_regime=10)
+    stats_engine = RegimeRobustnessStatisticsEngine()
+    
+    result = engine.compute(df)
+    stats = stats_engine.analyze(result)
+    
+    assert stats.total_regimes == result.summary_statistics['total_regimes']
+    assert stats.total_features == result.summary_statistics['total_features']
+    assert stats.robustness_index == result.summary_statistics['robustness_index']
+    
+    print(f"  Robustness index: {stats.robustness_index:.2f}/100")
+    print("  ✓ Statistics test passed")
+    return True
+
+
+def test_validator():
+    """Test 10: Validator."""
+    print("\n" + "=" * 60)
+    print("TEST 10: Validator")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = RegimeRobustnessEngine(min_samples_per_regime=10)
+    stats_engine = RegimeRobustnessStatisticsEngine()
+    
+    result = engine.compute(df)
+    stats = stats_engine.analyze(result)
+    
+    passed = run_validation(result, stats)
+    assert passed
+    
+    print("  ✓ Validator test passed")
+    return True
+
+
+def test_pipeline():
+    """Test 11: Full pipeline."""
+    print("\n" + "=" * 60)
+    print("TEST 11: Full Pipeline")
+    print("=" * 60)
+    
+    df = create_test_data()
+    
+    research = RegimeRobustnessResearch(
+        min_samples_per_regime=10
+    )
+    
+    result = research.run_dataframe(df, dataset_id="pipeline_test")
+    
+    assert result.status == "completed"
+    assert "regime_scores" in result.artifacts
+    assert "regime_statistics" in result.artifacts
+    assert "regime_breakdown" in result.artifacts
+    assert "robustness_report" in result.artifacts
+    assert "feature_report" in result.artifacts
+    assert "heatmap_report" in result.artifacts
+    assert result.statistics.get("software_validation_passed") == True
+    
+    print(f"  Robustness index: {result.statistics.get('robustness_index'):.2f}/100")
+    print(f"  Total regimes: {result.statistics.get('total_regimes')}")
+    print("  ✓ Full pipeline test passed")
+    return True
+
+
+def main():
+    """Run all tests."""
+    print("\n" + "=" * 70)
+    print("PROJECT ATLAS - MODULE 113 INTEGRATION TEST")
+    print("Regime Robustness")
+    print("=" * 70)
+    
+    results = {}
+    
+    results["trend_regime"] = test_engine_trend_regime()
+    results["volatility_regime"] = test_engine_volatility_regime()
+    results["volume_regime"] = test_engine_volume_regime()
+    results["combined_regime"] = test_engine_combined_regime()
+    results["feature_columns"] = test_engine_feature_columns()
+    results["regime_scores"] = test_engine_regime_scores()
+    results["regime_statistics"] = test_engine_statistics()
+    results["full_engine"] = test_engine_compute()
+    results["statistics"] = test_statistics()
+    results["validator"] = test_validator()
+    results["pipeline"] = test_pipeline()
+    
+    print("\n" + "=" * 70)
+    print("RESULTS")
+    print("=" * 70)
+    
+    for name, ok in results.items():
+        print(f"  {'✓' if ok else '✗'} {name}")
+    
+    passed = sum(results.values())
+    total = len(results)
+    
+    print(f"\n  {passed}/{total} tests passed")
+    
+    if passed == total:
+        print("\n✓ Module 113 VALIDATED")
+        return 0
+    else:
+        print("\n⚠ Some tests failed")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

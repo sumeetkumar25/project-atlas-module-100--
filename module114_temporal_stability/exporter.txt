@@ -1,0 +1,40 @@
+# atlas/modules/module114_temporal_stability/exporter.py
+"""
+Module 114 - Temporal Stability Exporter
+"""
+
+import pandas as pd
+from pathlib import Path
+
+
+class TemporalStabilityExporter:
+    """Exporter for temporal stability results."""
+    
+    @staticmethod
+    def export_window_scores(df: pd.DataFrame, filepath: str):
+        """Export window scores to CSV."""
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(path, index=False)
+    
+    @staticmethod
+    def export_temporal_statistics(df: pd.DataFrame, filepath: str):
+        """Export temporal statistics to CSV."""
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(path, index=False)
+    
+    @staticmethod
+    def export_window_summary(df: pd.DataFrame, filepath: str):
+        """Export window summary to CSV."""
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(path, index=False)
+    
+    @staticmethod
+    def export_temporal_summary(summary: dict, filepath: str):
+        """Export temporal summary to CSV."""
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        df = pd.DataFrame([summary])
+        df.to_csv(path, index=False)

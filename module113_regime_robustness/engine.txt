@@ -1,0 +1,226 @@
+"""
+Module 113 - Regime Robustness Engine
+
+Validates feature performance across different market regimes.
+
+Regimes:
+  - Trend: Bull, Bear, Sideways
+  - Volatility: Low, Medium, High
+  - Volume: Low, Medium, High
+
+Output: Robustness score (0-100) for each feature across regimes.
+"""
+
+import numpy as np
+import pandas as pd
+from dataclasses import dataclass
+from typing import Optional, Dict, Any, List, Tuple
+from sklearn.metrics import roc_auc_score
+from sklearn.preprocessing import LabelEncoder
+from scipy import stats
+
+
+@dataclass
+class RegimeRobustnessResult:
+    """Results from regime robustness analysis."""
+    regime_scores: pd.DataFrame
+    regime_statistics: pd.DataFrame
+    regime_breakdown: pd.DataFrame
+    robustness_index: float
+    summary_statistics: Dict[str, Any]
+
+
+class RegimeRobustnessEngine:
+    """Core engine for regime robustness analysis."""
+
+    TREND_EMA_PERIOD = 200
+    ATR_PERIOD = 14
+
+    def __init__(
+        self,
+        trend_ema_period: int = 200,
+        atr_period: int = 14,
+        volume_thresholds: Tuple[float, float] = (0.33, 0.67),
+        min_samples_per_regime: int = 50,
+        price_column: str = "close",
+        target_column: str = "future_breakout"
+    ):
+        self.trend_ema_period = trend_ema_period
+        self.atr_period = atr_period
+        self.volume_thresholds = volume_thresholds
+        self.min_samples_per_regime = min_samples_per_regime
+        self.price_column = price_column
+        self.target_column = target_column
+
+    def compute_trend_regime(self, df: pd.DataFrame) -> pd.Series:
+        close = df[self.price_column]
+        ema = close.ewm(span=self.trend_ema_period, adjust=False).mean()
+        relative = (close - ema) / ema
+        threshold = 0.02
+        regimes = pd.Series(index=df.index, dtype='object')
+        regimes[relative > threshold] = 'Bull'
+        regimes[relative < -threshold] = 'Bear'
+        regimes[(relative >= -threshold) & (relative <= threshold)] = 'Sideways'
+        return regimes.fillna('Sideways')
+
+    def compute_volatility_regime(self, df: pd.DataFrame) -> pd.Series:
+        high = df['high']
+        low = df['low']
+        close = df[self.price_column]
+        tr1 = high - low
+        tr2 = abs(high - close.shift())
+        tr3 = abs(low - close.shift())
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = tr.rolling(window=self.atr_period).mean()
+        atr_pct = atr.rank(pct=True).fillna(0.5)
+        regimes = pd.Series(index=df.index, dtype='object')
+        regimes[atr_pct <= self.volume_thresholds[0]] = 'Low Vol'
+        regimes[(atr_pct > self.volume_thresholds[0]) & (atr_pct <= self.volume_thresholds[1])] = 'Medium Vol'
+        regimes[atr_pct > self.volume_thresholds[1]] = 'High Vol'
+        return regimes.fillna('Medium Vol')
+
+    def compute_volume_regime(self, df: pd.DataFrame) -> pd.Series:
+        if 'volume' not in df.columns:
+            return self.compute_volatility_regime(df)
+        volume = df['volume']
+        volume_pct = volume.rank(pct=True).fillna(0.5)
+        regimes = pd.Series(index=df.index, dtype='object')
+        regimes[volume_pct <= self.volume_thresholds[0]] = 'Low Volume'
+        regimes[(volume_pct > self.volume_thresholds[0]) & (volume_pct <= self.volume_thresholds[1])] = 'Medium Volume'
+        regimes[volume_pct > self.volume_thresholds[1]] = 'High Volume'
+        return regimes.fillna('Medium Volume')
+
+    def compute_combined_regime(self, df: pd.DataFrame) -> pd.Series:
+        trend = self.compute_trend_regime(df)
+        vol = self.compute_volatility_regime(df)
+        volume = self.compute_volume_regime(df)
+        return trend + ' + ' + vol + ' + ' + volume
+
+    def get_feature_columns(self, df: pd.DataFrame) -> List[str]:
+        exclude_cols = {
+            'timestamp', 'date', 'time', 'index',
+            'open', 'high', 'low', 'close', 'volume',
+            self.target_column, self.price_column
+        }
+        return [col for col in df.columns if col not in exclude_cols and pd.api.types.is_numeric_dtype(df[col]) and df[col].nunique() > 1]
+
+    def compute_regime_scores(self, df: pd.DataFrame, regimes: pd.Series, features: List[str]) -> pd.DataFrame:
+        rows = []
+        y = df[self.target_column].values
+        for regime in regimes.unique():
+            if pd.isna(regime):
+                continue
+            mask = regimes == regime
+            regime_size = np.sum(mask)
+            if regime_size < self.min_samples_per_regime:
+                continue
+            for feature in features:
+                X = df.loc[mask, feature].values.reshape(-1, 1)
+                y_regime = y[mask]
+                if len(np.unique(y_regime)) < 2:
+                    continue
+                try:
+                    score = roc_auc_score(y_regime, X)
+                    rows.append({'regime': regime, 'feature': feature, 'score': float(score), 'sample_size': regime_size})
+                except:
+                    continue
+        return pd.DataFrame(rows)
+
+    def compute_regime_statistics(self, scores: pd.DataFrame) -> pd.DataFrame:
+        stats_rows = []
+        for feature in scores['feature'].unique():
+            feature_scores = scores[scores['feature'] == feature]
+            scores_values = feature_scores['score'].values
+            mean_score = np.mean(scores_values)
+            std_score = np.std(scores_values)
+            worst_idx = np.argmin(scores_values)
+            best_idx = np.argmax(scores_values)
+            stability = np.clip(1 - (std_score / (mean_score + 1e-12)), 0, 1)
+            stats_rows.append({
+                'feature': feature,
+                'mean_score': float(mean_score),
+                'std_score': float(std_score),
+                'min_score': float(np.min(scores_values)),
+                'max_score': float(np.max(scores_values)),
+                'regime_count': len(feature_scores),
+                'worst_regime': feature_scores.iloc[worst_idx]['regime'],
+                'best_regime': feature_scores.iloc[best_idx]['regime'],
+                'stability': float(stability)
+            })
+        return pd.DataFrame(stats_rows)
+
+    def compute_regime_breakdown(self, regimes: pd.Series) -> pd.DataFrame:
+        counts = regimes.value_counts()
+        total = len(regimes)
+        breakdown = pd.DataFrame({
+            'regime': counts.index,
+            'count': counts.values,
+            'percentage': (counts.values / total * 100)
+        })
+        return breakdown.sort_values('count', ascending=False).reset_index(drop=True)
+
+    def compute_robustness_index(self, feature_stats: pd.DataFrame, regime_breakdown: pd.DataFrame) -> float:
+        avg_stability = feature_stats['stability'].mean() if not feature_stats.empty else 0
+        proportions = regime_breakdown['percentage'].values / 100
+        if len(proportions) > 1 and np.all(proportions > 0):
+            entropy = -np.sum(proportions * np.log2(proportions))
+            max_entropy = np.log2(len(proportions))
+            balance_score = entropy / max_entropy if max_entropy > 0 else 0
+        else:
+            balance_score = 0
+        robustness_index = (0.70 * avg_stability + 0.30 * balance_score) * 100
+        return float(np.clip(robustness_index, 0, 100))
+
+    def compute(self, df: pd.DataFrame) -> RegimeRobustnessResult:
+        required_cols = ['open', 'high', 'low', 'close', self.price_column, self.target_column]
+        missing = set(required_cols) - set(df.columns)
+        if missing:
+            raise ValueError(f"Missing required columns: {missing}")
+        
+        print("\n  Computing Regime Robustness...")
+        print("  Computing trend regimes...")
+        trend = self.compute_trend_regime(df)
+        print("  Computing volatility regimes...")
+        vol = self.compute_volatility_regime(df)
+        print("  Computing volume regimes...")
+        volume = self.compute_volume_regime(df)
+        print("  Combining regimes...")
+        regimes = self.compute_combined_regime(df)
+        features = self.get_feature_columns(df)
+        print(f"  Found {len(features)} features")
+        
+        if not features:
+            raise ValueError("No features found for analysis")
+        
+        print("  Computing regime scores...")
+        scores = self.compute_regime_scores(df, regimes, features)
+        if scores.empty:
+            raise ValueError("No regime scores computed")
+        
+        print("  Computing regime statistics...")
+        stats = self.compute_regime_statistics(scores)
+        print("  Computing regime breakdown...")
+        breakdown = self.compute_regime_breakdown(regimes)
+        print("  Computing robustness index...")
+        robustness_index = self.compute_robustness_index(stats, breakdown)
+        
+        summary = {
+            'total_regimes': len(breakdown),
+            'total_features': len(features),
+            'average_feature_stability': float(stats['stability'].mean() * 100) if not stats.empty else 0,
+            'robustness_index': robustness_index,
+            'best_feature': stats.loc[stats['stability'].idxmax(), 'feature'] if not stats.empty else None,
+            'worst_feature': stats.loc[stats['stability'].idxmin(), 'feature'] if not stats.empty else None,
+            'total_samples': len(df),
+            'regime_breakdown': breakdown.to_dict('records')
+        }
+        
+        print(f"  Robustness Index: {robustness_index:.2f}/100")
+        
+        return RegimeRobustnessResult(
+            regime_scores=scores,
+            regime_statistics=stats,
+            regime_breakdown=breakdown,
+            robustness_index=robustness_index,
+            summary_statistics=summary
+        )

@@ -1,0 +1,236 @@
+# atlas/modules/module113_regime_robustness/module.py
+"""
+Module 113
+Regime Robustness
+
+Validates feature performance across different market regimes.
+
+Pipeline: compute regimes → compute regime scores → compute statistics →
+          robustness index → validation → report → export
+"""
+
+from typing import Optional, Dict, Any
+import pandas as pd
+from pathlib import Path
+
+from atlas.core.base_research_module import BaseResearchModule
+from atlas.framework.registry import AtlasRegistry
+
+from .engine import RegimeRobustnessEngine
+from .statistics import RegimeRobustnessStatisticsEngine
+from .validator import run_validation
+from .report import RegimeRobustnessReport
+from .exporter import RegimeRobustnessExporter
+
+
+class RegimeRobustnessResearch(BaseResearchModule):
+    """Main research module for regime robustness analysis."""
+    
+    MODULE_OUTPUT = "module113"
+    METADATA = RegimeRobustnessStatisticsEngine.METADATA
+    REQUIRED_TARGETS = ["future_breakout"]
+    
+    def __init__(
+        self,
+        registry: Optional[AtlasRegistry] = None,
+        trend_ema_period: int = 200,
+        atr_period: int = 14,
+        volume_thresholds: tuple = (0.33, 0.67),
+        min_samples_per_regime: int = 50,
+        price_column: str = "close",
+        target_column: str = "future_breakout"
+    ):
+        """
+        Initialize the regime robustness module.
+        
+        Args:
+            registry: Optional Atlas registry
+            trend_ema_period: EMA period for trend detection
+            atr_period: ATR period for volatility detection
+            volume_thresholds: Percentile thresholds for volume regimes
+            min_samples_per_regime: Minimum samples required per regime
+            price_column: Column name for price data
+            target_column: Column name for target variable
+        """
+        super().__init__(
+            module_name="Regime Robustness",
+            module_version=self.METADATA["version"],
+        )
+        
+        self.registry = registry or AtlasRegistry()
+        self.engine = RegimeRobustnessEngine(
+            trend_ema_period=trend_ema_period,
+            atr_period=atr_period,
+            volume_thresholds=volume_thresholds,
+            min_samples_per_regime=min_samples_per_regime,
+            price_column=price_column,
+            target_column=target_column
+        )
+        self.stats_engine = RegimeRobustnessStatisticsEngine()
+        self.result_data = None
+        self.statistics = None
+        self.feature_report = None
+        self.heatmap_report = None
+        self._output_dir = None
+    
+    def _register_pipeline_steps(self):
+        """Register pipeline steps."""
+        self.pipeline_steps = [
+            ("regime_robustness", self._compute_robustness),
+            ("statistics", self._compute_statistics),
+            ("validate", self._validate),
+            ("export", self._export_results),
+        ]
+    
+    def _prepare_data(self) -> Dict[str, Any]:
+        """Prepare data from DataFrame."""
+        return {"df": self.df}
+    
+    def _compute_robustness(self) -> Dict[str, Any]:
+        """Step 1: Compute regime robustness."""
+        self.logger.info("Step 1: Computing regime robustness")
+        
+        prepared = self._prepare_data()
+        
+        self.result_data = self.engine.compute(
+            df=prepared["df"]
+        )
+        
+        self.logger.metric(
+            "Robustness Index",
+            f"{self.result_data.robustness_index:.2f}/100"
+        )
+        self.logger.metric(
+            "Total Regimes",
+            str(self.result_data.summary_statistics["total_regimes"])
+        )
+        self.logger.metric(
+            "Total Features",
+            str(self.result_data.summary_statistics["total_features"])
+        )
+        self.logger.metric(
+            "Best Feature",
+            self.result_data.summary_statistics["best_feature"]
+        )
+        self.logger.success("Regime robustness computed")
+        
+        # Generate reports
+        self.feature_report = RegimeRobustnessReport.generate_feature_report(
+            self.result_data.regime_statistics,
+            top_n=10
+        )
+        
+        self.heatmap_report = RegimeRobustnessReport.generate_heatmap(
+            self.result_data.regime_scores
+        )
+        
+        return {
+            "robustness_index": self.result_data.robustness_index,
+            "total_regimes": self.result_data.summary_statistics["total_regimes"],
+            "total_features": self.result_data.summary_statistics["total_features"],
+            "best_feature": self.result_data.summary_statistics["best_feature"]
+        }
+    
+    def _compute_statistics(self) -> Dict[str, Any]:
+        """Step 2: Compute statistics."""
+        self.logger.info("Step 2: Computing statistics")
+        self.statistics = self.stats_engine.analyze(self.result_data)
+        
+        self.logger.metric(
+            "Avg Feature Stability",
+            f"{self.statistics.average_feature_stability:.2f}%"
+        )
+        self.logger.metric(
+            "Worst Feature",
+            self.statistics.worst_feature
+        )
+        self.logger.success("Statistics computed")
+        
+        return self.stats_engine.summary_dict(self.statistics)
+    
+    def _validate(self) -> Dict[str, Any]:
+        """Step 3: Validation."""
+        self.logger.info("Step 3: Validation")
+        passed = run_validation(self.result_data, self.statistics)
+        self.logger.success("Validation complete")
+        return {"software_validation_passed": passed}
+    
+    def _export_results(self) -> Dict[str, Any]:
+        """Step 4: Export."""
+        self.logger.info("Step 4: Export")
+        
+        # Register DataFrames as artifacts
+        self.result.artifacts["regime_scores"] = self.result_data.regime_scores
+        self.result.artifacts["regime_statistics"] = self.result_data.regime_statistics
+        self.result.artifacts["regime_breakdown"] = self.result_data.regime_breakdown
+        
+        # Store summary
+        summary_df = pd.DataFrame([self.result_data.summary_statistics])
+        self.result.artifacts["regime_summary"] = summary_df
+        
+        # Generate and register reports
+        main_report = RegimeRobustnessReport.generate(
+            self.statistics,
+            metadata=self.METADATA,
+            dataset_name=self.result.dataset_identifier,
+        )
+        self.result.artifacts["robustness_report"] = main_report
+        self.result.artifacts["feature_report"] = self.feature_report
+        self.result.artifacts["heatmap_report"] = self.heatmap_report
+        
+        # Export to files if output_dir exists
+        if self._output_dir is not None:
+            export_dir = self._output_dir / "exports"
+            export_dir.mkdir(parents=True, exist_ok=True)
+            
+            RegimeRobustnessExporter.export_regime_scores(
+                self.result_data.regime_scores,
+                export_dir / "regime_scores.csv"
+            )
+            
+            RegimeRobustnessExporter.export_regime_statistics(
+                self.result_data.regime_statistics,
+                export_dir / "regime_statistics.csv"
+            )
+            
+            RegimeRobustnessExporter.export_regime_breakdown(
+                self.result_data.regime_breakdown,
+                export_dir / "regime_breakdown.csv"
+            )
+            
+            RegimeRobustnessExporter.export_summary(
+                self.result_data.summary_statistics,
+                export_dir / "regime_summary.csv"
+            )
+            
+            RegimeRobustnessExporter.export_heatmap(
+                self.result_data.regime_scores,
+                export_dir / "heatmap.csv"
+            )
+        
+        self.logger.metric("Artifacts", str(len(self.result.artifacts)))
+        self.logger.success("Export complete")
+        
+        return {
+            "export_status": "complete",
+            "artifact_count": len(self.result.artifacts),
+            "robustness_index": self.result_data.robustness_index
+        }
+    
+    def compute(self) -> Dict[str, Any]:
+        """Run the full computation pipeline."""
+        self.logger.section("Regime Robustness Pipeline")
+        results = self.execute_pipeline()
+        self.result.status = "completed"
+        self.logger.success("Module 113 complete")
+        return results
+    
+    def run(self, filepath: str, output_dir=None):
+        """Run module on file."""
+        self._output_dir = Path(output_dir) if output_dir else None
+        return super().run(filepath, output_dir)
+    
+    def run_dataframe(self, df, dataset_id="in_memory", output_dir=None):
+        """Run module on DataFrame."""
+        self._output_dir = Path(output_dir) if output_dir else None
+        return super().run_dataframe(df, dataset_id, output_dir)

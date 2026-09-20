@@ -1,0 +1,57 @@
+# atlas/modules/module114_temporal_stability/statistics.py
+"""
+Module 114 - Temporal Stability Statistics
+"""
+
+from dataclasses import dataclass, asdict
+import pandas as pd
+from .engine import TemporalStabilityResult
+
+
+@dataclass
+class TemporalStabilityStatistics:
+    """High-level statistics from temporal stability analysis."""
+    total_features: int
+    windows: int
+    temporal_index: float
+    best_feature: str
+    worst_feature: str
+    average_score: float
+    median_score: float
+    average_drift: float
+    average_decay: float
+    scoring_metric: str
+
+
+class TemporalStabilityStatisticsEngine:
+    """Engine for generating high-level statistics."""
+    
+    METADATA = {
+        "module": 114,
+        "name": "Temporal Stability",
+        "version": "1.0.0",
+        "description": "Measures whether feature predictive power remains stable over time"
+    }
+    
+    def analyze(self, result: TemporalStabilityResult) -> TemporalStabilityStatistics:
+        """Analyze results and generate high-level statistics."""
+        return TemporalStabilityStatistics(
+            total_features=result.temporal_summary['total_features'],
+            windows=result.temporal_summary['windows'],
+            temporal_index=result.temporal_summary['temporal_index'],
+            best_feature=result.temporal_summary['best_feature'],
+            worst_feature=result.temporal_summary['worst_feature'],
+            average_score=result.temporal_summary['average_score'],
+            median_score=result.temporal_summary['median_score'],
+            average_drift=result.temporal_summary['average_drift'],
+            average_decay=result.temporal_summary['average_decay'],
+            scoring_metric=result.temporal_summary['scoring_metric']
+        )
+    
+    def summary_dataframe(self, stats: TemporalStabilityStatistics) -> pd.DataFrame:
+        """Convert statistics to DataFrame."""
+        return pd.DataFrame([asdict(stats)])
+    
+    def summary_dict(self, stats: TemporalStabilityStatistics) -> dict:
+        """Convert statistics to dictionary."""
+        return asdict(stats)

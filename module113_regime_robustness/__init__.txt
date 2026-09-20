@@ -1,0 +1,9 @@
+# atlas/modules/module113_regime_robustness/__init__.py
+"""
+Module 113
+Regime Robustness
+"""
+
+from .module import RegimeRobustnessResearch
+
+__all__ = ["RegimeRobustnessResearch"]

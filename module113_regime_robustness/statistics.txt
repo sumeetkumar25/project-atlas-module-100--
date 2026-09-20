@@ -1,0 +1,59 @@
+# atlas/modules/module113_regime_robustness/statistics.py
+"""
+Module 113 - Regime Robustness Statistics
+"""
+
+from dataclasses import dataclass, asdict
+import pandas as pd
+from .engine import RegimeRobustnessResult
+
+
+@dataclass
+class RegimeRobustnessStatistics:
+    """High-level statistics from regime robustness analysis."""
+    total_regimes: int
+    total_features: int
+    average_feature_stability: float
+    robustness_index: float
+    best_feature: str
+    worst_feature: str
+    total_samples: int
+    regime_counts: dict
+
+
+class RegimeRobustnessStatisticsEngine:
+    """Engine for generating high-level statistics."""
+    
+    METADATA = {
+        "module": 113,
+        "name": "Regime Robustness",
+        "version": "1.0.0",
+        "description": "Validates feature performance across different market regimes",
+        "required_targets": ["future_breakout"]
+    }
+    
+    def analyze(self, result: RegimeRobustnessResult) -> RegimeRobustnessStatistics:
+        """Analyze results and generate high-level statistics."""
+        # Convert regime breakdown to dict
+        regime_counts = {}
+        for row in result.summary_statistics['regime_breakdown']:
+            regime_counts[row['regime']] = int(row['count'])
+        
+        return RegimeRobustnessStatistics(
+            total_regimes=result.summary_statistics['total_regimes'],
+            total_features=result.summary_statistics['total_features'],
+            average_feature_stability=result.summary_statistics['average_feature_stability'],
+            robustness_index=result.summary_statistics['robustness_index'],
+            best_feature=result.summary_statistics['best_feature'],
+            worst_feature=result.summary_statistics['worst_feature'],
+            total_samples=result.summary_statistics['total_samples'],
+            regime_counts=regime_counts
+        )
+    
+    def summary_dataframe(self, stats: RegimeRobustnessStatistics) -> pd.DataFrame:
+        """Convert statistics to DataFrame."""
+        return pd.DataFrame([asdict(stats)])
+    
+    def summary_dict(self, stats: RegimeRobustnessStatistics) -> dict:
+        """Convert statistics to dictionary."""
+        return asdict(stats)

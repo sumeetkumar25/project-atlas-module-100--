@@ -1,0 +1,367 @@
+# atlas/modules/module114_temporal_stability/engine.py
+"""
+Module 114 - Temporal Stability Engine
+
+Measures whether feature predictive power remains stable over time.
+
+Tests:
+  1. Window Creation: Split data into chronological windows
+  2. Window Scores: Compute feature performance in each window
+  3. Temporal Statistics: Mean, std, CV, worst, best
+  4. Trend Drift: Detect improving or degrading features
+  5. Stability Score: Combined metric (0-100)
+  6. Decay Detection: Measure performance degradation
+
+Metrics:
+  - ROC AUC (default)
+  - Correlation
+  - Mutual Information
+"""
+
+import numpy as np
+import pandas as pd
+from dataclasses import dataclass
+from typing import Optional, Dict, Any, List, Tuple, Callable
+from sklearn.metrics import roc_auc_score, mutual_info_score
+from scipy import stats
+from scipy.stats import spearmanr
+
+
+@dataclass
+class TemporalStabilityResult:
+    """Results from temporal stability analysis."""
+    window_scores: pd.DataFrame
+    temporal_statistics: pd.DataFrame
+    window_summary: pd.DataFrame
+    temporal_summary: Dict[str, Any]
+    temporal_index: float
+    stability_scores: pd.DataFrame
+
+
+class TemporalStabilityEngine:
+    """Core engine for temporal stability analysis."""
+
+    # Columns to ignore (not features)
+    IGNORE_COLS = {
+        "timestamp", "date", "time", "index",
+        "open", "high", "low", "close", "volume",
+        "future_breakout"
+    }
+
+    def __init__(
+        self,
+        scoring_metric: str = "auc",
+        n_windows: int = 5,
+        min_samples: int = 200,
+        price_column: str = "close",
+        target_column: str = "future_breakout"
+    ):
+        """
+        Initialize the temporal stability engine.
+        
+        Args:
+            scoring_metric: Metric to use ('auc', 'correlation', 'mutual_information')
+            n_windows: Number of chronological windows
+            min_samples: Minimum samples per window
+            price_column: Column name for price data
+            target_column: Column name for target variable
+        """
+        self.scoring_metric = scoring_metric
+        self.n_windows = n_windows
+        self.min_samples = min_samples
+        self.price_column = price_column
+        self.target_column = target_column
+
+    def create_windows(self, df: pd.DataFrame) -> List[pd.DataFrame]:
+        """
+        Split dataset into equal chronological windows.
+        
+        Returns:
+            List of window DataFrames
+        """
+        # Ensure chronological order
+        if 'timestamp' in df.columns:
+            df = df.sort_values('timestamp').reset_index(drop=True)
+        else:
+            df = df.reset_index(drop=True)
+        
+        n = len(df)
+        window_size = n // self.n_windows
+        
+        windows = []
+        for i in range(self.n_windows):
+            start = i * window_size
+            if i == self.n_windows - 1:
+                end = n
+            else:
+                end = (i + 1) * window_size
+            
+            windows.append(df.iloc[start:end].copy())
+        
+        return windows
+
+    def get_feature_columns(self, df: pd.DataFrame) -> List[str]:
+        """
+        Identify feature columns (exclude metadata and target).
+        """
+        features = [
+            col for col in df.columns
+            if col not in self.IGNORE_COLS
+            and pd.api.types.is_numeric_dtype(df[col])
+            and df[col].nunique() > 1
+        ]
+        return features
+
+    def compute_window_score(
+        self,
+        df: pd.DataFrame,
+        feature: str,
+        y: np.ndarray
+    ) -> float:
+        """
+        Compute feature score within a window.
+        
+        Returns:
+            Score (0-1 for normalized metrics)
+        """
+        X = df[feature].values
+        
+        # Skip if constant
+        if np.std(X) < 1e-12:
+            return 0.0
+        
+        # Skip if target is constant
+        if len(np.unique(y)) < 2:
+            return 0.0
+        
+        try:
+            if self.scoring_metric == "auc":
+                score = roc_auc_score(y, X)
+            elif self.scoring_metric == "correlation":
+                score = abs(np.corrcoef(X, y)[0, 1])
+                if np.isnan(score):
+                    score = 0.0
+            elif self.scoring_metric == "mutual_information":
+                # Discretize for MI
+                n_bins = min(10, len(np.unique(X)))
+                X_disc = pd.qcut(X, q=n_bins, labels=False, duplicates='drop')
+                if len(np.unique(X_disc)) > 1:
+                    score = mutual_info_score(X_disc, y)
+                    score = min(1.0, score / 0.5)  # Normalize
+                else:
+                    score = 0.0
+            else:
+                score = roc_auc_score(y, X)
+            
+            return float(np.clip(score, 0, 1))
+        except:
+            return 0.0
+
+    def compute_window_scores(
+        self,
+        windows: List[pd.DataFrame],
+        features: List[str]
+    ) -> pd.DataFrame:
+        """
+        Compute scores for all features across all windows.
+        
+        Returns:
+            DataFrame with window, feature, score, samples, positive_ratio
+        """
+        rows = []
+        
+        for window_idx, df in enumerate(windows):
+            y = df[self.target_column].values
+            
+            if len(df) < self.min_samples:
+                continue
+            
+            positive_ratio = np.mean(y) if len(y) > 0 else 0
+            
+            for feature in features:
+                if feature not in df.columns:
+                    continue
+                
+                score = self.compute_window_score(df, feature, y)
+                
+                rows.append({
+                    'window': window_idx + 1,
+                    'feature': feature,
+                    'score': score,
+                    'samples': len(df),
+                    'positive_ratio': positive_ratio
+                })
+        
+        return pd.DataFrame(rows)
+
+    def compute_temporal_statistics(
+        self,
+        window_scores: pd.DataFrame
+    ) -> pd.DataFrame:
+        """
+        Compute per-feature temporal statistics.
+        
+        Returns:
+            DataFrame with temporal statistics
+        """
+        stats_rows = []
+        
+        for feature in window_scores['feature'].unique():
+            feature_scores = window_scores[window_scores['feature'] == feature]
+            scores = feature_scores['score'].values
+            
+            if len(scores) < 2:
+                continue
+            
+            mean_score = np.mean(scores)
+            std_score = np.std(scores)
+            cv_score = std_score / (mean_score + 1e-12)
+            
+            # Trend drift
+            x = np.arange(len(scores))
+            slope, intercept = np.polyfit(x, scores, 1)
+            
+            # Decay (last - first)
+            decay = scores[-1] - scores[0]
+            
+            # Stability
+            stability = 1 - (std_score / (mean_score + 1e-12))
+            stability = np.clip(stability, 0, 1)
+            
+            # Temporal score
+            temporal_score = (
+                0.40 * stability +
+                0.30 * (1 - min(1, abs(decay))) +
+                0.20 * mean_score +
+                0.10 * (1 - min(1, cv_score))
+            ) * 100
+            temporal_score = np.clip(temporal_score, 0, 100)
+            
+            stats_rows.append({
+                'feature': feature,
+                'mean_score': float(mean_score),
+                'std_score': float(std_score),
+                'cv_score': float(cv_score),
+                'min_score': float(np.min(scores)),
+                'max_score': float(np.max(scores)),
+                'slope': float(slope),
+                'decay': float(decay),
+                'stability': float(stability),
+                'temporal_score': float(temporal_score),
+                'n_windows': len(scores)
+            })
+        
+        return pd.DataFrame(stats_rows)
+
+    def compute_window_summary(self, window_scores: pd.DataFrame) -> pd.DataFrame:
+        """
+        Compute summary per window.
+        
+        Returns:
+            DataFrame with window summaries
+        """
+        summaries = []
+        
+        for window in window_scores['window'].unique():
+            window_data = window_scores[window_scores['window'] == window]
+            
+            summaries.append({
+                'window': window,
+                'mean_score': window_data['score'].mean(),
+                'std_score': window_data['score'].std(),
+                'max_score': window_data['score'].max(),
+                'min_score': window_data['score'].min(),
+                'n_features': len(window_data),
+                'samples': window_data['samples'].iloc[0] if not window_data.empty else 0
+            })
+        
+        return pd.DataFrame(summaries)
+
+    def compute_temporal_index(
+        self,
+        temporal_stats: pd.DataFrame
+    ) -> float:
+        """
+        Compute overall temporal stability index.
+        
+        Returns:
+            Temporal index (0-100)
+        """
+        if temporal_stats.empty:
+            return 0.0
+        
+        # Average of temporal scores
+        return float(temporal_stats['temporal_score'].mean())
+
+    def compute(
+        self,
+        df: pd.DataFrame
+    ) -> TemporalStabilityResult:
+        """
+        Main computation method.
+        """
+        # Validate input
+        required_cols = [self.price_column, self.target_column]
+        missing = set(required_cols) - set(df.columns)
+        if missing:
+            raise ValueError(f"Missing required columns: {missing}")
+        
+        print(f"\n  Computing Temporal Stability (metric={self.scoring_metric})...")
+        
+        # Step 1: Create windows
+        print("  Creating chronological windows...")
+        windows = self.create_windows(df)
+        print(f"  Created {len(windows)} windows")
+        
+        # Step 2: Get features
+        features = self.get_feature_columns(df)
+        print(f"  Found {len(features)} features")
+        
+        if not features:
+            raise ValueError("No features found for analysis")
+        
+        # Step 3: Compute window scores
+        print("  Computing window scores...")
+        window_scores = self.compute_window_scores(windows, features)
+        
+        if window_scores.empty:
+            raise ValueError("No window scores computed")
+        
+        print(f"  Computed {len(window_scores)} window-feature scores")
+        
+        # Step 4: Compute temporal statistics
+        print("  Computing temporal statistics...")
+        temporal_stats = self.compute_temporal_statistics(window_scores)
+        
+        # Step 5: Compute window summary
+        print("  Computing window summary...")
+        window_summary = self.compute_window_summary(window_scores)
+        
+        # Step 6: Compute temporal index
+        print("  Computing temporal index...")
+        temporal_index = self.compute_temporal_index(temporal_stats)
+        
+        # Summary
+        summary = {
+            'total_features': len(features),
+            'windows': self.n_windows,
+            'temporal_index': temporal_index,
+            'best_feature': temporal_stats.loc[temporal_stats['temporal_score'].idxmax(), 'feature'] if not temporal_stats.empty else None,
+            'worst_feature': temporal_stats.loc[temporal_stats['temporal_score'].idxmin(), 'feature'] if not temporal_stats.empty else None,
+            'average_score': temporal_stats['temporal_score'].mean() if not temporal_stats.empty else 0,
+            'median_score': temporal_stats['temporal_score'].median() if not temporal_stats.empty else 0,
+            'average_drift': temporal_stats['slope'].mean() if not temporal_stats.empty else 0,
+            'average_decay': temporal_stats['decay'].mean() if not temporal_stats.empty else 0,
+            'scoring_metric': self.scoring_metric
+        }
+        
+        print(f"  Temporal Index: {temporal_index:.2f}/100")
+        
+        return TemporalStabilityResult(
+            window_scores=window_scores,
+            temporal_statistics=temporal_stats,
+            window_summary=window_summary,
+            temporal_summary=summary,
+            temporal_index=temporal_index,
+            stability_scores=temporal_stats[['feature', 'temporal_score', 'stability', 'slope', 'decay']] if not temporal_stats.empty else pd.DataFrame()
+        )

@@ -1,0 +1,53 @@
+# atlas/modules/module113_regime_robustness/exporter.py
+"""
+Module 113 - Regime Robustness Exporter
+"""
+
+import pandas as pd
+from pathlib import Path
+import json
+
+
+class RegimeRobustnessExporter:
+    """Exporter for regime robustness results."""
+    
+    @staticmethod
+    def export_regime_scores(df: pd.DataFrame, filepath: str):
+        """Export regime scores to CSV."""
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(path, index=False)
+    
+    @staticmethod
+    def export_regime_statistics(df: pd.DataFrame, filepath: str):
+        """Export regime statistics to CSV."""
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(path, index=False)
+    
+    @staticmethod
+    def export_regime_breakdown(df: pd.DataFrame, filepath: str):
+        """Export regime breakdown to CSV."""
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(path, index=False)
+    
+    @staticmethod
+    def export_summary(summary: dict, filepath: str):
+        """Export summary to CSV."""
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        df = pd.DataFrame([summary])
+        df.to_csv(path, index=False)
+    
+    @staticmethod
+    def export_heatmap(scores: pd.DataFrame, filepath: str):
+        """Export heatmap to CSV."""
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        heatmap = scores.pivot_table(
+            index='feature',
+            columns='regime',
+            values='score'
+        )
+        heatmap.to_csv(path)
