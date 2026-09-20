@@ -1,0 +1,397 @@
+# atlas/modules/module119_feature_quality/test_module.py
+"""
+Module 119 - Integration Test
+
+Tests feature quality engine, statistics, validator, report, and pipeline.
+"""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+
+import numpy as np
+import pandas as pd
+
+from atlas.modules.module119_feature_quality.engine import FeatureQualityEngine
+from atlas.modules.module119_feature_quality.statistics import FeatureQualityStatisticsEngine
+from atlas.modules.module119_feature_quality.validator import run_validation
+from atlas.modules.module119_feature_quality.module import FeatureQualityResearch
+
+
+def create_test_data(n=500, seed=42):
+    """Create synthetic test data with various quality levels."""
+    np.random.seed(seed)
+    
+    # High quality feature
+    high_quality = np.random.randn(n) * 10 + 50
+    
+    # Feature with missing values (moderate quality)
+    high_quality_missing = high_quality.copy()
+    high_quality_missing[:50] = np.nan
+    
+    # Feature with outliers (moderate quality)
+    outlier_feature = np.random.randn(n) * 5 + 50
+    outlier_feature[:10] = 500
+    
+    # Feature with near-zero variance (low quality - constant)
+    constant_feature = np.ones(n) * 5
+    
+    # Feature with high skew (low quality)
+    skewed_feature = np.random.exponential(2, n) * 10 + 10
+    
+    # Intentionally create a FAIL feature
+    # Feature with high missing values (60% missing)
+    fail_feature_missing = np.random.randn(n) * 10 + 50
+    fail_feature_missing[:int(n * 0.6)] = np.nan
+    
+    # Feature with both high skew and many outliers
+    fail_feature_bad = np.random.exponential(5, n) * 10 + 10
+    fail_feature_bad[:20] = 1000
+    
+    df = pd.DataFrame({
+        'timestamp': pd.date_range('2020-01-01', periods=n, freq='1h'),
+        'open': 100 + np.random.randn(n) * 10,
+        'high': 100 + np.random.randn(n) * 10 + np.abs(np.random.randn(n) * 2),
+        'low': 100 + np.random.randn(n) * 10 - np.abs(np.random.randn(n) * 2),
+        'close': 100 + np.random.randn(n) * 10,
+        'volume': np.random.randn(n) * 100 + 1000,
+        'high_quality': high_quality,
+        'high_quality_missing': high_quality_missing,
+        'outlier_feature': outlier_feature,
+        'constant_feature': constant_feature,
+        'skewed_feature': skewed_feature,
+        'fail_feature_missing': fail_feature_missing,
+        'fail_feature_bad': fail_feature_bad,
+        'future_breakout': np.random.randint(0, 2, n)
+    })
+    
+    return df
+
+
+def test_engine_feature_detection():
+    """Test 1: Feature detection."""
+    print("\n" + "=" * 60)
+    print("TEST 1: Feature Detection")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeatureQualityEngine()
+    
+    features = engine.get_feature_columns(df)
+    
+    # Should detect these features
+    assert 'high_quality' in features
+    assert 'high_quality_missing' in features
+    assert 'outlier_feature' in features
+    assert 'skewed_feature' in features
+    assert 'fail_feature_missing' in features
+    assert 'fail_feature_bad' in features
+    
+    # Constant feature should be excluded (nunique == 1)
+    assert 'constant_feature' not in features
+    
+    # OHLCV columns should be excluded
+    assert 'close' not in features
+    assert 'future_breakout' not in features
+    
+    print(f"  Found {len(features)} features")
+    print("  ✓ Feature detection test passed")
+    return True
+
+
+def test_engine_missing_percentage():
+    """Test 2: Missing percentage computation."""
+    print("\n" + "=" * 60)
+    print("TEST 2: Missing Percentage")
+    print("=" * 60)
+    
+    engine = FeatureQualityEngine()
+    
+    series = pd.Series([1, 2, np.nan, 4, 5, np.nan])
+    missing_pct = engine.compute_missing_percentage(series)
+    assert missing_pct == 33.33333333333333
+    
+    series = pd.Series([1, 2, 3, 4, 5])
+    missing_pct = engine.compute_missing_percentage(series)
+    assert missing_pct == 0.0
+    
+    print("  ✓ Missing percentage test passed")
+    return True
+
+
+def test_engine_infinite_count():
+    """Test 3: Infinite count computation."""
+    print("\n" + "=" * 60)
+    print("TEST 3: Infinite Count")
+    print("=" * 60)
+    
+    engine = FeatureQualityEngine()
+    
+    series = pd.Series([1, 2, np.inf, 4, -np.inf, 5])
+    inf_count = engine.compute_infinite_count(series)
+    assert inf_count == 2
+    
+    series = pd.Series([1, 2, 3, 4, 5])
+    inf_count = engine.compute_infinite_count(series)
+    assert inf_count == 0
+    
+    print("  ✓ Infinite count test passed")
+    return True
+
+
+def test_engine_outlier_percentage():
+    """Test 4: Outlier percentage computation."""
+    print("\n" + "=" * 60)
+    print("TEST 4: Outlier Percentage")
+    print("=" * 60)
+    
+    engine = FeatureQualityEngine(outlier_threshold=1.5)
+    
+    # Normal data
+    series = pd.Series(np.random.randn(100) * 10 + 50)
+    outlier_pct = engine.compute_outlier_percentage(series)
+    assert 0 <= outlier_pct <= 5
+    
+    # Data with outliers
+    series = pd.Series(np.random.randn(100) * 10 + 50)
+    series.iloc[0] = 500
+    outlier_pct = engine.compute_outlier_percentage(series)
+    assert outlier_pct > 0
+    
+    print("  ✓ Outlier percentage test passed")
+    return True
+
+
+def test_engine_entropy():
+    """Test 5: Entropy computation."""
+    print("\n" + "=" * 60)
+    print("TEST 5: Entropy")
+    print("=" * 60)
+    
+    engine = FeatureQualityEngine()
+    
+    # Uniform distribution (high entropy)
+    series = pd.Series(np.random.uniform(0, 100, 1000))
+    entropy = engine.compute_entropy(series)
+    assert entropy > 0.5
+    
+    # Constant distribution (low entropy)
+    series = pd.Series(np.ones(1000))
+    entropy = engine.compute_entropy(series)
+    assert entropy < 0.1
+    
+    print("  ✓ Entropy test passed")
+    return True
+
+
+def test_engine_quality_scores():
+    """Test 6: Quality score computation."""
+    print("\n" + "=" * 60)
+    print("TEST 6: Quality Score")
+    print("=" * 60)
+    
+    engine = FeatureQualityEngine()
+    
+    # High quality metrics
+    high_metrics = {
+        'variance': 100.0,
+        'missing_pct': 0.0,
+        'skewness': 0.0,
+        'kurtosis': 0.0,
+        'outlier_pct': 0.0,
+        'entropy': 0.8
+    }
+    score = engine.compute_quality_score(high_metrics)
+    assert score > 0.8
+    
+    # Low quality metrics
+    low_metrics = {
+        'variance': 1e-10,
+        'missing_pct': 50.0,
+        'skewness': 5.0,
+        'kurtosis': 10.0,
+        'outlier_pct': 20.0,
+        'entropy': 0.0
+    }
+    score = engine.compute_quality_score(low_metrics)
+    assert score < 0.4
+    
+    print("  ✓ Quality score test passed")
+    return True
+
+
+def test_engine_decisions():
+    """Test 7: Decision making."""
+    print("\n" + "=" * 60)
+    print("TEST 7: Decision Making")
+    print("=" * 60)
+    
+    engine = FeatureQualityEngine(
+        pass_threshold=0.80,
+        warning_threshold=0.60
+    )
+    
+    assert engine.make_decision(0.90) == "PASS"
+    assert engine.make_decision(0.70) == "WARNING"
+    assert engine.make_decision(0.50) == "FAIL"
+    assert engine.make_decision(0.80) == "PASS"
+    assert engine.make_decision(0.60) == "WARNING"
+    assert engine.make_decision(0.59) == "FAIL"
+    
+    print("  ✓ Decision making test passed")
+    return True
+
+
+def test_engine_compute():
+    """Test 8: Full engine computation."""
+    print("\n" + "=" * 60)
+    print("TEST 8: Full Engine Computation")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeatureQualityEngine()
+    
+    result = engine.compute(df)
+    
+    # Verify quality table exists
+    assert not result.quality_table.empty
+    
+    # Verify at least one feature passed
+    assert len(result.passed_features) >= 1
+    
+    # Verify the sum of decisions equals total features
+    # This validates correctness without assuming a particular score distribution
+    assert (
+        len(result.passed_features)
+        + len(result.warning_features)
+        + len(result.failed_features)
+        == result.summary_statistics["total_features"]
+    )
+    
+    # Verify average quality is reasonable
+    assert result.summary_statistics["average_quality"] > 0
+    
+    print(f"  PASS: {len(result.passed_features)}")
+    print(f"  WARNING: {len(result.warning_features)}")
+    print(f"  FAIL: {len(result.failed_features)}")
+    print(f"  Avg Quality: {result.summary_statistics['average_quality']:.3f}")
+    print("  ✓ Full engine test passed")
+    return True
+
+
+def test_statistics():
+    """Test 9: Statistics engine."""
+    print("\n" + "=" * 60)
+    print("TEST 9: Statistics Engine")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeatureQualityEngine()
+    stats_engine = FeatureQualityStatisticsEngine()
+    
+    result = engine.compute(df)
+    stats = stats_engine.analyze(result)
+    
+    assert stats.total_features == result.summary_statistics['total_features']
+    assert stats.passed_count == len(result.passed_features)
+    assert stats.failed_count == len(result.failed_features)
+    assert stats.best_feature is not None
+    
+    print(f"  Total: {stats.total_features}")
+    print(f"  PASS: {stats.passed_count}")
+    print(f"  FAIL: {stats.failed_count}")
+    print("  ✓ Statistics test passed")
+    return True
+
+
+def test_validator():
+    """Test 10: Validator."""
+    print("\n" + "=" * 60)
+    print("TEST 10: Validator")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeatureQualityEngine()
+    stats_engine = FeatureQualityStatisticsEngine()
+    
+    result = engine.compute(df)
+    stats = stats_engine.analyze(result)
+    
+    passed = run_validation(result, stats)
+    assert passed
+    
+    print("  ✓ Validator test passed")
+    return True
+
+
+def test_pipeline():
+    """Test 11: Full pipeline."""
+    print("\n" + "=" * 60)
+    print("TEST 11: Full Pipeline")
+    print("=" * 60)
+    
+    df = create_test_data()
+    
+    research = FeatureQualityResearch()
+    
+    result = research.run_dataframe(df, dataset_id="pipeline_test")
+    
+    assert result.status == "completed"
+    assert "quality_table" in result.artifacts
+    assert "passed_features" in result.artifacts
+    assert "warning_features" in result.artifacts
+    assert "failed_features" in result.artifacts
+    assert "feature_quality_report" in result.artifacts
+    assert "quality_report" in result.artifacts
+    assert result.statistics.get("software_validation_passed") == True
+    
+    print(f"  PASS: {result.statistics.get('passed_count')}")
+    print(f"  FAIL: {result.statistics.get('failed_count')}")
+    print("  ✓ Full pipeline test passed")
+    return True
+
+
+def main():
+    """Run all tests."""
+    print("\n" + "=" * 70)
+    print("PROJECT ATLAS - MODULE 119 INTEGRATION TEST")
+    print("Feature Quality")
+    print("=" * 70)
+    
+    results = {}
+    
+    results["feature_detection"] = test_engine_feature_detection()
+    results["missing_percentage"] = test_engine_missing_percentage()
+    results["infinite_count"] = test_engine_infinite_count()
+    results["outlier_percentage"] = test_engine_outlier_percentage()
+    results["entropy"] = test_engine_entropy()
+    results["quality_scores"] = test_engine_quality_scores()
+    results["decisions"] = test_engine_decisions()
+    results["full_engine"] = test_engine_compute()
+    results["statistics"] = test_statistics()
+    results["validator"] = test_validator()
+    results["pipeline"] = test_pipeline()
+    
+    print("\n" + "=" * 70)
+    print("RESULTS")
+    print("=" * 70)
+    
+    for name, ok in results.items():
+        print(f"  {'✓' if ok else '✗'} {name}")
+    
+    passed = sum(results.values())
+    total = len(results)
+    
+    print(f"\n  {passed}/{total} tests passed")
+    
+    if passed == total:
+        print("\n✓ Module 119 VALIDATED")
+        return 0
+    else:
+        print("\n⚠ Some tests failed")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

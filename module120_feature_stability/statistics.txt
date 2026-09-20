@@ -1,0 +1,73 @@
+# atlas/modules/module120_feature_stability/statistics.py
+"""
+Module 120 - Feature Stability Statistics
+"""
+
+from dataclasses import dataclass, asdict
+import pandas as pd
+from .engine import FeatureStabilityResult
+
+
+@dataclass
+class FeatureStabilityStatistics:
+    """High-level statistics from feature stability analysis."""
+    total_features: int
+    passed_count: int
+    warning_count: int
+    failed_count: int
+    passed_percentage: float
+    warning_percentage: float
+    failed_percentage: float
+    average_stability: float
+    median_stability: float
+    min_stability: float
+    max_stability: float
+    best_feature: str
+    worst_feature: str
+    best_score: float
+    worst_score: float
+    average_drift: float
+    average_ks: float
+    average_entropy_drift: float
+
+
+class FeatureStabilityStatisticsEngine:
+    """Engine for generating high-level statistics."""
+    
+    METADATA = {
+        "module": 120,
+        "name": "Feature Stability",
+        "version": "1.0.0",
+        "description": "Analyzes temporal stability of features using rolling windows"
+    }
+    
+    def analyze(self, result: FeatureStabilityResult) -> FeatureStabilityStatistics:
+        """Analyze results and generate high-level statistics."""
+        return FeatureStabilityStatistics(
+            total_features=result.summary_statistics['total_features'],
+            passed_count=result.summary_statistics['passed_count'],
+            warning_count=result.summary_statistics['warning_count'],
+            failed_count=result.summary_statistics['failed_count'],
+            passed_percentage=result.summary_statistics['passed_percentage'],
+            warning_percentage=result.summary_statistics['warning_percentage'],
+            failed_percentage=result.summary_statistics['failed_percentage'],
+            average_stability=result.summary_statistics['average_stability'],
+            median_stability=result.summary_statistics['median_stability'],
+            min_stability=result.summary_statistics['min_stability'],
+            max_stability=result.summary_statistics['max_stability'],
+            best_feature=result.summary_statistics['best_feature'],
+            worst_feature=result.summary_statistics['worst_feature'],
+            best_score=result.summary_statistics['best_score'],
+            worst_score=result.summary_statistics['worst_score'],
+            average_drift=result.summary_statistics['average_drift'],
+            average_ks=result.summary_statistics['average_ks'],
+            average_entropy_drift=result.summary_statistics['average_entropy_drift']
+        )
+    
+    def summary_dataframe(self, stats: FeatureStabilityStatistics) -> pd.DataFrame:
+        """Convert statistics to DataFrame."""
+        return pd.DataFrame([asdict(stats)])
+    
+    def summary_dict(self, stats: FeatureStabilityStatistics) -> dict:
+        """Convert statistics to dictionary."""
+        return asdict(stats)

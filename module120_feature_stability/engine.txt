@@ -1,0 +1,552 @@
+# atlas/modules/module120_feature_stability/engine.py
+"""
+Module 120 - Feature Stability Engine
+
+Analyzes temporal stability of features using rolling windows.
+
+Metrics:
+  1. Rolling Mean Stability
+  2. Rolling Variance Stability
+  3. Rolling Skewness
+  4. Rolling Kurtosis
+  5. Distribution Drift (KS Test)
+  6. Entropy Drift
+  7. Missing Stability
+  8. Outlier Stability
+
+Output: Stability score and PASS/WARNING/FAIL decision for each feature.
+"""
+
+import numpy as np
+import pandas as pd
+from dataclasses import dataclass
+from typing import Optional, Dict, Any, List, Tuple
+from scipy import stats
+import warnings
+warnings.filterwarnings('ignore')
+
+
+@dataclass
+class FeatureStabilityResult:
+    """Results from feature stability analysis."""
+    stability_table: pd.DataFrame
+    passed_features: List[str]
+    warning_features: List[str]
+    failed_features: List[str]
+    summary_statistics: Dict[str, Any]
+
+
+class FeatureStabilityEngine:
+    """Core engine for feature stability analysis."""
+
+    # Columns to ignore (not features)
+    IGNORE_COLS = {
+        "timestamp", "date", "time", "index",
+        "open", "high", "low", "close", "volume",
+        "future_breakout"
+    }
+
+    # Stability thresholds
+    PASS_THRESHOLD = 0.80
+    WARNING_THRESHOLD = 0.60
+
+    # Default window size
+    DEFAULT_WINDOW = 50
+
+    # Outlier threshold (IQR multiplier)
+    OUTLIER_THRESHOLD = 1.5
+
+    def __init__(
+        self,
+        pass_threshold: float = 0.80,
+        warning_threshold: float = 0.60,
+        window: int = 50,
+        outlier_threshold: float = 1.5
+    ):
+        """
+        Initialize the feature stability engine.
+        
+        Args:
+            pass_threshold: Score above this threshold = PASS
+            warning_threshold: Score above this threshold = WARNING
+            window: Rolling window size for stability metrics
+            outlier_threshold: IQR multiplier for outlier detection
+        """
+        self.pass_threshold = pass_threshold
+        self.warning_threshold = warning_threshold
+        self.window = window
+        self.outlier_threshold = outlier_threshold
+
+    def get_feature_columns(self, df: pd.DataFrame) -> List[str]:
+        """
+        Identify feature columns (exclude metadata and target).
+        """
+        features = [
+            c for c in df.columns
+            if c not in self.IGNORE_COLS
+            and pd.api.types.is_numeric_dtype(df[c])
+            and df[c].nunique() > 1
+        ]
+        return features
+
+    def compute_rolling_stability(
+        self,
+        series: pd.Series,
+        metric_func,
+        n_bins: int = 20
+    ) -> Dict[str, float]:
+        """
+        Compute rolling stability metrics with improved normalization.
+        
+        Args:
+            series: Input series
+            metric_func: Function to compute rolling metric
+            n_bins: Number of bins for histogram entropy
+            
+        Returns:
+            Dictionary with stability metrics
+        """
+        clean_series = series.dropna()
+        if len(clean_series) < self.window * 2:
+            return {
+                'mean_drift': 0.0,
+                'max_drift': 0.0,
+                'std_metric': 0.0,
+                'drift_ratio': 0.0
+            }
+        
+        # Compute rolling metric
+        rolling_metric = metric_func(clean_series)
+        rolling_metric = rolling_metric.dropna()
+        
+        if len(rolling_metric) < 2:
+            return {
+                'mean_drift': 0.0,
+                'max_drift': 0.0,
+                'std_metric': 0.0,
+                'drift_ratio': 0.0
+            }
+        
+        # Compute drift
+        first_half = rolling_metric.iloc[:len(rolling_metric)//2]
+        second_half = rolling_metric.iloc[len(rolling_metric)//2:]
+        
+        # Normalize mean_drift by the variability of the rolling statistic
+        mean_first = first_half.mean()
+        mean_second = second_half.mean()
+        mean_drift_raw = abs(mean_first - mean_second)
+        
+        # Normalize by std of rolling metric
+        std_metric = rolling_metric.std()
+        if std_metric > 0:
+            mean_drift = mean_drift_raw / (std_metric + 1e-12)
+        else:
+            mean_drift = 0.0
+        
+        # Normalize max_drift by std
+        max_drift_raw = abs(rolling_metric.max() - rolling_metric.min())
+        if std_metric > 0:
+            max_drift = max_drift_raw / (std_metric + 1e-12)
+        else:
+            max_drift = 0.0
+        
+        # Drift ratio (mean_drift / std)
+        drift_ratio = mean_drift / (1.0 + 1e-12)
+        
+        return {
+            'mean_drift': float(mean_drift),
+            'max_drift': float(max_drift),
+            'std_metric': float(std_metric),
+            'drift_ratio': float(drift_ratio)
+        }
+
+    def compute_mean_stability(self, series: pd.Series) -> Dict[str, float]:
+        """Compute rolling mean stability."""
+        return self.compute_rolling_stability(series, lambda x: x.rolling(self.window).mean())
+
+    def compute_variance_stability(self, series: pd.Series) -> Dict[str, float]:
+        """
+        Compute rolling variance stability using relative drift.
+        
+        Normalizes variance drift by the variability of the rolling variance.
+        """
+        clean_series = series.dropna()
+        if len(clean_series) < self.window * 2:
+            return {
+                'mean_drift': 0.0,
+                'max_drift': 0.0,
+                'std_metric': 0.0,
+                'drift_ratio': 0.0
+            }
+        
+        rolling_var = clean_series.rolling(self.window).var()
+        rolling_var = rolling_var.dropna()
+        
+        if len(rolling_var) < 2:
+            return {
+                'mean_drift': 0.0,
+                'max_drift': 0.0,
+                'std_metric': 0.0,
+                'drift_ratio': 0.0
+            }
+        
+        # Compute drift using normalized measures
+        first_half = rolling_var.iloc[:len(rolling_var)//2]
+        second_half = rolling_var.iloc[len(rolling_var)//2:]
+        
+        mean_first = first_half.mean()
+        mean_second = second_half.mean()
+        mean_drift_raw = abs(mean_first - mean_second)
+        
+        # Normalize by std of rolling variance
+        std_var = rolling_var.std()
+        if std_var > 0:
+            mean_drift = mean_drift_raw / (std_var + 1e-12)
+        else:
+            mean_drift = 0.0
+        
+        # Normalize max_drift by std
+        max_drift_raw = abs(rolling_var.max() - rolling_var.min())
+        if std_var > 0:
+            max_drift = max_drift_raw / (std_var + 1e-12)
+        else:
+            max_drift = 0.0
+        
+        # Coefficient of variation of rolling variance
+        std_metric = rolling_var.std() / (rolling_var.mean() + 1e-12)
+        
+        return {
+            'mean_drift': float(mean_drift),
+            'max_drift': float(max_drift),
+            'std_metric': float(std_metric),
+            'drift_ratio': float(mean_drift / (1.0 + 1e-12))
+        }
+
+    def compute_skew_stability(self, series: pd.Series) -> Dict[str, float]:
+        """Compute rolling skewness stability."""
+        return self.compute_rolling_stability(series, lambda x: x.rolling(self.window).skew())
+
+    def compute_kurtosis_stability(self, series: pd.Series) -> Dict[str, float]:
+        """Compute rolling kurtosis stability."""
+        return self.compute_rolling_stability(series, lambda x: x.rolling(self.window).kurt())
+
+    def compute_ks_drift(self, series: pd.Series) -> Dict[str, float]:
+        """
+        Compute Kolmogorov-Smirnov drift between first and second half.
+        """
+        clean_series = series.dropna()
+        if len(clean_series) < self.window * 2:
+            return {'ks_statistic': 0.0, 'p_value': 1.0, 'ks_drift': 0.0}
+        
+        mid = len(clean_series) // 2
+        first_half = clean_series.iloc[:mid]
+        second_half = clean_series.iloc[mid:]
+        
+        ks_stat, p_value = stats.ks_2samp(first_half, second_half)
+        
+        return {
+            'ks_statistic': float(ks_stat),
+            'p_value': float(p_value),
+            'ks_drift': float(ks_stat)  # Normalized to [0, 1]
+        }
+
+    def compute_entropy_drift(self, series: pd.Series, n_bins: int = 20) -> float:
+        """
+        Compute entropy drift using all rolling windows.
+        
+        Uses standard deviation of entropies across windows normalized by max entropy.
+        This is more robust than comparing only first and last windows.
+        """
+        clean_series = series.dropna()
+        if len(clean_series) < self.window * 2:
+            return 0.0
+        
+        # Split into windows
+        n_windows = max(2, len(clean_series) // self.window)
+        window_size = len(clean_series) // n_windows
+        
+        entropies = []
+        for i in range(n_windows):
+            start = i * window_size
+            end = start + window_size
+            window_data = clean_series.iloc[start:end]
+            
+            hist, _ = np.histogram(window_data, bins=n_bins)
+            hist = hist + 1  # Avoid log(0)
+            entropy = stats.entropy(hist)
+            entropies.append(entropy)
+        
+        if len(entropies) < 2:
+            return 0.0
+        
+        # Normalize entropy drift using standard deviation of entropies
+        max_entropy = np.log(n_bins)
+        entropy_std = np.std(entropies)
+        entropy_drift = entropy_std / (max_entropy + 1e-12)
+        return float(min(1.0, entropy_drift))
+
+    def compute_missing_stability(self, series: pd.Series) -> float:
+        """
+        Compute rolling missing percentage stability.
+        """
+        clean_series = series
+        if len(clean_series) < self.window * 2:
+            return 0.0
+        
+        rolling_missing = clean_series.isna().rolling(self.window).mean() * 100
+        rolling_missing = rolling_missing.dropna()
+        
+        if len(rolling_missing) < 2:
+            return 0.0
+        
+        mid = len(rolling_missing) // 2
+        first_half = rolling_missing.iloc[:mid]
+        second_half = rolling_missing.iloc[mid:]
+        
+        missing_drift = abs(first_half.mean() - second_half.mean())
+        return float(min(1.0, missing_drift / 100))
+
+    def compute_outlier_stability(self, series: pd.Series) -> float:
+        """
+        Compute rolling outlier percentage stability.
+        """
+        clean_series = series.dropna()
+        if len(clean_series) < self.window * 2:
+            return 0.0
+        
+        q75 = clean_series.quantile(0.75)
+        q25 = clean_series.quantile(0.25)
+        iqr = q75 - q25
+        
+        if iqr == 0:
+            return 0.0
+        
+        lower_bound = q25 - self.outlier_threshold * iqr
+        upper_bound = q75 + self.outlier_threshold * iqr
+        
+        def outlier_pct(window):
+            return ((window < lower_bound) | (window > upper_bound)).mean() * 100
+        
+        rolling_outliers = clean_series.rolling(self.window).apply(outlier_pct)
+        rolling_outliers = rolling_outliers.dropna()
+        
+        if len(rolling_outliers) < 2:
+            return 0.0
+        
+        mid = len(rolling_outliers) // 2
+        first_half = rolling_outliers.iloc[:mid]
+        second_half = rolling_outliers.iloc[mid:]
+        
+        outlier_drift = abs(first_half.mean() - second_half.mean())
+        return float(min(1.0, outlier_drift / 100))
+
+    def compute_stability_score(self, metrics: Dict[str, float]) -> float:
+        """
+        Compute overall stability score using weighted components.
+        
+        Weights:
+          - Mean Drift: 20%
+          - Variance Drift: 20%
+          - KS Drift: 20%
+          - Entropy Drift: 15%
+          - Skew Drift: 10%
+          - Kurtosis Drift: 10%
+          - Missing Drift: 5%
+        """
+        # Normalize each component to [0, 1]
+        def normalize(value, max_value=1.0):
+            return min(1.0, value / max_value)
+        
+        # Mean drift (already normalized by std)
+        mean_score = 1 - normalize(metrics.get('mean_drift', 0), 0.5)
+        
+        # Variance drift (already normalized by std)
+        var_score = 1 - normalize(metrics.get('variance_drift', 0), 0.5)
+        
+        # KS drift (already in [0, 1])
+        ks_score = 1 - normalize(metrics.get('ks_drift', 0), 0.5)
+        
+        # Entropy drift (already in [0, 1])
+        entropy_score = 1 - metrics.get('entropy_drift', 0)
+        
+        # Skew drift
+        skew_score = 1 - normalize(metrics.get('skew_drift', 0), 0.3)
+        
+        # Kurtosis drift
+        kurt_score = 1 - normalize(metrics.get('kurtosis_drift', 0), 0.3)
+        
+        # Missing drift
+        missing_score = 1 - metrics.get('missing_drift', 0)
+        
+        score = (
+            0.20 * mean_score +
+            0.20 * var_score +
+            0.20 * ks_score +
+            0.15 * entropy_score +
+            0.10 * skew_score +
+            0.10 * kurt_score +
+            0.05 * missing_score
+        )
+        return np.clip(score, 0.0, 1.0)
+
+    def make_decision(self, score: float) -> str:
+        """
+        Make PASS/WARNING/FAIL decision based on stability score.
+        """
+        if score >= self.pass_threshold:
+            return "PASS"
+        elif score >= self.warning_threshold:
+            return "WARNING"
+        else:
+            return "FAIL"
+
+    def compute_statistics(
+        self,
+        stability_table: pd.DataFrame,
+        passed_features: List[str],
+        warning_features: List[str],
+        failed_features: List[str]
+    ) -> Dict[str, Any]:
+        """
+        Compute summary statistics.
+        """
+        total = len(stability_table)
+        scores = stability_table['stability_score']
+        
+        stats_dict = {
+            'total_features': total,
+            'passed_count': len(passed_features),
+            'warning_count': len(warning_features),
+            'failed_count': len(failed_features),
+            'passed_percentage': len(passed_features) / total * 100 if total > 0 else 0,
+            'warning_percentage': len(warning_features) / total * 100 if total > 0 else 0,
+            'failed_percentage': len(failed_features) / total * 100 if total > 0 else 0,
+            'average_stability': float(scores.mean()),
+            'median_stability': float(scores.median()),
+            'min_stability': float(scores.min()),
+            'max_stability': float(scores.max()),
+            'best_feature': stability_table.iloc[0]['feature'] if not stability_table.empty else None,
+            'worst_feature': stability_table.iloc[-1]['feature'] if not stability_table.empty else None,
+            'best_score': float(stability_table.iloc[0]['stability_score']) if not stability_table.empty else 0,
+            'worst_score': float(stability_table.iloc[-1]['stability_score']) if not stability_table.empty else 0,
+            'average_drift': float(stability_table['mean_drift'].mean()),
+            'average_ks': float(stability_table['ks_drift'].mean()),
+            'average_entropy_drift': float(stability_table['entropy_drift'].mean())
+        }
+        
+        return stats_dict
+
+    def compute(self, df: pd.DataFrame) -> FeatureStabilityResult:
+        """
+        Main computation method.
+        """
+        print("\n  Computing Feature Stability...")
+        
+        # Get features
+        features = self.get_feature_columns(df)
+        print(f"  Found {len(features)} features")
+        
+        if not features:
+            return FeatureStabilityResult(
+                stability_table=pd.DataFrame(),
+                passed_features=[],
+                warning_features=[],
+                failed_features=[],
+                summary_statistics={
+                    'total_features': 0,
+                    'passed_count': 0,
+                    'warning_count': 0,
+                    'failed_count': 0,
+                    'passed_percentage': 0,
+                    'warning_percentage': 0,
+                    'failed_percentage': 0,
+                    'average_stability': 0,
+                    'median_stability': 0,
+                    'min_stability': 0,
+                    'max_stability': 0,
+                    'best_feature': None,
+                    'worst_feature': None,
+                    'best_score': 0,
+                    'worst_score': 0,
+                    'average_drift': 0,
+                    'average_ks': 0,
+                    'average_entropy_drift': 0
+                }
+            )
+        
+        rows = []
+        passed = []
+        warning = []
+        failed = []
+        
+        for feature in features:
+            series = df[feature]
+            
+            # Compute stability metrics
+            mean_stability = self.compute_mean_stability(series)
+            var_stability = self.compute_variance_stability(series)
+            skew_stability = self.compute_skew_stability(series)
+            kurt_stability = self.compute_kurtosis_stability(series)
+            ks_metrics = self.compute_ks_drift(series)
+            entropy_drift = self.compute_entropy_drift(series)
+            missing_drift = self.compute_missing_stability(series)
+            outlier_drift = self.compute_outlier_stability(series)
+            
+            # Compile metrics
+            metrics = {
+                'mean_drift': mean_stability['mean_drift'],
+                'variance_drift': var_stability['mean_drift'],
+                'skew_drift': skew_stability['mean_drift'],
+                'kurtosis_drift': kurt_stability['mean_drift'],
+                'ks_drift': ks_metrics['ks_drift'],
+                'entropy_drift': entropy_drift,
+                'missing_drift': missing_drift,
+                'outlier_drift': outlier_drift
+            }
+            
+            # Compute stability score
+            stability_score = self.compute_stability_score(metrics)
+            decision = self.make_decision(stability_score)
+            
+            # Track decisions
+            if decision == "PASS":
+                passed.append(feature)
+            elif decision == "WARNING":
+                warning.append(feature)
+            else:
+                failed.append(feature)
+            
+            rows.append({
+                'feature': feature,
+                'mean_drift': metrics['mean_drift'],
+                'variance_drift': metrics['variance_drift'],
+                'skew_drift': metrics['skew_drift'],
+                'kurtosis_drift': metrics['kurtosis_drift'],
+                'ks_drift': metrics['ks_drift'],
+                'entropy_drift': metrics['entropy_drift'],
+                'missing_drift': metrics['missing_drift'],
+                'outlier_drift': metrics['outlier_drift'],
+                'stability_score': stability_score,
+                'decision': decision
+            })
+        
+        # Create stability table
+        stability_table = pd.DataFrame(rows)
+        stability_table = stability_table.sort_values('stability_score', ascending=False).reset_index(drop=True)
+        
+        # Compute statistics
+        stats = self.compute_statistics(stability_table, passed, warning, failed)
+        
+        print(f"\n  Stability Results:")
+        print(f"    PASS:   {len(passed)} features")
+        print(f"    WARNING: {len(warning)} features")
+        print(f"    FAIL:   {len(failed)} features")
+        print(f"    Average Stability: {stats['average_stability']:.3f}")
+        
+        return FeatureStabilityResult(
+            stability_table=stability_table,
+            passed_features=passed,
+            warning_features=warning,
+            failed_features=failed,
+            summary_statistics=stats
+        )

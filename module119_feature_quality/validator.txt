@@ -1,0 +1,137 @@
+# atlas/modules/module119_feature_quality/validator.py
+"""
+Module 119 - Feature Quality Validator
+"""
+
+import numpy as np
+import pandas as pd
+from .engine import FeatureQualityResult
+from .statistics import FeatureQualityStatistics
+
+
+class FeatureQualityValidator:
+    """Validator for feature quality results."""
+    
+    def validate(
+        self,
+        result: FeatureQualityResult,
+        statistics: FeatureQualityStatistics
+    ) -> bool:
+        """Validate results and statistics."""
+        issues = []
+        warnings = []
+        
+        # Check quality table
+        if result.quality_table.empty:
+            issues.append("Quality table is empty")
+        else:
+            required_cols = ['feature', 'quality_score', 'decision', 'missing_pct']
+            missing = set(required_cols) - set(result.quality_table.columns)
+            if missing:
+                issues.append(f"Missing columns in quality table: {missing}")
+            
+            # Check scores are in [0, 1]
+            if 'quality_score' in result.quality_table.columns:
+                if not np.all((0 <= result.quality_table['quality_score']) & 
+                            (result.quality_table['quality_score'] <= 1)):
+                    issues.append("Quality scores outside [0, 1] range")
+            
+            # Check decisions are valid
+            if 'decision' in result.quality_table.columns:
+                valid_decisions = {'PASS', 'WARNING', 'FAIL'}
+                invalid = set(result.quality_table['decision'].unique()) - valid_decisions
+                if invalid:
+                    issues.append(f"Invalid decisions found: {invalid}")
+        
+        # Check feature lists
+        total_decision_count = len(result.passed_features) + len(result.warning_features) + len(result.failed_features)
+        if total_decision_count != len(result.quality_table):
+            issues.append(
+                f"Decision count mismatch: {total_decision_count} vs {len(result.quality_table)}"
+            )
+        
+        # Check no duplicates across decision lists
+        all_decisions = set(result.passed_features) | set(result.warning_features) | set(result.failed_features)
+        if len(all_decisions) != len(result.quality_table):
+            issues.append("Features appear in multiple decision lists")
+        
+        # Check best feature exists
+        if result.summary_statistics['best_feature'] is not None:
+            if result.summary_statistics['best_feature'] not in result.quality_table['feature'].values:
+                issues.append("Best feature missing from quality table")
+        
+        # Check missing percentage is in [0, 100]
+        if 'missing_pct' in result.quality_table.columns:
+            if not np.all((0 <= result.quality_table['missing_pct']) & 
+                        (result.quality_table['missing_pct'] <= 100)):
+                issues.append("Missing percentages outside [0, 100] range")
+        
+        # Check outlier percentage is in [0, 100]
+        if 'outlier_pct' in result.quality_table.columns:
+            if not np.all((0 <= result.quality_table['outlier_pct']) & 
+                        (result.quality_table['outlier_pct'] <= 100)):
+                issues.append("Outlier percentages outside [0, 100] range")
+        
+        # Check statistics match result
+        if statistics.total_features != result.summary_statistics['total_features']:
+            issues.append(
+                f"Total features mismatch: stats={statistics.total_features}, "
+                f"result={result.summary_statistics['total_features']}"
+            )
+        
+        if statistics.passed_count != len(result.passed_features):
+            issues.append(
+                f"Passed count mismatch: stats={statistics.passed_count}, "
+                f"result={len(result.passed_features)}"
+            )
+        
+        if statistics.warning_count != len(result.warning_features):
+            issues.append(
+                f"Warning count mismatch: stats={statistics.warning_count}, "
+                f"result={len(result.warning_features)}"
+            )
+        
+        if statistics.failed_count != len(result.failed_features):
+            issues.append(
+                f"Failed count mismatch: stats={statistics.failed_count}, "
+                f"result={len(result.failed_features)}"
+            )
+        
+        # Warnings (non-fatal)
+        if statistics.passed_percentage < 50:
+            warnings.append(f"Low pass percentage: {statistics.passed_percentage:.1f}%")
+        
+        if statistics.average_quality < 0.5:
+            warnings.append(f"Low average quality: {statistics.average_quality:.3f}")
+        
+        if warnings:
+            print("\n  WARNINGS:")
+            for warning in warnings:
+                print(f"    ⚠ {warning}")
+        
+        if issues:
+            raise ValueError(
+                f"Feature Quality validation failed with {len(issues)} issue(s):\n" +
+                "\n".join(f"  - {issue}" for issue in issues)
+            )
+        
+        return True
+
+
+def run_validation(result, statistics):
+    """Run validation with user-friendly output."""
+    validator = FeatureQualityValidator()
+    
+    print("\n" + "=" * 60)
+    print("FEATURE QUALITY VALIDATION")
+    print("=" * 60)
+    
+    try:
+        validator.validate(result, statistics)
+        print("\n  ✓ All validation checks passed")
+        print("=" * 60)
+        return True
+    except ValueError as e:
+        print(e)
+        print("=" * 60)
+        return False

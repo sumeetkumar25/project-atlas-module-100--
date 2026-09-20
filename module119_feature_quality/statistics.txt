@@ -1,0 +1,73 @@
+# atlas/modules/module119_feature_quality/statistics.py
+"""
+Module 119 - Feature Quality Statistics
+"""
+
+from dataclasses import dataclass, asdict
+import pandas as pd
+from .engine import FeatureQualityResult
+
+
+@dataclass
+class FeatureQualityStatistics:
+    """High-level statistics from feature quality analysis."""
+    total_features: int
+    passed_count: int
+    warning_count: int
+    failed_count: int
+    passed_percentage: float
+    warning_percentage: float
+    failed_percentage: float
+    average_quality: float
+    median_quality: float
+    min_quality: float
+    max_quality: float
+    best_feature: str
+    worst_feature: str
+    best_score: float
+    worst_score: float
+    average_missing: float
+    average_skew: float
+    average_outliers: float
+
+
+class FeatureQualityStatisticsEngine:
+    """Engine for generating high-level statistics."""
+    
+    METADATA = {
+        "module": 119,
+        "name": "Feature Quality",
+        "version": "1.0.0",
+        "description": "Analyzes every feature and computes a quality score"
+    }
+    
+    def analyze(self, result: FeatureQualityResult) -> FeatureQualityStatistics:
+        """Analyze results and generate high-level statistics."""
+        return FeatureQualityStatistics(
+            total_features=result.summary_statistics['total_features'],
+            passed_count=result.summary_statistics['passed_count'],
+            warning_count=result.summary_statistics['warning_count'],
+            failed_count=result.summary_statistics['failed_count'],
+            passed_percentage=result.summary_statistics['passed_percentage'],
+            warning_percentage=result.summary_statistics['warning_percentage'],
+            failed_percentage=result.summary_statistics['failed_percentage'],
+            average_quality=result.summary_statistics['average_quality'],
+            median_quality=result.summary_statistics['median_quality'],
+            min_quality=result.summary_statistics['min_quality'],
+            max_quality=result.summary_statistics['max_quality'],
+            best_feature=result.summary_statistics['best_feature'],
+            worst_feature=result.summary_statistics['worst_feature'],
+            best_score=result.summary_statistics['best_score'],
+            worst_score=result.summary_statistics['worst_score'],
+            average_missing=result.summary_statistics['average_missing'],
+            average_skew=result.summary_statistics['average_skew'],
+            average_outliers=result.summary_statistics['average_outliers']
+        )
+    
+    def summary_dataframe(self, stats: FeatureQualityStatistics) -> pd.DataFrame:
+        """Convert statistics to DataFrame."""
+        return pd.DataFrame([asdict(stats)])
+    
+    def summary_dict(self, stats: FeatureQualityStatistics) -> dict:
+        """Convert statistics to dictionary."""
+        return asdict(stats)

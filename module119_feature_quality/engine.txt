@@ -1,0 +1,444 @@
+# atlas/modules/module119_feature_quality/engine.py
+"""
+Module 119 - Feature Quality Engine
+
+Analyzes every feature and computes a quality score based on:
+  - Missing values
+  - Infinite values
+  - Variance (near-zero detection)
+  - Skewness
+  - Kurtosis
+  - Outlier percentage
+  - Entropy
+
+Output: Quality score and PASS/WARNING/FAIL decision for each feature.
+"""
+
+import numpy as np
+import pandas as pd
+from dataclasses import dataclass
+from typing import Optional, Dict, Any, List, Tuple
+from scipy import stats
+import warnings
+warnings.filterwarnings('ignore')
+
+
+@dataclass
+class FeatureQualityResult:
+    """Results from feature quality analysis."""
+    quality_table: pd.DataFrame
+    passed_features: List[str]
+    warning_features: List[str]
+    failed_features: List[str]
+    summary_statistics: Dict[str, Any]
+
+
+class FeatureQualityEngine:
+    """Core engine for feature quality analysis."""
+
+    # Columns to ignore (not features)
+    IGNORE_COLS = {
+        "timestamp", "date", "time", "index",
+        "open", "high", "low", "close", "volume",
+        "future_breakout"
+    }
+
+    # Quality thresholds
+    PASS_THRESHOLD = 0.80
+    WARNING_THRESHOLD = 0.60
+
+    # Outlier threshold (IQR multiplier)
+    OUTLIER_THRESHOLD = 1.5
+
+    def __init__(
+        self,
+        pass_threshold: float = 0.80,
+        warning_threshold: float = 0.60,
+        outlier_threshold: float = 1.5
+    ):
+        """
+        Initialize the feature quality engine.
+        
+        Args:
+            pass_threshold: Score above this threshold = PASS
+            warning_threshold: Score above this threshold = WARNING, below = FAIL
+            outlier_threshold: IQR multiplier for outlier detection
+        """
+        self.pass_threshold = pass_threshold
+        self.warning_threshold = warning_threshold
+        self.outlier_threshold = outlier_threshold
+
+    def get_feature_columns(self, df: pd.DataFrame) -> List[str]:
+        """
+        Identify feature columns (exclude metadata and target).
+        """
+        features = [
+            c for c in df.columns
+            if c not in self.IGNORE_COLS
+            and pd.api.types.is_numeric_dtype(df[c])
+            and df[c].nunique() > 1
+        ]
+        return features
+
+    def compute_missing_percentage(self, series: pd.Series) -> float:
+        """
+        Compute percentage of missing values.
+        """
+        return float(series.isna().mean() * 100)
+
+    def compute_infinite_count(self, series: pd.Series) -> int:
+        """
+        Count infinite values.
+        """
+        return int(np.isinf(series).sum())
+
+    def compute_variance(self, series: pd.Series) -> float:
+        """
+        Compute variance of the series.
+        """
+        clean_series = series.dropna()
+        if len(clean_series) < 2:
+            return 0.0
+        return float(clean_series.var())
+
+    def compute_near_zero_variance(self, series: pd.Series) -> bool:
+        """
+        Check if variance is near zero.
+        """
+        variance = self.compute_variance(series)
+        return variance < 1e-8
+
+    def compute_skewness(self, series: pd.Series) -> float:
+        """
+        Compute skewness of the series.
+        """
+        clean_series = series.dropna()
+        if len(clean_series) < 2:
+            return 0.0
+        return float(stats.skew(clean_series))
+
+    def compute_kurtosis(self, series: pd.Series) -> float:
+        """
+        Compute kurtosis of the series (excess kurtosis).
+        """
+        clean_series = series.dropna()
+        if len(clean_series) < 2:
+            return 0.0
+        return float(stats.kurtosis(clean_series))
+
+    def compute_outlier_percentage(self, series: pd.Series) -> float:
+        """
+        Compute percentage of outliers using IQR method.
+        """
+        clean_series = series.dropna()
+        if len(clean_series) < 4:
+            return 0.0
+        
+        q75 = clean_series.quantile(0.75)
+        q25 = clean_series.quantile(0.25)
+        iqr = q75 - q25
+        
+        if iqr == 0:
+            return 0.0
+        
+        lower_bound = q25 - self.outlier_threshold * iqr
+        upper_bound = q75 + self.outlier_threshold * iqr
+        
+        outliers = clean_series[(clean_series < lower_bound) | (clean_series > upper_bound)]
+        return float(len(outliers) / len(clean_series) * 100)
+
+    def compute_entropy(self, series: pd.Series, n_bins: int = 20) -> float:
+        """
+        Compute histogram entropy of the series.
+        """
+        clean_series = series.dropna()
+        if len(clean_series) < 2:
+            return 0.0
+        
+        hist, _ = np.histogram(clean_series, bins=n_bins)
+        hist = hist + 1  # Add 1 to avoid log(0)
+        entropy = stats.entropy(hist)
+        
+        # Normalize entropy to [0, 1]
+        max_entropy = np.log(n_bins)
+        if max_entropy > 0:
+            return float(min(1.0, entropy / max_entropy))
+        return 0.0
+
+    def compute_variance_score(self, variance: float) -> float:
+        """
+        Compute variance quality score.
+        High variance = good (feature has information).
+        """
+        if variance < 1e-8:
+            return 0.0
+        elif variance < 1e-4:
+            return 0.5
+        else:
+            return 1.0
+
+    def compute_missing_score(self, missing_pct: float) -> float:
+        """
+        Compute missing value quality score.
+        Lower missing = better.
+        """
+        if missing_pct == 0:
+            return 1.0
+        elif missing_pct < 1:
+            return 0.9
+        elif missing_pct < 5:
+            return 0.7
+        elif missing_pct < 10:
+            return 0.5
+        elif missing_pct < 20:
+            return 0.3
+        else:
+            return 0.1
+
+    def compute_skew_score(self, skewness: float) -> float:
+        """
+        Compute skewness quality score.
+        Near zero = better.
+        """
+        abs_skew = abs(skewness)
+        if abs_skew < 0.2:
+            return 1.0
+        elif abs_skew < 0.5:
+            return 0.8
+        elif abs_skew < 1.0:
+            return 0.6
+        elif abs_skew < 2.0:
+            return 0.4
+        else:
+            return 0.2
+
+    def compute_kurtosis_score(self, kurtosis: float) -> float:
+        """
+        Compute kurtosis quality score.
+        Near zero = better (normal-like tails).
+        """
+        abs_kurt = abs(kurtosis)
+        if abs_kurt < 0.5:
+            return 1.0
+        elif abs_kurt < 1.0:
+            return 0.8
+        elif abs_kurt < 2.0:
+            return 0.6
+        elif abs_kurt < 4.0:
+            return 0.4
+        else:
+            return 0.2
+
+    def compute_outlier_score(self, outlier_pct: float) -> float:
+        """
+        Compute outlier percentage quality score.
+        Lower outliers = better.
+        """
+        if outlier_pct == 0:
+            return 1.0
+        elif outlier_pct < 1:
+            return 0.9
+        elif outlier_pct < 3:
+            return 0.7
+        elif outlier_pct < 5:
+            return 0.5
+        elif outlier_pct < 10:
+            return 0.3
+        else:
+            return 0.1
+
+    def compute_entropy_score(self, entropy: float) -> float:
+        """
+        Compute entropy quality score.
+        Higher entropy = better (more information).
+        """
+        if entropy > 0.8:
+            return 1.0
+        elif entropy > 0.6:
+            return 0.8
+        elif entropy > 0.4:
+            return 0.6
+        elif entropy > 0.2:
+            return 0.4
+        else:
+            return 0.2
+
+    def compute_quality_score(self, metrics: Dict[str, Any]) -> float:
+        """
+        Compute overall quality score using weighted components.
+        
+        Weights:
+          - Variance: 25% (feature has variation)
+          - Missing: 20% (complete data)
+          - Skewness: 20% (symmetric distribution)
+          - Kurtosis: 15% (normal-like tails)
+          - Outliers: 10% (few extreme values)
+          - Entropy: 10% (information content)
+        """
+        score = (
+            0.25 * self.compute_variance_score(metrics['variance']) +
+            0.20 * self.compute_missing_score(metrics['missing_pct']) +
+            0.20 * self.compute_skew_score(metrics['skewness']) +
+            0.15 * self.compute_kurtosis_score(metrics['kurtosis']) +
+            0.10 * self.compute_outlier_score(metrics['outlier_pct']) +
+            0.10 * self.compute_entropy_score(metrics['entropy'])
+        )
+        return np.clip(score, 0.0, 1.0)
+
+    def make_decision(self, score: float) -> str:
+        """
+        Make PASS/WARNING/FAIL decision based on quality score.
+        """
+        if score >= self.pass_threshold:
+            return "PASS"
+        elif score >= self.warning_threshold:
+            return "WARNING"
+        else:
+            return "FAIL"
+
+    def compute_statistics(
+        self,
+        quality_table: pd.DataFrame,
+        passed_features: List[str],
+        warning_features: List[str],
+        failed_features: List[str]
+    ) -> Dict[str, Any]:
+        """
+        Compute summary statistics.
+        """
+        total = len(quality_table)
+        scores = quality_table['quality_score']
+        
+        stats_dict = {
+            'total_features': total,
+            'passed_count': len(passed_features),
+            'warning_count': len(warning_features),
+            'failed_count': len(failed_features),
+            'passed_percentage': len(passed_features) / total * 100 if total > 0 else 0,
+            'warning_percentage': len(warning_features) / total * 100 if total > 0 else 0,
+            'failed_percentage': len(failed_features) / total * 100 if total > 0 else 0,
+            'average_quality': float(scores.mean()),
+            'median_quality': float(scores.median()),
+            'min_quality': float(scores.min()),
+            'max_quality': float(scores.max()),
+            'best_feature': quality_table.iloc[0]['feature'] if not quality_table.empty else None,
+            'worst_feature': quality_table.iloc[-1]['feature'] if not quality_table.empty else None,
+            'best_score': float(quality_table.iloc[0]['quality_score']) if not quality_table.empty else 0,
+            'worst_score': float(quality_table.iloc[-1]['quality_score']) if not quality_table.empty else 0,
+            'average_missing': float(quality_table['missing_pct'].mean()),
+            'average_skew': float(quality_table['skewness'].mean()),
+            'average_outliers': float(quality_table['outlier_pct'].mean())
+        }
+        
+        return stats_dict
+
+    def compute(self, df: pd.DataFrame) -> FeatureQualityResult:
+        """
+        Main computation method.
+        """
+        print("\n  Computing Feature Quality...")
+        
+        # Get features
+        features = self.get_feature_columns(df)
+        print(f"  Found {len(features)} features")
+        
+        if not features:
+            return FeatureQualityResult(
+                quality_table=pd.DataFrame(),
+                passed_features=[],
+                warning_features=[],
+                failed_features=[],
+                summary_statistics={
+                    'total_features': 0,
+                    'passed_count': 0,
+                    'warning_count': 0,
+                    'failed_count': 0,
+                    'passed_percentage': 0,
+                    'warning_percentage': 0,
+                    'failed_percentage': 0,
+                    'average_quality': 0,
+                    'median_quality': 0,
+                    'min_quality': 0,
+                    'max_quality': 0,
+                    'best_feature': None,
+                    'worst_feature': None,
+                    'best_score': 0,
+                    'worst_score': 0,
+                    'average_missing': 0,
+                    'average_skew': 0,
+                    'average_outliers': 0
+                }
+            )
+        
+        rows = []
+        passed = []
+        warning = []
+        failed = []
+        
+        for feature in features:
+            series = df[feature]
+            
+            # Compute metrics
+            missing_pct = self.compute_missing_percentage(series)
+            inf_count = self.compute_infinite_count(series)
+            variance = self.compute_variance(series)
+            near_zero = self.compute_near_zero_variance(series)
+            skewness = self.compute_skewness(series)
+            kurtosis = self.compute_kurtosis(series)
+            outlier_pct = self.compute_outlier_percentage(series)
+            entropy = self.compute_entropy(series)
+            
+            # Compute quality score
+            metrics = {
+                'variance': variance,
+                'missing_pct': missing_pct,
+                'skewness': skewness,
+                'kurtosis': kurtosis,
+                'outlier_pct': outlier_pct,
+                'entropy': entropy
+            }
+            quality_score = self.compute_quality_score(metrics)
+            decision = self.make_decision(quality_score)
+            
+            # Track decisions
+            if decision == "PASS":
+                passed.append(feature)
+            elif decision == "WARNING":
+                warning.append(feature)
+            else:
+                failed.append(feature)
+            
+            rows.append({
+                'feature': feature,
+                'missing_pct': missing_pct,
+                'inf_count': inf_count,
+                'variance': variance,
+                'near_zero_variance': near_zero,
+                'skewness': skewness,
+                'kurtosis': kurtosis,
+                'outlier_pct': outlier_pct,
+                'entropy': entropy,
+                'quality_score': quality_score,
+                'decision': decision
+            })
+        
+        # Create quality table
+        quality_table = pd.DataFrame(rows)
+        quality_table = quality_table.sort_values('quality_score', ascending=False).reset_index(drop=True)
+        
+        # Compute statistics
+        stats = self.compute_statistics(quality_table, passed, warning, failed)
+        
+        print(f"\n  Quality Results:")
+        print(f"    PASS:   {len(passed)} features")
+        print(f"    WARNING: {len(warning)} features")
+        print(f"    FAIL:   {len(failed)} features")
+        print(f"    Average Quality: {stats['average_quality']:.3f}")
+        
+        return FeatureQualityResult(
+            quality_table=quality_table,
+            passed_features=passed,
+            warning_features=warning,
+            failed_features=failed,
+            summary_statistics=stats
+        )

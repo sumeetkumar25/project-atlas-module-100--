@@ -1,0 +1,409 @@
+# atlas/modules/module120_feature_stability/test_module.py
+"""
+Module 120 - Integration Test
+
+Tests feature stability engine, statistics, validator, report, and pipeline.
+"""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+
+import numpy as np
+import pandas as pd
+
+from atlas.modules.module120_feature_stability.engine import FeatureStabilityEngine
+from atlas.modules.module120_feature_stability.statistics import FeatureStabilityStatisticsEngine
+from atlas.modules.module120_feature_stability.validator import run_validation
+from atlas.modules.module120_feature_stability.module import FeatureStabilityResearch
+
+
+def create_test_data(n=1000, seed=42):
+    """Create synthetic test data with various stability levels."""
+    np.random.seed(seed)
+    
+    # Stable feature (constant mean)
+    stable = np.random.randn(n) * 10 + 50
+    
+    # Drifting feature (mean changes over time)
+    drift = np.random.randn(n) * 10 + 50 + np.linspace(0, 20, n)
+    
+    # Feature with increasing variance
+    variance_drift = np.random.randn(n) * (10 + np.linspace(0, 5, n)) + 50
+    
+    # Feature with outliers
+    outliers = np.random.randn(n) * 10 + 50
+    outliers[:20] = 500
+    
+    # Feature with missing values
+    missing_feature = np.random.randn(n) * 10 + 50
+    missing_feature[:100] = np.nan
+    
+    df = pd.DataFrame({
+        'timestamp': pd.date_range('2020-01-01', periods=n, freq='1h'),
+        'open': 100 + np.random.randn(n) * 10,
+        'high': 100 + np.random.randn(n) * 10 + np.abs(np.random.randn(n) * 2),
+        'low': 100 + np.random.randn(n) * 10 - np.abs(np.random.randn(n) * 2),
+        'close': 100 + np.random.randn(n) * 10,
+        'volume': np.random.randn(n) * 100 + 1000,
+        'stable_feature': stable,
+        'drifting_feature': drift,
+        'variance_drift_feature': variance_drift,
+        'outlier_feature': outliers,
+        'missing_feature': missing_feature,
+        'future_breakout': np.random.randint(0, 2, n)
+    })
+    
+    return df
+
+
+def test_engine_feature_detection():
+    """Test 1: Feature detection."""
+    print("\n" + "=" * 60)
+    print("TEST 1: Feature Detection")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeatureStabilityEngine()
+    
+    features = engine.get_feature_columns(df)
+    
+    assert 'stable_feature' in features
+    assert 'drifting_feature' in features
+    assert 'variance_drift_feature' in features
+    assert 'outlier_feature' in features
+    assert 'missing_feature' in features
+    assert 'close' not in features
+    assert 'future_breakout' not in features
+    
+    print(f"  Found {len(features)} features")
+    print("  ✓ Feature detection test passed")
+    return True
+
+
+def test_engine_mean_stability():
+    """Test 2: Mean stability computation."""
+    print("\n" + "=" * 60)
+    print("TEST 2: Mean Stability")
+    print("=" * 60)
+    
+    engine = FeatureStabilityEngine(window=50)
+    
+    # Stable series
+    stable = pd.Series(np.random.randn(1000) * 10 + 50)
+    stable_mean = engine.compute_mean_stability(stable)
+    
+    # Drifting series
+    drift = pd.Series(np.random.randn(1000) * 10 + 50 + np.linspace(0, 10, 1000))
+    drift_mean = engine.compute_mean_stability(drift)
+    
+    # Drifting series should have higher mean drift
+    assert drift_mean["mean_drift"] > stable_mean["mean_drift"]
+    
+    print(f"  Stable mean drift: {stable_mean['mean_drift']:.4f}")
+    print(f"  Drifting mean drift: {drift_mean['mean_drift']:.4f}")
+    print("  ✓ Mean stability test passed")
+    return True
+
+
+def test_engine_variance_stability():
+    """Test 3: Variance stability computation."""
+    print("\n" + "=" * 60)
+    print("TEST 3: Variance Stability")
+    print("=" * 60)
+    
+    engine = FeatureStabilityEngine(window=50)
+    
+    # Stable variance (constant variance)
+    stable = pd.Series(np.random.randn(1000) * 10 + 50)
+    stable_var = engine.compute_variance_stability(stable)
+    
+    # Unstable variance (increasing variance over time)
+    unstable = pd.Series(np.random.randn(1000) * (10 + np.linspace(0, 10, 1000)) + 50)
+    unstable_var = engine.compute_variance_stability(unstable)
+    
+    # Unstable variance should have higher drift than stable variance
+    assert unstable_var["mean_drift"] > stable_var["mean_drift"]
+    
+    print(f"  Stable variance drift: {stable_var['mean_drift']:.4f}")
+    print(f"  Unstable variance drift: {unstable_var['mean_drift']:.4f}")
+    print("  ✓ Variance stability test passed")
+    return True
+
+
+def test_engine_ks_drift():
+    """Test 4: KS drift computation."""
+    print("\n" + "=" * 60)
+    print("TEST 4: KS Drift")
+    print("=" * 60)
+    
+    engine = FeatureStabilityEngine(window=50)
+    
+    # Same distribution
+    series1 = pd.Series(np.random.randn(1000) * 10 + 50)
+    ks1 = engine.compute_ks_drift(series1)
+    
+    # Different distributions (first half vs second half)
+    first_half = np.random.randn(500) * 10 + 50
+    second_half = np.random.randn(500) * 20 + 50
+    series2 = pd.Series(np.concatenate([first_half, second_half]))
+    ks2 = engine.compute_ks_drift(series2)
+    
+    # Different distributions should have higher KS drift
+    assert ks2['ks_drift'] > ks1['ks_drift']
+    
+    print(f"  Same distribution KS drift: {ks1['ks_drift']:.4f}")
+    print(f"  Different distribution KS drift: {ks2['ks_drift']:.4f}")
+    print("  ✓ KS drift test passed")
+    return True
+
+
+def test_engine_entropy_drift():
+    """Test 5: Entropy drift computation."""
+    print("\n" + "=" * 60)
+    print("TEST 5: Entropy Drift")
+    print("=" * 60)
+    
+    engine = FeatureStabilityEngine(window=50)
+    
+    # Same distribution
+    series1 = pd.Series(np.random.randn(1000) * 10 + 50)
+    entropy1 = engine.compute_entropy_drift(series1)
+    
+    # Different distributions (first half vs second half)
+    first_half = np.random.randn(500) * 10 + 50
+    second_half = np.random.randn(500) * 5 + 50
+    series2 = pd.Series(np.concatenate([first_half, second_half]))
+    entropy2 = engine.compute_entropy_drift(series2)
+    
+    # Print values for debugging
+    print(f"  Same distribution entropy drift: {entropy1:.4f}")
+    print(f"  Different distribution entropy drift: {entropy2:.4f}")
+    
+    # Verify values are in valid range
+    assert 0 <= entropy1 <= 1
+    assert 0 <= entropy2 <= 1
+    
+    print("  ✓ Entropy drift test passed")
+    return True
+
+
+def test_engine_stability_score():
+    """Test 6: Stability score computation."""
+    print("\n" + "=" * 60)
+    print("TEST 6: Stability Score")
+    print("=" * 60)
+    
+    engine = FeatureStabilityEngine()
+    
+    # High stability metrics
+    high_metrics = {
+        'mean_drift': 0.01,
+        'variance_drift': 0.01,
+        'skew_drift': 0.01,
+        'kurtosis_drift': 0.01,
+        'ks_drift': 0.01,
+        'entropy_drift': 0.01,
+        'missing_drift': 0.01,
+        'outlier_drift': 0.01
+    }
+    score = engine.compute_stability_score(high_metrics)
+    assert score > 0.8
+    
+    # Low stability metrics
+    low_metrics = {
+        'mean_drift': 1.0,
+        'variance_drift': 1.0,
+        'skew_drift': 1.0,
+        'kurtosis_drift': 1.0,
+        'ks_drift': 1.0,
+        'entropy_drift': 1.0,
+        'missing_drift': 0.5,
+        'outlier_drift': 0.5
+    }
+    score = engine.compute_stability_score(low_metrics)
+    assert score < 0.4
+    
+    print("  ✓ Stability score test passed")
+    return True
+
+
+def test_engine_decisions():
+    """Test 7: Decision making."""
+    print("\n" + "=" * 60)
+    print("TEST 7: Decision Making")
+    print("=" * 60)
+    
+    engine = FeatureStabilityEngine(
+        pass_threshold=0.80,
+        warning_threshold=0.60
+    )
+    
+    assert engine.make_decision(0.90) == "PASS"
+    assert engine.make_decision(0.70) == "WARNING"
+    assert engine.make_decision(0.50) == "FAIL"
+    assert engine.make_decision(0.80) == "PASS"
+    assert engine.make_decision(0.60) == "WARNING"
+    assert engine.make_decision(0.59) == "FAIL"
+    
+    print("  ✓ Decision making test passed")
+    return True
+
+
+def test_engine_compute():
+    """Test 8: Full engine computation."""
+    print("\n" + "=" * 60)
+    print("TEST 8: Full Engine Computation")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeatureStabilityEngine(window=50)
+    
+    result = engine.compute(df)
+    
+    # Verify stability table exists
+    assert not result.stability_table.empty
+    
+    # Verify every feature received exactly one decision
+    assert len(result.stability_table) == 5  # 5 features in synthetic dataset
+    
+    # Verify all decisions are valid
+    decisions = set(result.stability_table["decision"])
+    assert decisions.issubset({"PASS", "WARNING", "FAIL"})
+    
+    # Verify the sum of decisions equals total features
+    assert (
+        len(result.passed_features)
+        + len(result.warning_features)
+        + len(result.failed_features)
+        == result.summary_statistics["total_features"]
+    )
+    
+    # Verify average stability is in valid range
+    assert 0 < result.summary_statistics["average_stability"] <= 1
+    
+    print(f"  PASS: {len(result.passed_features)}")
+    print(f"  WARNING: {len(result.warning_features)}")
+    print(f"  FAIL: {len(result.failed_features)}")
+    print(f"  Avg Stability: {result.summary_statistics['average_stability']:.3f}")
+    print(f"  Decisions: {decisions}")
+    print("  ✓ Full engine test passed")
+    return True
+
+
+def test_statistics():
+    """Test 9: Statistics engine."""
+    print("\n" + "=" * 60)
+    print("TEST 9: Statistics Engine")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeatureStabilityEngine(window=50)
+    stats_engine = FeatureStabilityStatisticsEngine()
+    
+    result = engine.compute(df)
+    stats = stats_engine.analyze(result)
+    
+    assert stats.total_features == result.summary_statistics['total_features']
+    assert stats.passed_count == len(result.passed_features)
+    assert stats.failed_count == len(result.failed_features)
+    assert stats.best_feature is not None
+    
+    print(f"  Total: {stats.total_features}")
+    print(f"  PASS: {stats.passed_count}")
+    print(f"  FAIL: {stats.failed_count}")
+    print("  ✓ Statistics test passed")
+    return True
+
+
+def test_validator():
+    """Test 10: Validator."""
+    print("\n" + "=" * 60)
+    print("TEST 10: Validator")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeatureStabilityEngine(window=50)
+    stats_engine = FeatureStabilityStatisticsEngine()
+    
+    result = engine.compute(df)
+    stats = stats_engine.analyze(result)
+    
+    passed = run_validation(result, stats)
+    assert passed
+    
+    print("  ✓ Validator test passed")
+    return True
+
+
+def test_pipeline():
+    """Test 11: Full pipeline."""
+    print("\n" + "=" * 60)
+    print("TEST 11: Full Pipeline")
+    print("=" * 60)
+    
+    df = create_test_data()
+    
+    research = FeatureStabilityResearch(window=50)
+    
+    result = research.run_dataframe(df, dataset_id="pipeline_test")
+    
+    assert result.status == "completed"
+    assert "stability_table" in result.artifacts
+    assert "passed_features" in result.artifacts
+    assert "warning_features" in result.artifacts
+    assert "failed_features" in result.artifacts
+    assert "feature_stability_report" in result.artifacts
+    assert "stability_report" in result.artifacts
+    assert result.statistics.get("software_validation_passed") == True
+    
+    print(f"  PASS: {result.statistics.get('passed_count')}")
+    print(f"  FAIL: {result.statistics.get('failed_count')}")
+    print("  ✓ Full pipeline test passed")
+    return True
+
+
+def main():
+    """Run all tests."""
+    print("\n" + "=" * 70)
+    print("PROJECT ATLAS - MODULE 120 INTEGRATION TEST")
+    print("Feature Stability")
+    print("=" * 70)
+    
+    results = {}
+    
+    results["feature_detection"] = test_engine_feature_detection()
+    results["mean_stability"] = test_engine_mean_stability()
+    results["variance_stability"] = test_engine_variance_stability()
+    results["ks_drift"] = test_engine_ks_drift()
+    results["entropy_drift"] = test_engine_entropy_drift()
+    results["stability_score"] = test_engine_stability_score()
+    results["decisions"] = test_engine_decisions()
+    results["full_engine"] = test_engine_compute()
+    results["statistics"] = test_statistics()
+    results["validator"] = test_validator()
+    results["pipeline"] = test_pipeline()
+    
+    print("\n" + "=" * 70)
+    print("RESULTS")
+    print("=" * 70)
+    
+    for name, ok in results.items():
+        print(f"  {'✓' if ok else '✗'} {name}")
+    
+    passed = sum(results.values())
+    total = len(results)
+    
+    print(f"\n  {passed}/{total} tests passed")
+    
+    if passed == total:
+        print("\n✓ Module 120 VALIDATED")
+        return 0
+    else:
+        print("\n⚠ Some tests failed")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

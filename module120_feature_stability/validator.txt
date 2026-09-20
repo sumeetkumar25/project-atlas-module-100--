@@ -1,0 +1,130 @@
+# atlas/modules/module120_feature_stability/validator.py
+"""
+Module 120 - Feature Stability Validator
+"""
+
+import numpy as np
+import pandas as pd
+from .engine import FeatureStabilityResult
+from .statistics import FeatureStabilityStatistics
+
+
+class FeatureStabilityValidator:
+    """Validator for feature stability results."""
+    
+    def validate(
+        self,
+        result: FeatureStabilityResult,
+        statistics: FeatureStabilityStatistics
+    ) -> bool:
+        """Validate results and statistics."""
+        issues = []
+        warnings = []
+        
+        # Check stability table
+        if result.stability_table.empty:
+            issues.append("Stability table is empty")
+        else:
+            required_cols = ['feature', 'stability_score', 'decision', 'mean_drift']
+            missing = set(required_cols) - set(result.stability_table.columns)
+            if missing:
+                issues.append(f"Missing columns in stability table: {missing}")
+            
+            # Check scores are in [0, 1]
+            if 'stability_score' in result.stability_table.columns:
+                if not np.all((0 <= result.stability_table['stability_score']) & 
+                            (result.stability_table['stability_score'] <= 1)):
+                    issues.append("Stability scores outside [0, 1] range")
+            
+            # Check decisions are valid
+            if 'decision' in result.stability_table.columns:
+                valid_decisions = {'PASS', 'WARNING', 'FAIL'}
+                invalid = set(result.stability_table['decision'].unique()) - valid_decisions
+                if invalid:
+                    issues.append(f"Invalid decisions found: {invalid}")
+            
+            # Check no NaN scores
+            if 'stability_score' in result.stability_table.columns:
+                if result.stability_table['stability_score'].isna().any():
+                    issues.append("NaN values found in stability scores")
+        
+        # Check feature lists
+        total_decision_count = len(result.passed_features) + len(result.warning_features) + len(result.failed_features)
+        if total_decision_count != len(result.stability_table):
+            issues.append(
+                f"Decision count mismatch: {total_decision_count} vs {len(result.stability_table)}"
+            )
+        
+        # Check no duplicates across decision lists
+        all_decisions = set(result.passed_features) | set(result.warning_features) | set(result.failed_features)
+        if len(all_decisions) != len(result.stability_table):
+            issues.append("Features appear in multiple decision lists")
+        
+        # Check best feature exists
+        if result.summary_statistics['best_feature'] is not None:
+            if result.summary_statistics['best_feature'] not in result.stability_table['feature'].values:
+                issues.append("Best feature missing from stability table")
+        
+        # Check statistics match result
+        if statistics.total_features != result.summary_statistics['total_features']:
+            issues.append(
+                f"Total features mismatch: stats={statistics.total_features}, "
+                f"result={result.summary_statistics['total_features']}"
+            )
+        
+        if statistics.passed_count != len(result.passed_features):
+            issues.append(
+                f"Passed count mismatch: stats={statistics.passed_count}, "
+                f"result={len(result.passed_features)}"
+            )
+        
+        if statistics.warning_count != len(result.warning_features):
+            issues.append(
+                f"Warning count mismatch: stats={statistics.warning_count}, "
+                f"result={len(result.warning_features)}"
+            )
+        
+        if statistics.failed_count != len(result.failed_features):
+            issues.append(
+                f"Failed count mismatch: stats={statistics.failed_count}, "
+                f"result={len(result.failed_features)}"
+            )
+        
+        # Warnings (non-fatal)
+        if statistics.passed_percentage < 50:
+            warnings.append(f"Low pass percentage: {statistics.passed_percentage:.1f}%")
+        
+        if statistics.average_stability < 0.5:
+            warnings.append(f"Low average stability: {statistics.average_stability:.3f}")
+        
+        if warnings:
+            print("\n  WARNINGS:")
+            for warning in warnings:
+                print(f"    ⚠ {warning}")
+        
+        if issues:
+            raise ValueError(
+                f"Feature Stability validation failed with {len(issues)} issue(s):\n" +
+                "\n".join(f"  - {issue}" for issue in issues)
+            )
+        
+        return True
+
+
+def run_validation(result, statistics):
+    """Run validation with user-friendly output."""
+    validator = FeatureStabilityValidator()
+    
+    print("\n" + "=" * 60)
+    print("FEATURE STABILITY VALIDATION")
+    print("=" * 60)
+    
+    try:
+        validator.validate(result, statistics)
+        print("\n  ✓ All validation checks passed")
+        print("=" * 60)
+        return True
+    except ValueError as e:
+        print(e)
+        print("=" * 60)
+        return False

@@ -1,0 +1,9 @@
+# atlas/modules/module119_feature_quality/__init__.py
+"""
+Module 119
+Feature Quality
+"""
+
+from .module import FeatureQualityResearch
+
+__all__ = ["FeatureQualityResearch"]
