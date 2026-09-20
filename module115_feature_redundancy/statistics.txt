@@ -1,0 +1,51 @@
+# atlas/modules/module115_feature_redundancy/statistics.py
+"""
+Module 115 - Feature Redundancy Statistics
+"""
+
+from dataclasses import dataclass, asdict
+import pandas as pd
+from .engine import FeatureRedundancyResult
+
+
+@dataclass
+class FeatureRedundancyStatistics:
+    """High-level statistics from feature redundancy analysis."""
+    total_features: int
+    unique_clusters: int
+    redundancy_index: float
+    max_cluster_size: int
+    min_cluster_size: int
+    unique_features: int
+    redundant_features: int
+
+
+class FeatureRedundancyStatisticsEngine:
+    """Engine for generating high-level statistics."""
+    
+    METADATA = {
+        "module": 115,
+        "name": "Feature Redundancy",
+        "version": "1.0.0",
+        "description": "Analyzes redundancy between features using multiple similarity measures"
+    }
+    
+    def analyze(self, result: FeatureRedundancyResult) -> FeatureRedundancyStatistics:
+        """Analyze results and generate high-level statistics."""
+        return FeatureRedundancyStatistics(
+            total_features=result.summary_statistics['total_features'],
+            unique_clusters=result.summary_statistics['unique_clusters'],
+            redundancy_index=result.summary_statistics['redundancy_index'],
+            max_cluster_size=result.summary_statistics['max_cluster_size'],
+            min_cluster_size=result.summary_statistics['min_cluster_size'],
+            unique_features=result.summary_statistics['unique_features'],
+            redundant_features=result.summary_statistics['redundant_features']
+        )
+    
+    def summary_dataframe(self, stats: FeatureRedundancyStatistics) -> pd.DataFrame:
+        """Convert statistics to DataFrame."""
+        return pd.DataFrame([asdict(stats)])
+    
+    def summary_dict(self, stats: FeatureRedundancyStatistics) -> dict:
+        """Convert statistics to dictionary."""
+        return asdict(stats)

@@ -1,0 +1,57 @@
+# atlas/modules/module116_feature_interaction/statistics.py
+"""
+Module 116 - Feature Interaction Statistics
+"""
+
+from dataclasses import dataclass, asdict
+import pandas as pd
+from .engine import FeatureInteractionResult
+
+
+@dataclass
+class FeatureInteractionStatistics:
+    """High-level statistics from feature interaction analysis."""
+    total_features: int
+    pairs_tested: int
+    interaction_index: float
+    strong_synergy_pairs: int
+    moderate_pairs: int
+    conflicting_pairs: int
+    independent_pairs: int
+    best_pair: str
+    best_gain: float
+    best_synergy: float
+
+
+class FeatureInteractionStatisticsEngine:
+    """Engine for generating high-level statistics."""
+    
+    METADATA = {
+        "module": 116,
+        "name": "Feature Interaction",
+        "version": "1.0.0",
+        "description": "Measures synergy between feature pairs"
+    }
+    
+    def analyze(self, result: FeatureInteractionResult) -> FeatureInteractionStatistics:
+        """Analyze results and generate high-level statistics."""
+        return FeatureInteractionStatistics(
+            total_features=result.summary_statistics['total_features'],
+            pairs_tested=result.summary_statistics['pairs_tested'],
+            interaction_index=result.summary_statistics['interaction_index'],
+            strong_synergy_pairs=result.summary_statistics['strong_synergy_pairs'],
+            moderate_pairs=result.summary_statistics['moderate_pairs'],
+            conflicting_pairs=result.summary_statistics['conflicting_pairs'],
+            independent_pairs=result.summary_statistics['independent_pairs'],
+            best_pair=result.summary_statistics['best_pair'],
+            best_gain=result.summary_statistics['best_gain'],
+            best_synergy=result.summary_statistics['best_synergy']
+        )
+    
+    def summary_dataframe(self, stats: FeatureInteractionStatistics) -> pd.DataFrame:
+        """Convert statistics to DataFrame."""
+        return pd.DataFrame([asdict(stats)])
+    
+    def summary_dict(self, stats: FeatureInteractionStatistics) -> dict:
+        """Convert statistics to dictionary."""
+        return asdict(stats)

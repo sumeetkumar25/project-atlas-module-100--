@@ -1,0 +1,119 @@
+# atlas/modules/module115_feature_redundancy/validator.py
+"""
+Module 115 - Feature Redundancy Validator
+"""
+
+import numpy as np
+import pandas as pd
+from .engine import FeatureRedundancyResult
+from .statistics import FeatureRedundancyStatistics
+
+
+class FeatureRedundancyValidator:
+    """Validator for feature redundancy results."""
+    
+    def validate(
+        self,
+        result: FeatureRedundancyResult,
+        statistics: FeatureRedundancyStatistics
+    ) -> bool:
+        """Validate results and statistics."""
+        issues = []
+        warnings = []
+        
+        # Check redundancy table
+        if result.redundancy_table.empty:
+            issues.append("Redundancy table is empty")
+        else:
+            required_cols = ['feature_a', 'feature_b', 'pearson', 'spearman', 
+                           'mutual_information', 'distance_correlation', 'redundancy_score']
+            missing = set(required_cols) - set(result.redundancy_table.columns)
+            if missing:
+                issues.append(f"Missing columns in redundancy table: {missing}")
+            
+            # Check redundancy scores are in [0, 1]
+            if 'redundancy_score' in result.redundancy_table.columns:
+                if not np.all((0 <= result.redundancy_table['redundancy_score']) & 
+                            (result.redundancy_table['redundancy_score'] <= 1)):
+                    issues.append("Redundancy scores outside [0, 1] range")
+        
+        # Check similarity matrices
+        required_matrices = ['pearson', 'spearman', 'mutual_information', 'distance_correlation', 'redundancy_score']
+        missing_matrices = set(required_matrices) - set(result.similarity_matrices.keys())
+        if missing_matrices:
+            issues.append(f"Missing similarity matrices: {missing_matrices}")
+        
+        for name, matrix in result.similarity_matrices.items():
+            if matrix.empty:
+                issues.append(f"{name} matrix is empty")
+            else:
+                # Check symmetry
+                if not np.allclose(matrix.values, matrix.values.T, atol=1e-10):
+                    issues.append(f"{name} matrix is not symmetric")
+        
+        # Check clusters
+        if result.clusters.empty:
+            issues.append("Cluster assignments are empty")
+        else:
+            if 'feature' not in result.clusters.columns or 'cluster' not in result.clusters.columns:
+                issues.append("Cluster DataFrame missing required columns")
+        
+        # Check cluster representatives
+        if result.cluster_representatives.empty:
+            issues.append("Cluster representatives are empty")
+        
+        # Check redundancy index
+        if not (0 <= result.redundancy_index <= 100):
+            issues.append(f"Redundancy index outside [0, 100]: {result.redundancy_index}")
+        
+        # Check statistics match result
+        if statistics.total_features != result.summary_statistics['total_features']:
+            issues.append(
+                f"Total features mismatch: stats={statistics.total_features}, "
+                f"result={result.summary_statistics['total_features']}"
+            )
+        
+        if statistics.redundancy_index != result.summary_statistics['redundancy_index']:
+            issues.append(
+                f"Redundancy index mismatch: stats={statistics.redundancy_index}, "
+                f"result={result.summary_statistics['redundancy_index']}"
+            )
+        
+        # Warnings (non-fatal)
+        if result.redundancy_index > 70:
+            warnings.append(f"High redundancy index: {result.redundancy_index:.2f}/100")
+        
+        if result.summary_statistics['redundant_features'] > result.summary_statistics['total_features'] * 0.5:
+            warnings.append(f"More than 50% features are redundant: {result.summary_statistics['redundant_features']}/{result.summary_statistics['total_features']}")
+        
+        if warnings:
+            print("\n  WARNINGS:")
+            for warning in warnings:
+                print(f"    ⚠ {warning}")
+        
+        if issues:
+            raise ValueError(
+                f"Feature Redundancy validation failed with {len(issues)} issue(s):\n" +
+                "\n".join(f"  - {issue}" for issue in issues)
+            )
+        
+        return True
+
+
+def run_validation(result, statistics):
+    """Run validation with user-friendly output."""
+    validator = FeatureRedundancyValidator()
+    
+    print("\n" + "=" * 60)
+    print("FEATURE REDUNDANCY VALIDATION")
+    print("=" * 60)
+    
+    try:
+        validator.validate(result, statistics)
+        print("\n  ✓ All validation checks passed")
+        print("=" * 60)
+        return True
+    except ValueError as e:
+        print(e)
+        print("=" * 60)
+        return False

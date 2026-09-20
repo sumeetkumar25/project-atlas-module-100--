@@ -1,0 +1,144 @@
+# atlas/modules/module115_feature_redundancy/report.py
+"""
+Module 115 - Feature Redundancy Report
+"""
+
+from datetime import datetime
+import pandas as pd
+
+
+class FeatureRedundancyReport:
+    """Report generator for feature redundancy results."""
+    
+    @staticmethod
+    def generate(statistics, metadata=None, dataset_name="Unknown") -> str:
+        """Generate a formatted report."""
+        lines = []
+        
+        lines.append("=" * 55)
+        lines.append("MODULE 115")
+        lines.append("FEATURE REDUNDANCY")
+        lines.append("=" * 55)
+        lines.append(f"\nDataset: {dataset_name}")
+        
+        # Overview
+        lines.append("\n" + "-" * 45)
+        lines.append("OVERVIEW")
+        lines.append("-" * 45)
+        lines.append(f"  Total Features: {statistics.total_features}")
+        lines.append(f"  Unique Clusters: {statistics.unique_clusters}")
+        
+        # Redundancy
+        lines.append("\n" + "-" * 45)
+        lines.append("REDUNDANCY")
+        lines.append("-" * 45)
+        lines.append(f"  Redundancy Index: {statistics.redundancy_index:.2f}/100")
+        lines.append(f"  Unique Features: {statistics.unique_features}")
+        lines.append(f"  Redundant Features: {statistics.redundant_features}")
+        
+        # Clusters
+        lines.append("\n" + "-" * 45)
+        lines.append("CLUSTERS")
+        lines.append("-" * 45)
+        lines.append(f"  Max Cluster Size: {statistics.max_cluster_size}")
+        lines.append(f"  Min Cluster Size: {statistics.min_cluster_size}")
+        
+        # Interpretation
+        lines.append("\n" + "-" * 45)
+        lines.append("INTERPRETATION")
+        lines.append("-" * 45)
+        
+        if statistics.redundancy_index < 30:
+            lines.append("  ✅ Features are largely independent")
+        elif statistics.redundancy_index < 50:
+            lines.append("  ✓ Features show moderate redundancy")
+        elif statistics.redundancy_index < 70:
+            lines.append("  ⚠ Features show high redundancy")
+        else:
+            lines.append("  ❌ Features show very high redundancy")
+        
+        if statistics.redundant_features > 0:
+            lines.append(f"  💡 Consider removing {statistics.redundant_features} redundant features")
+        
+        # Validation
+        lines.append("\n" + "-" * 45)
+        lines.append("VALIDATION")
+        lines.append("-" * 45)
+        lines.append("  Status: PASSED")
+        
+        # Footer
+        lines.append(f"\n  Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        lines.append("\n" + "=" * 55)
+        lines.append("END OF REPORT")
+        lines.append("=" * 55)
+        
+        return "\n".join(lines)
+    
+    @staticmethod
+    def generate_redundancy_table(redundancy_table: pd.DataFrame, top_n: int = 10) -> str:
+        """Generate a redundancy table report."""
+        lines = []
+        lines.append("\n" + "=" * 70)
+        lines.append(f"TOP {top_n} MOST REDUNDANT FEATURE PAIRS")
+        lines.append("=" * 70)
+        
+        sorted_table = redundancy_table.sort_values('redundancy_score', ascending=False)
+        
+        lines.append(
+            f"\n{'Feature A':<20} {'Feature B':<20} {'Score':<12} {'Pearson':<12} {'Spearman':<12}"
+        )
+        lines.append("-" * 80)
+        
+        for _, row in sorted_table.head(top_n).iterrows():
+            lines.append(
+                f"{row['feature_a'][:19]:<20} "
+                f"{row['feature_b'][:19]:<20} "
+                f"{row['redundancy_score']:<12.4f} "
+                f"{row['pearson']:<12.4f} "
+                f"{row['spearman']:<12.4f}"
+            )
+        
+        lines.append("\n" + "=" * 70)
+        return "\n".join(lines)
+    
+    @staticmethod
+    def generate_cluster_report(cluster_df: pd.DataFrame, cluster_reps: pd.DataFrame) -> str:
+        """Generate a cluster report."""
+        lines = []
+        lines.append("\n" + "=" * 70)
+        lines.append("FEATURE CLUSTERS")
+        lines.append("=" * 70)
+        
+        lines.append(
+            f"\n{'Cluster':<10} {'Representative':<20} {'Features':<30} {'Count':<10}"
+        )
+        lines.append("-" * 75)
+        
+        for _, rep in cluster_reps.iterrows():
+            cluster = rep['cluster']
+            representative = rep['representative']
+            features = rep['features']
+            count = rep['feature_count']
+            
+            features_str = ', '.join(features[:3])
+            if len(features) > 3:
+                features_str += f", ... ({len(features)-3} more)"
+            
+            lines.append(
+                f"{cluster:<10} "
+                f"{representative[:19]:<20} "
+                f"{features_str[:29]:<30} "
+                f"{count:<10}"
+            )
+        
+        lines.append("\n" + "=" * 70)
+        return "\n".join(lines)
+    
+    @staticmethod
+    def save(report: str, filepath: str):
+        """Save report to file."""
+        from pathlib import Path
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(report)

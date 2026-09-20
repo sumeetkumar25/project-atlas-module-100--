@@ -1,0 +1,376 @@
+"""
+Module 116 - Feature Interaction Analysis Engine
+
+Measures synergy between feature pairs.
+
+Methods:
+  1. Individual Score: Predictive power of single feature
+  2. Combined Score: Predictive power of feature pair
+  3. Interaction Gain: Improvement from combining features
+  4. Synergy Score: Normalized interaction gain
+
+Output: Interaction table, matrix, and synergy rankings.
+"""
+
+import numpy as np
+import pandas as pd
+from dataclasses import dataclass
+from typing import Optional, Dict, Any, List, Tuple
+from itertools import combinations
+from sklearn.metrics import roc_auc_score
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import cross_val_score, StratifiedKFold
+import warnings
+warnings.filterwarnings('ignore')
+
+
+@dataclass
+class FeatureInteractionResult:
+    """Results from feature interaction analysis."""
+    interaction_table: pd.DataFrame
+    interaction_matrix: pd.DataFrame
+    top_interactions: pd.DataFrame
+    interaction_index: float
+    summary_statistics: Dict[str, Any]
+
+
+class FeatureInteractionEngine:
+    """Core engine for feature interaction analysis."""
+
+    # Columns to ignore (not features)
+    IGNORE_COLS = {
+        "timestamp", "date", "time", "index",
+        "open", "high", "low", "close", "volume",
+        "future_breakout"
+    }
+
+    # Interaction type thresholds
+    SYNERGY_THRESHOLD = 0.25
+    MODERATE_THRESHOLD = 0.10
+    CONFLICT_THRESHOLD = -0.05
+
+    def __init__(
+        self,
+        min_samples: int = 100,
+        cv_folds: int = 5,
+        random_state: int = 42,
+        metric: str = "roc_auc"
+    ):
+        """
+        Initialize the feature interaction engine.
+        
+        Args:
+            min_samples: Minimum samples required
+            cv_folds: Number of cross-validation folds
+            random_state: Random seed for reproducibility
+            metric: Evaluation metric ('roc_auc', 'accuracy', 'f1')
+        """
+        self.min_samples = min_samples
+        self.cv_folds = cv_folds
+        self.random_state = random_state
+        self.metric = metric
+
+    def get_feature_columns(self, df: pd.DataFrame) -> List[str]:
+        """
+        Identify feature columns (exclude metadata and target).
+        """
+        features = [
+            c for c in df.columns
+            if c not in self.IGNORE_COLS
+            and pd.api.types.is_numeric_dtype(df[c])
+            and df[c].nunique() > 1
+        ]
+        return features
+
+    def generate_pairs(self, features: List[str]) -> List[Tuple[str, str]]:
+        """
+        Generate all unique feature pairs.
+        """
+        return list(combinations(features, 2))
+
+    def compute_feature_score(
+        self,
+        df: pd.DataFrame,
+        feature: str,
+        y: np.ndarray
+    ) -> float:
+        """
+        Compute individual feature score using cross-validated ROC AUC.
+        """
+        X = df[feature].values.reshape(-1, 1)
+        
+        if len(np.unique(X)) < 2:
+            return 0.0
+        
+        if len(np.unique(y)) < 2:
+            return 0.0
+        
+        try:
+            rf = RandomForestClassifier(
+                n_estimators=50,
+                random_state=self.random_state,
+                n_jobs=1
+            )
+            
+            cv = StratifiedKFold(
+                n_splits=min(self.cv_folds, min(np.bincount(y))),
+                shuffle=True,
+                random_state=self.random_state
+            )
+            
+            if self.metric == 'roc_auc':
+                scores = cross_val_score(rf, X, y, cv=cv, scoring='roc_auc')
+            elif self.metric == 'accuracy':
+                scores = cross_val_score(rf, X, y, cv=cv, scoring='accuracy')
+            elif self.metric == 'f1':
+                scores = cross_val_score(rf, X, y, cv=cv, scoring='f1')
+            else:
+                scores = cross_val_score(rf, X, y, cv=cv, scoring='roc_auc')
+            
+            return float(np.mean(scores))
+        except:
+            return 0.0
+
+    def compute_combined_score(
+        self,
+        df: pd.DataFrame,
+        feature_a: str,
+        feature_b: str,
+        y: np.ndarray
+    ) -> float:
+        """
+        Compute combined feature pair score using cross-validated ROC AUC.
+        """
+        X = df[[feature_a, feature_b]].values
+        
+        if len(np.unique(y)) < 2:
+            return 0.0
+        
+        try:
+            rf = RandomForestClassifier(
+                n_estimators=50,
+                random_state=self.random_state,
+                n_jobs=1
+            )
+            
+            cv = StratifiedKFold(
+                n_splits=min(self.cv_folds, min(np.bincount(y))),
+                shuffle=True,
+                random_state=self.random_state
+            )
+            
+            if self.metric == 'roc_auc':
+                scores = cross_val_score(rf, X, y, cv=cv, scoring='roc_auc')
+            elif self.metric == 'accuracy':
+                scores = cross_val_score(rf, X, y, cv=cv, scoring='accuracy')
+            elif self.metric == 'f1':
+                scores = cross_val_score(rf, X, y, cv=cv, scoring='f1')
+            else:
+                scores = cross_val_score(rf, X, y, cv=cv, scoring='roc_auc')
+            
+            return float(np.mean(scores))
+        except:
+            return 0.0
+
+    def classify_interaction(
+        self,
+        synergy: float,
+        gain: float
+    ) -> str:
+        """
+        Classify interaction type based on synergy and gain.
+        """
+        if synergy > self.SYNERGY_THRESHOLD:
+            return "Strong Synergy"
+        elif synergy > self.MODERATE_THRESHOLD:
+            return "Moderate Synergy"
+        elif gain < self.CONFLICT_THRESHOLD:
+            return "Conflict"
+        else:
+            return "Independent"
+
+    def compute_interactions(
+        self,
+        df: pd.DataFrame,
+        features: List[str],
+        y: np.ndarray
+    ) -> pd.DataFrame:
+        """
+        Compute interactions for all feature pairs.
+        
+        Optimized: Individual feature scores are computed once and cached.
+        """
+        pairs = self.generate_pairs(features)
+        rows = []
+        
+        # Cache individual feature scores (O(n) instead of O(2*n^2))
+        print(f"  Computing individual feature scores for {len(features)} features...")
+        feature_scores = {
+            feature: self.compute_feature_score(df, feature, y)
+            for feature in features
+        }
+        
+        print(f"  Computing combined scores for {len(pairs)} pairs...")
+        for feature_a, feature_b in pairs:
+            # Get cached individual scores
+            score_a = feature_scores[feature_a]
+            score_b = feature_scores[feature_b]
+            
+            # Combined score
+            combined_score = self.compute_combined_score(
+                df, feature_a, feature_b, y
+            )
+            
+            # Interaction gain
+            max_individual = max(score_a, score_b)
+            gain = combined_score - max_individual
+            
+            # Synergy score (clamped to [0, 1])
+            synergy = np.clip(
+                gain / (max_individual + 1e-12),
+                0.0, 1.0
+            )
+            
+            # Interaction type
+            interaction_type = self.classify_interaction(synergy, gain)
+            
+            rows.append({
+                "feature_a": feature_a,
+                "feature_b": feature_b,
+                "score_a": score_a,
+                "score_b": score_b,
+                "combined_score": combined_score,
+                "max_individual": max_individual,
+                "interaction_gain": gain,
+                "synergy_score": synergy,
+                "interaction_type": interaction_type
+            })
+        
+        return pd.DataFrame(rows)
+
+    def build_interaction_matrix(
+        self,
+        interaction_table: pd.DataFrame,
+        features: List[str]
+    ) -> pd.DataFrame:
+        """
+        Build interaction matrix from interaction table.
+        """
+        n = len(features)
+        matrix = np.zeros((n, n))
+        
+        # Create mapping from feature to index
+        feature_to_idx = {f: i for i, f in enumerate(features)}
+        
+        # Fill matrix with synergy scores
+        for _, row in interaction_table.iterrows():
+            i = feature_to_idx[row['feature_a']]
+            j = feature_to_idx[row['feature_b']]
+            matrix[i, j] = row['synergy_score']
+            matrix[j, i] = row['synergy_score']
+        
+        # Set diagonal to 1.0
+        np.fill_diagonal(matrix, 1.0)
+        
+        return pd.DataFrame(matrix, index=features, columns=features)
+
+    def get_top_interactions(
+        self,
+        interaction_table: pd.DataFrame,
+        top_n: int = 10
+    ) -> pd.DataFrame:
+        """
+        Get top N interactions by synergy score.
+        """
+        return interaction_table.nlargest(top_n, 'synergy_score')
+
+    def compute_interaction_index(
+        self,
+        interaction_table: pd.DataFrame
+    ) -> float:
+        """
+        Compute overall interaction index.
+        
+        Average synergy across all pairs.
+        """
+        if interaction_table.empty:
+            return 0.0
+        
+        return float(interaction_table['synergy_score'].mean() * 100)
+
+    def compute(self, df: pd.DataFrame) -> FeatureInteractionResult:
+        """
+        Main computation method.
+        """
+        print("\n  Computing Feature Interactions...")
+        
+        # Get target
+        if 'future_breakout' not in df.columns:
+            raise ValueError("DataFrame must contain 'future_breakout' column")
+        
+        y = df['future_breakout'].values
+        
+        # Get features
+        features = self.get_feature_columns(df)
+        print(f"  Found {len(features)} features")
+        
+        if len(features) < 2:
+            raise ValueError("Need at least 2 features for interaction analysis")
+        
+        # Generate pairs
+        n_pairs = len(features) * (len(features) - 1) // 2
+        print(f"  Testing {n_pairs} feature pairs...")
+        
+        # Compute interactions
+        interaction_table = self.compute_interactions(df, features, y)
+        
+        # Build interaction matrix
+        interaction_matrix = self.build_interaction_matrix(
+            interaction_table, features
+        )
+        
+        # Get top interactions
+        top_interactions = self.get_top_interactions(interaction_table, top_n=10)
+        
+        # Compute interaction index
+        interaction_index = self.compute_interaction_index(interaction_table)
+        
+        # Summary statistics
+        strong_pairs = interaction_table[
+            interaction_table['interaction_type'] == 'Strong Synergy'
+        ]
+        moderate_pairs = interaction_table[
+            interaction_table['interaction_type'] == 'Moderate Synergy'
+        ]
+        conflict_pairs = interaction_table[
+            interaction_table['interaction_type'] == 'Conflict'
+        ]
+        independent_pairs = interaction_table[
+            interaction_table['interaction_type'] == 'Independent'
+        ]
+        
+        summary = {
+            'total_features': len(features),
+            'pairs_tested': len(interaction_table),
+            'interaction_index': interaction_index,
+            'strong_synergy_pairs': len(strong_pairs),
+            'moderate_pairs': len(moderate_pairs),
+            'conflicting_pairs': len(conflict_pairs),
+            'independent_pairs': len(independent_pairs),
+            'best_pair': top_interactions.iloc[0]['feature_a'] + ' + ' + top_interactions.iloc[0]['feature_b'] if not top_interactions.empty else None,
+            'best_gain': float(top_interactions.iloc[0]['interaction_gain']) if not top_interactions.empty else 0.0,
+            'best_synergy': float(top_interactions.iloc[0]['synergy_score']) if not top_interactions.empty else 0.0
+        }
+        
+        print(f"  Interaction Index: {interaction_index:.2f}/100")
+        print(f"  Strong Synergy: {len(strong_pairs)} pairs")
+        print(f"  Moderate: {len(moderate_pairs)} pairs")
+        print(f"  Conflicts: {len(conflict_pairs)} pairs")
+        
+        return FeatureInteractionResult(
+            interaction_table=interaction_table,
+            interaction_matrix=interaction_matrix,
+            top_interactions=top_interactions,
+            interaction_index=interaction_index,
+            summary_statistics=summary
+        )

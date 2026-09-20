@@ -1,0 +1,129 @@
+# atlas/modules/module116_feature_interaction/validator.py
+"""
+Module 116 - Feature Interaction Validator
+"""
+
+import numpy as np
+import pandas as pd
+from .engine import FeatureInteractionResult
+from .statistics import FeatureInteractionStatistics
+
+
+class FeatureInteractionValidator:
+    """Validator for feature interaction results."""
+    
+    def validate(
+        self,
+        result: FeatureInteractionResult,
+        statistics: FeatureInteractionStatistics
+    ) -> bool:
+        """Validate results and statistics."""
+        issues = []
+        warnings = []
+        
+        # Check interaction table
+        if result.interaction_table.empty:
+            issues.append("Interaction table is empty")
+        else:
+            required_cols = ['feature_a', 'feature_b', 'score_a', 'score_b', 
+                           'combined_score', 'interaction_gain', 'synergy_score', 
+                           'interaction_type']
+            missing = set(required_cols) - set(result.interaction_table.columns)
+            if missing:
+                issues.append(f"Missing columns in interaction table: {missing}")
+            
+            # Check interaction_gain
+            if 'interaction_gain' in result.interaction_table.columns:
+                if not np.all(result.interaction_table['interaction_gain'] <= 1):
+                    issues.append("Interaction gain > 1")
+            
+            # Check synergy_score
+            if 'synergy_score' in result.interaction_table.columns:
+                if not np.all((0 <= result.interaction_table['synergy_score']) & 
+                            (result.interaction_table['synergy_score'] <= 1)):
+                    issues.append("Synergy scores outside [0, 1] range")
+            
+            # Check no duplicate pairs
+            pairs = set(zip(result.interaction_table['feature_a'], 
+                          result.interaction_table['feature_b']))
+            if len(pairs) != len(result.interaction_table):
+                issues.append("Duplicate feature pairs found")
+        
+        # Check interaction matrix
+        if result.interaction_matrix.empty:
+            issues.append("Interaction matrix is empty")
+        else:
+            # Check symmetry
+            if not np.allclose(result.interaction_matrix.values, 
+                              result.interaction_matrix.values.T, atol=1e-10):
+                issues.append("Interaction matrix is not symmetric")
+            
+            # Check diagonal is 1
+            if not np.allclose(np.diag(result.interaction_matrix.values), 1, atol=1e-10):
+                issues.append("Matrix diagonal is not 1")
+        
+        # Check top interactions
+        if result.top_interactions.empty:
+            issues.append("Top interactions is empty")
+        
+        # Check interaction index
+        if not (0 <= result.interaction_index <= 100):
+            issues.append(f"Interaction index outside [0, 100]: {result.interaction_index}")
+        
+        # Check statistics match result
+        if statistics.total_features != result.summary_statistics['total_features']:
+            issues.append(
+                f"Total features mismatch: stats={statistics.total_features}, "
+                f"result={result.summary_statistics['total_features']}"
+            )
+        
+        if statistics.interaction_index != result.summary_statistics['interaction_index']:
+            issues.append(
+                f"Interaction index mismatch: stats={statistics.interaction_index}, "
+                f"result={result.summary_statistics['interaction_index']}"
+            )
+        
+        if statistics.best_pair != result.summary_statistics['best_pair']:
+            issues.append(
+                f"Best pair mismatch: stats={statistics.best_pair}, "
+                f"result={result.summary_statistics['best_pair']}"
+            )
+        
+        # Warnings (non-fatal)
+        if result.interaction_index < 30:
+            warnings.append(f"Low interaction index: {result.interaction_index:.2f}/100")
+        
+        if result.summary_statistics['strong_synergy_pairs'] == 0:
+            warnings.append("No strong synergy pairs found")
+        
+        if warnings:
+            print("\n  WARNINGS:")
+            for warning in warnings:
+                print(f"    ⚠ {warning}")
+        
+        if issues:
+            raise ValueError(
+                f"Feature Interaction validation failed with {len(issues)} issue(s):\n" +
+                "\n".join(f"  - {issue}" for issue in issues)
+            )
+        
+        return True
+
+
+def run_validation(result, statistics):
+    """Run validation with user-friendly output."""
+    validator = FeatureInteractionValidator()
+    
+    print("\n" + "=" * 60)
+    print("FEATURE INTERACTION VALIDATION")
+    print("=" * 60)
+    
+    try:
+        validator.validate(result, statistics)
+        print("\n  ✓ All validation checks passed")
+        print("=" * 60)
+        return True
+    except ValueError as e:
+        print(e)
+        print("=" * 60)
+        return False

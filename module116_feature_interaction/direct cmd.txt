@@ -1,0 +1,1 @@
+python -m atlas.modules.module116_feature_interaction.test_module

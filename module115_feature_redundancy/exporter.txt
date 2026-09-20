@@ -1,0 +1,48 @@
+# atlas/modules/module115_feature_redundancy/exporter.py
+"""
+Module 115 - Feature Redundancy Exporter
+"""
+
+import pandas as pd
+from pathlib import Path
+import json
+
+
+class FeatureRedundancyExporter:
+    """Exporter for feature redundancy results."""
+    
+    @staticmethod
+    def export_redundancy_table(df: pd.DataFrame, filepath: str):
+        """Export redundancy table to CSV."""
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(path, index=False)
+    
+    @staticmethod
+    def export_similarity_matrix(matrix: pd.DataFrame, filepath: str):
+        """Export similarity matrix to CSV."""
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        matrix.to_csv(path)
+    
+    @staticmethod
+    def export_clusters(df: pd.DataFrame, filepath: str):
+        """Export cluster assignments to CSV."""
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(path, index=False)
+    
+    @staticmethod
+    def export_cluster_representatives(df: pd.DataFrame, filepath: str):
+        """Export cluster representatives to CSV."""
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(path, index=False)
+    
+    @staticmethod
+    def export_summary(summary: dict, filepath: str):
+        """Export summary to CSV."""
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        df = pd.DataFrame([summary])
+        df.to_csv(path, index=False)

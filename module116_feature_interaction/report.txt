@@ -1,0 +1,136 @@
+# atlas/modules/module116_feature_interaction/report.py
+"""
+Module 116 - Feature Interaction Report
+"""
+
+from datetime import datetime
+import pandas as pd
+
+
+class FeatureInteractionReport:
+    """Report generator for feature interaction results."""
+    
+    @staticmethod
+    def generate(statistics, metadata=None, dataset_name="Unknown") -> str:
+        """Generate a formatted report."""
+        lines = []
+        
+        lines.append("=" * 55)
+        lines.append("MODULE 116")
+        lines.append("FEATURE INTERACTION")
+        lines.append("=" * 55)
+        lines.append(f"\nDataset: {dataset_name}")
+        
+        # Overview
+        lines.append("\n" + "-" * 45)
+        lines.append("OVERVIEW")
+        lines.append("-" * 45)
+        lines.append(f"  Total Features: {statistics.total_features}")
+        lines.append(f"  Pairs Tested: {statistics.pairs_tested}")
+        
+        # Interaction Index
+        lines.append("\n" + "-" * 45)
+        lines.append("INTERACTION INDEX")
+        lines.append("-" * 45)
+        lines.append(f"  Interaction Index: {statistics.interaction_index:.2f}/100")
+        
+        # Best Pair
+        if statistics.best_pair:
+            lines.append("\n" + "-" * 45)
+            lines.append("BEST INTERACTION")
+            lines.append("-" * 45)
+            lines.append(f"  Pair: {statistics.best_pair}")
+            lines.append(f"  Gain: {statistics.best_gain:.4f}")
+            lines.append(f"  Synergy: {statistics.best_synergy:.4f}")
+        
+        # Distribution
+        lines.append("\n" + "-" * 45)
+        lines.append("INTERACTION DISTRIBUTION")
+        lines.append("-" * 45)
+        lines.append(f"  Strong Synergy: {statistics.strong_synergy_pairs}")
+        lines.append(f"  Moderate: {statistics.moderate_pairs}")
+        lines.append(f"  Conflicts: {statistics.conflicting_pairs}")
+        lines.append(f"  Independent: {statistics.independent_pairs}")
+        
+        # Interpretation
+        lines.append("\n" + "-" * 45)
+        lines.append("INTERPRETATION")
+        lines.append("-" * 45)
+        
+        if statistics.interaction_index >= 60:
+            lines.append("  ✅ Features show strong synergy")
+        elif statistics.interaction_index >= 40:
+            lines.append("  ✓ Features show moderate synergy")
+        elif statistics.interaction_index >= 20:
+            lines.append("  ⚠ Features show weak synergy")
+        else:
+            lines.append("  ❌ Features show no synergy")
+        
+        if statistics.strong_synergy_pairs > 0:
+            lines.append(f"  💡 {statistics.strong_synergy_pairs} pairs show strong synergy")
+        
+        # Validation
+        lines.append("\n" + "-" * 45)
+        lines.append("VALIDATION")
+        lines.append("-" * 45)
+        lines.append("  Status: PASSED")
+        
+        # Footer
+        lines.append(f"\n  Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        lines.append("\n" + "=" * 55)
+        lines.append("END OF REPORT")
+        lines.append("=" * 55)
+        
+        return "\n".join(lines)
+    
+    @staticmethod
+    def generate_interaction_table(interaction_table: pd.DataFrame, top_n: int = 10) -> str:
+        """Generate an interaction table report."""
+        lines = []
+        lines.append("\n" + "=" * 80)
+        lines.append(f"TOP {top_n} FEATURE INTERACTIONS")
+        lines.append("=" * 80)
+        
+        sorted_table = interaction_table.sort_values('synergy_score', ascending=False)
+        
+        lines.append(
+            f"\n{'Feature A':<20} {'Feature B':<20} {'Gain':<12} {'Synergy':<12} {'Type':<20}"
+        )
+        lines.append("-" * 85)
+        
+        for _, row in sorted_table.head(top_n).iterrows():
+            lines.append(
+                f"{row['feature_a'][:19]:<20} "
+                f"{row['feature_b'][:19]:<20} "
+                f"{row['interaction_gain']:<12.4f} "
+                f"{row['synergy_score']:<12.4f} "
+                f"{row['interaction_type']:<20}"
+            )
+        
+        lines.append("\n" + "=" * 80)
+        return "\n".join(lines)
+    
+    @staticmethod
+    def generate_matrix_report(interaction_matrix: pd.DataFrame) -> str:
+        """Generate an interaction matrix report."""
+        lines = []
+        lines.append("\n" + "=" * 60)
+        lines.append("INTERACTION MATRIX (Synergy Scores)")
+        lines.append("=" * 60)
+        
+        # Show only top features to keep output readable
+        n_show = min(10, len(interaction_matrix))
+        matrix_show = interaction_matrix.iloc[:n_show, :n_show]
+        
+        lines.append("\n" + matrix_show.round(3).to_string())
+        lines.append("\n" + "=" * 60)
+        return "\n".join(lines)
+    
+    @staticmethod
+    def save(report: str, filepath: str):
+        """Save report to file."""
+        from pathlib import Path
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(report)

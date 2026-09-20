@@ -1,0 +1,398 @@
+# atlas/modules/module116_feature_interaction/test_module.py
+"""
+Module 116 - Integration Test
+
+Tests feature interaction engine, statistics, validator, report, and pipeline.
+"""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+
+import numpy as np
+import pandas as pd
+
+from atlas.modules.module116_feature_interaction.engine import FeatureInteractionEngine
+from atlas.modules.module116_feature_interaction.statistics import FeatureInteractionStatisticsEngine
+from atlas.modules.module116_feature_interaction.validator import run_validation
+from atlas.modules.module116_feature_interaction.module import FeatureInteractionResearch
+
+
+def create_test_data(n=500, seed=42):
+    """Create synthetic test data with feature interactions."""
+    np.random.seed(seed)
+    
+    # Create features with known interactions
+    x1 = np.random.randn(n)
+    x2 = np.random.randn(n)
+    x3 = np.random.randn(n) * 0.3 + x1 * 0.3
+    x4 = np.random.randn(n)  # Pure noise
+    x5 = np.random.randn(n) * 0.5 + x2 * 0.5
+    
+    # Target with interactions: x1*x2 and x1*x3
+    y_prob = 1 / (1 + np.exp(-(
+        0.3 * x1 * x2 + 
+        0.2 * x1 * x3 +
+        0.1 * x2 +
+        0.1 * x1
+    )))
+    y = (np.random.random(n) < y_prob).astype(int)
+    
+    df = pd.DataFrame({
+        'open': 100 + np.random.randn(n) * 10,
+        'high': 100 + np.random.randn(n) * 10 + np.abs(np.random.randn(n) * 2),
+        'low': 100 + np.random.randn(n) * 10 - np.abs(np.random.randn(n) * 2),
+        'close': 100 + np.random.randn(n) * 10,
+        'volume': np.random.randn(n) * 100 + 1000,
+        'feature1': x1,
+        'feature2': x2,
+        'feature3': x3,
+        'feature4': x4,
+        'feature5': x5,
+        'future_breakout': y
+    })
+    
+    return df
+
+
+def test_engine_features():
+    """Test 1: Feature detection."""
+    print("\n" + "=" * 60)
+    print("TEST 1: Feature Detection")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeatureInteractionEngine()
+    
+    features = engine.get_feature_columns(df)
+    
+    assert 'feature1' in features
+    assert 'feature2' in features
+    assert 'feature3' in features
+    assert 'feature4' in features
+    assert 'feature5' in features
+    assert 'close' not in features
+    
+    print(f"  Found {len(features)} features")
+    print("  ✓ Feature detection test passed")
+    return True
+
+
+def test_engine_pairs():
+    """Test 2: Pair generation."""
+    print("\n" + "=" * 60)
+    print("TEST 2: Pair Generation")
+    print("=" * 60)
+    
+    engine = FeatureInteractionEngine()
+    features = ['a', 'b', 'c', 'd']
+    
+    pairs = engine.generate_pairs(features)
+    
+    expected = [('a', 'b'), ('a', 'c'), ('a', 'd'), ('b', 'c'), ('b', 'd'), ('c', 'd')]
+    assert len(pairs) == 6
+    assert set(pairs) == set(expected)
+    
+    print(f"  Generated {len(pairs)} pairs")
+    print("  ✓ Pair generation test passed")
+    return True
+
+
+def test_engine_individual_score():
+    """Test 3: Individual score computation."""
+    print("\n" + "=" * 60)
+    print("TEST 3: Individual Score")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeatureInteractionEngine(min_samples=10)
+    y = df['future_breakout'].values
+    
+    score = engine.compute_feature_score(df, 'feature1', y)
+    
+    assert 0 <= score <= 1
+    
+    print(f"  Feature1 score: {score:.4f}")
+    print("  ✓ Individual score test passed")
+    return True
+
+
+def test_engine_combined_score():
+    """Test 4: Combined score computation."""
+    print("\n" + "=" * 60)
+    print("TEST 4: Combined Score")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeatureInteractionEngine(min_samples=10)
+    y = df['future_breakout'].values
+    
+    score = engine.compute_combined_score(df, 'feature1', 'feature2', y)
+    
+    assert 0 <= score <= 1
+    
+    print(f"  Combined score: {score:.4f}")
+    print("  ✓ Combined score test passed")
+    return True
+
+
+def test_engine_interaction_gain():
+    """Test 5: Interaction gain and classification."""
+    print("\n" + "=" * 60)
+    print("TEST 5: Interaction Gain and Classification")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeatureInteractionEngine(min_samples=10)
+    y = df['future_breakout'].values
+    
+    # Known interacting pair
+    score_a = engine.compute_feature_score(df, 'feature1', y)
+    score_b = engine.compute_feature_score(df, 'feature2', y)
+    combined = engine.compute_combined_score(df, 'feature1', 'feature2', y)
+    
+    max_individual = max(score_a, score_b)
+    gain = combined - max_individual
+    synergy = np.clip(gain / (max_individual + 1e-12), 0, 1)
+    
+    # Test gain and synergy bounds
+    assert -1.0 <= gain <= 1.0
+    assert 0.0 <= synergy <= 1.0
+    
+    # Test classification
+    interaction = engine.classify_interaction(synergy, gain)
+    assert interaction in {
+        "Strong Synergy",
+        "Moderate Synergy",
+        "Independent",
+        "Conflict"
+    }
+    
+    print(f"  Gain: {gain:.4f}")
+    print(f"  Synergy: {synergy:.4f}")
+    print(f"  Classification: {interaction}")
+    print("  ✓ Interaction gain and classification test passed")
+    return True
+
+
+def test_engine_interaction_type():
+    """Test 6: Interaction classification boundaries."""
+    print("\n" + "=" * 60)
+    print("TEST 6: Interaction Classification Boundaries")
+    print("=" * 60)
+    
+    engine = FeatureInteractionEngine()
+    
+    # Strong Synergy threshold (0.25)
+    # Just below threshold -> Moderate Synergy
+    assert engine.classify_interaction(0.2499, 0.15) == "Moderate Synergy"
+    # At threshold -> Moderate Synergy (since > 0.25, not >=)
+    assert engine.classify_interaction(0.2500, 0.15) == "Moderate Synergy"
+    # Just above threshold -> Strong Synergy
+    assert engine.classify_interaction(0.2501, 0.15) == "Strong Synergy"
+    
+    # Moderate Synergy threshold (0.10)
+    # Just below threshold -> Independent
+    assert engine.classify_interaction(0.0999, 0.05) == "Independent"
+    # At threshold -> Independent (since > 0.10, not >=)
+    assert engine.classify_interaction(0.1000, 0.05) == "Independent"
+    # Just above threshold -> Moderate Synergy
+    assert engine.classify_interaction(0.1001, 0.05) == "Moderate Synergy"
+    
+    # Conflict threshold (-0.05)
+    # Just above threshold -> Independent
+    assert engine.classify_interaction(0.01, -0.0499) == "Independent"
+    # At threshold -> Independent (since < -0.05, not <=)
+    assert engine.classify_interaction(0.01, -0.0500) == "Independent"
+    # Just below threshold -> Conflict
+    assert engine.classify_interaction(0.01, -0.0501) == "Conflict"
+    
+    # Additional sanity checks
+    assert engine.classify_interaction(0.30, 0.20) == "Strong Synergy"
+    assert engine.classify_interaction(0.15, 0.10) == "Moderate Synergy"
+    assert engine.classify_interaction(0.05, 0.03) == "Independent"
+    assert engine.classify_interaction(0.01, -0.10) == "Conflict"
+    
+    print("  ✓ Interaction classification boundaries test passed")
+    return True
+
+
+def test_engine_compute():
+    """Test 7: Full engine computation."""
+    print("\n" + "=" * 60)
+    print("TEST 7: Full Engine Computation")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeatureInteractionEngine(min_samples=10)
+    
+    result = engine.compute(df)
+    
+    assert result.interaction_index >= 0
+    assert result.interaction_index <= 100
+    assert not result.interaction_table.empty
+    assert not result.interaction_matrix.empty
+    assert not result.top_interactions.empty
+    assert result.summary_statistics['total_features'] > 0
+    
+    print(f"  Interaction index: {result.interaction_index:.2f}/100")
+    print(f"  Total features: {result.summary_statistics['total_features']}")
+    print(f"  Strong synergy: {result.summary_statistics['strong_synergy_pairs']}")
+    print("  ✓ Full engine test passed")
+    return True
+
+
+def test_statistics():
+    """Test 8: Statistics engine."""
+    print("\n" + "=" * 60)
+    print("TEST 8: Statistics Engine")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeatureInteractionEngine(min_samples=10)
+    stats_engine = FeatureInteractionStatisticsEngine()
+    
+    result = engine.compute(df)
+    stats = stats_engine.analyze(result)
+    
+    assert stats.total_features == result.summary_statistics['total_features']
+    assert stats.pairs_tested == result.summary_statistics['pairs_tested']
+    assert stats.interaction_index == result.summary_statistics['interaction_index']
+    assert stats.best_pair == result.summary_statistics['best_pair']
+    
+    print(f"  Interaction index: {stats.interaction_index:.2f}/100")
+    print("  ✓ Statistics test passed")
+    return True
+
+
+def test_validator():
+    """Test 9: Validator."""
+    print("\n" + "=" * 60)
+    print("TEST 9: Validator")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeatureInteractionEngine(min_samples=10)
+    stats_engine = FeatureInteractionStatisticsEngine()
+    
+    result = engine.compute(df)
+    stats = stats_engine.analyze(result)
+    
+    passed = run_validation(result, stats)
+    assert passed
+    
+    print("  ✓ Validator test passed")
+    return True
+
+
+def test_pipeline():
+    """Test 10: Full pipeline."""
+    print("\n" + "=" * 60)
+    print("TEST 10: Full Pipeline")
+    print("=" * 60)
+    
+    df = create_test_data()
+    
+    research = FeatureInteractionResearch(
+        min_samples=10
+    )
+    
+    result = research.run_dataframe(df, dataset_id="pipeline_test")
+    
+    assert result.status == "completed"
+    assert "interaction_table" in result.artifacts
+    assert "interaction_matrix" in result.artifacts
+    assert "top_interactions" in result.artifacts
+    assert "feature_interaction_report" in result.artifacts
+    assert "interaction_report" in result.artifacts
+    assert "matrix_report" in result.artifacts
+    assert result.statistics.get("software_validation_passed") == True
+    
+    print(f"  Interaction index: {result.statistics.get('interaction_index'):.2f}/100")
+    print(f"  Total features: {result.statistics.get('total_features')}")
+    print("  ✓ Full pipeline test passed")
+    return True
+
+
+def test_performance_optimization():
+    """Test 11: Performance optimization - cached individual scores."""
+    print("\n" + "=" * 60)
+    print("TEST 11: Performance Optimization")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeatureInteractionEngine(min_samples=10)
+    y = df['future_breakout'].values
+    
+    # Get features
+    features = engine.get_feature_columns(df)
+    
+    # Compute interactions with caching
+    pairs = engine.generate_pairs(features)
+    
+    # Cache individual feature scores (this is the optimization)
+    feature_scores = {
+        feature: engine.compute_feature_score(df, feature, y)
+        for feature in features
+    }
+    
+    # Verify all features have scores
+    assert len(feature_scores) == len(features)
+    for feature in features:
+        assert feature in feature_scores
+        assert 0 <= feature_scores[feature] <= 1
+    
+    # Verify cached scores match direct computation
+    for feature in features[:3]:  # Spot check first 3
+        direct_score = engine.compute_feature_score(df, feature, y)
+        assert np.isclose(feature_scores[feature], direct_score, atol=1e-6)
+    
+    print(f"  Cached scores for {len(feature_scores)} features")
+    print("  ✓ Performance optimization test passed")
+    return True
+
+
+def main():
+    """Run all tests."""
+    print("\n" + "=" * 70)
+    print("PROJECT ATLAS - MODULE 116 INTEGRATION TEST")
+    print("Feature Interaction")
+    print("=" * 70)
+    
+    results = {}
+    
+    results["features"] = test_engine_features()
+    results["pairs"] = test_engine_pairs()
+    results["individual_score"] = test_engine_individual_score()
+    results["combined_score"] = test_engine_combined_score()
+    results["interaction_gain"] = test_engine_interaction_gain()
+    results["interaction_boundaries"] = test_engine_interaction_type()
+    results["full_engine"] = test_engine_compute()
+    results["statistics"] = test_statistics()
+    results["validator"] = test_validator()
+    results["pipeline"] = test_pipeline()
+    results["performance"] = test_performance_optimization()
+    
+    print("\n" + "=" * 70)
+    print("RESULTS")
+    print("=" * 70)
+    
+    for name, ok in results.items():
+        print(f"  {'✓' if ok else '✗'} {name}")
+    
+    passed = sum(results.values())
+    total = len(results)
+    
+    print(f"\n  {passed}/{total} tests passed")
+    
+    if passed == total:
+        print("\n✓ Module 116 VALIDATED")
+        return 0
+    else:
+        print("\n⚠ Some tests failed")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

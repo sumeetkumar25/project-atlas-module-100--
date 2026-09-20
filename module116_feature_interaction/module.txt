@@ -1,0 +1,224 @@
+# atlas/modules/module116_feature_interaction/module.py
+"""
+Module 116
+Feature Interaction
+
+Measures synergy between feature pairs.
+
+Pipeline: detect features → generate pairs → compute individual/combined scores →
+          interaction gain → synergy → matrix → ranking → validation → report → export
+"""
+
+from typing import Optional, Dict, Any
+import pandas as pd
+from pathlib import Path
+
+from atlas.core.base_research_module import BaseResearchModule
+from atlas.framework.registry import AtlasRegistry
+
+from .engine import FeatureInteractionEngine
+from .statistics import FeatureInteractionStatisticsEngine
+from .validator import run_validation
+from .report import FeatureInteractionReport
+from .exporter import FeatureInteractionExporter
+
+
+class FeatureInteractionResearch(BaseResearchModule):
+    """Main research module for feature interaction analysis."""
+    
+    MODULE_OUTPUT = "module116"
+    METADATA = FeatureInteractionStatisticsEngine.METADATA
+    
+    def __init__(
+        self,
+        registry: Optional[AtlasRegistry] = None,
+        min_samples: int = 100,
+        cv_folds: int = 5,
+        random_state: int = 42,
+        metric: str = "roc_auc"
+    ):
+        """
+        Initialize the feature interaction module.
+        
+        Args:
+            registry: Optional Atlas registry
+            min_samples: Minimum samples required
+            cv_folds: Number of cross-validation folds
+            random_state: Random seed for reproducibility
+            metric: Evaluation metric ('roc_auc', 'accuracy', 'f1')
+        """
+        super().__init__(
+            module_name="Feature Interaction",
+            module_version=self.METADATA["version"],
+        )
+        
+        self.registry = registry or AtlasRegistry()
+        self.engine = FeatureInteractionEngine(
+            min_samples=min_samples,
+            cv_folds=cv_folds,
+            random_state=random_state,
+            metric=metric
+        )
+        self.stats_engine = FeatureInteractionStatisticsEngine()
+        self.result_data = None
+        self.statistics = None
+        self.interaction_report = None
+        self.matrix_report = None
+        self._output_dir = None
+    
+    def _register_pipeline_steps(self):
+        """Register pipeline steps."""
+        self.pipeline_steps = [
+            ("feature_interaction", self._compute_interaction),
+            ("statistics", self._compute_statistics),
+            ("validate", self._validate),
+            ("export", self._export_results),
+        ]
+    
+    def _prepare_data(self) -> Dict[str, Any]:
+        """Prepare data from DataFrame."""
+        return {"df": self.df}
+    
+    def _compute_interaction(self) -> Dict[str, Any]:
+        """Step 1: Compute feature interactions."""
+        self.logger.info("Step 1: Computing feature interactions")
+        
+        prepared = self._prepare_data()
+        
+        self.result_data = self.engine.compute(
+            df=prepared["df"]
+        )
+        
+        self.logger.metric(
+            "Interaction Index",
+            f"{self.result_data.interaction_index:.2f}/100"
+        )
+        self.logger.metric(
+            "Total Features",
+            str(self.result_data.summary_statistics["total_features"])
+        )
+        self.logger.metric(
+            "Pairs Tested",
+            str(self.result_data.summary_statistics["pairs_tested"])
+        )
+        self.logger.metric(
+            "Strong Synergy",
+            str(self.result_data.summary_statistics["strong_synergy_pairs"])
+        )
+        self.logger.success("Feature interactions computed")
+        
+        # Generate reports
+        self.interaction_report = FeatureInteractionReport.generate_interaction_table(
+            self.result_data.interaction_table,
+            top_n=10
+        )
+        
+        self.matrix_report = FeatureInteractionReport.generate_matrix_report(
+            self.result_data.interaction_matrix
+        )
+        
+        return {
+            "interaction_index": self.result_data.interaction_index,
+            "total_features": self.result_data.summary_statistics["total_features"],
+            "pairs_tested": self.result_data.summary_statistics["pairs_tested"],
+            "best_pair": self.result_data.summary_statistics["best_pair"]
+        }
+    
+    def _compute_statistics(self) -> Dict[str, Any]:
+        """Step 2: Compute statistics."""
+        self.logger.info("Step 2: Computing statistics")
+        self.statistics = self.stats_engine.analyze(self.result_data)
+        
+        self.logger.metric(
+            "Strong Synergy",
+            str(self.statistics.strong_synergy_pairs)
+        )
+        self.logger.metric(
+            "Conflicts",
+            str(self.statistics.conflicting_pairs)
+        )
+        self.logger.success("Statistics computed")
+        
+        return self.stats_engine.summary_dict(self.statistics)
+    
+    def _validate(self) -> Dict[str, Any]:
+        """Step 3: Validation."""
+        self.logger.info("Step 3: Validation")
+        passed = run_validation(self.result_data, self.statistics)
+        self.logger.success("Validation complete")
+        return {"software_validation_passed": passed}
+    
+    def _export_results(self) -> Dict[str, Any]:
+        """Step 4: Export."""
+        self.logger.info("Step 4: Export")
+        
+        # Register DataFrames as artifacts
+        self.result.artifacts["interaction_table"] = self.result_data.interaction_table
+        self.result.artifacts["interaction_matrix"] = self.result_data.interaction_matrix
+        self.result.artifacts["top_interactions"] = self.result_data.top_interactions
+        
+        # Store summary
+        summary_df = pd.DataFrame([self.result_data.summary_statistics])
+        self.result.artifacts["interaction_summary"] = summary_df
+        
+        # Generate and register reports
+        main_report = FeatureInteractionReport.generate(
+            self.statistics,
+            metadata=self.METADATA,
+            dataset_name=self.result.dataset_identifier,
+        )
+        self.result.artifacts["feature_interaction_report"] = main_report
+        self.result.artifacts["interaction_report"] = self.interaction_report
+        self.result.artifacts["matrix_report"] = self.matrix_report
+        
+        # Export to files
+        if self._output_dir is not None:
+            export_dir = self._output_dir / "exports"
+            export_dir.mkdir(parents=True, exist_ok=True)
+            
+            FeatureInteractionExporter.export_interaction_table(
+                self.result_data.interaction_table,
+                export_dir / "interaction_table.csv"
+            )
+            
+            FeatureInteractionExporter.export_interaction_matrix(
+                self.result_data.interaction_matrix,
+                export_dir / "interaction_matrix.csv"
+            )
+            
+            FeatureInteractionExporter.export_top_interactions(
+                self.result_data.top_interactions,
+                export_dir / "top_interactions.csv"
+            )
+            
+            FeatureInteractionExporter.export_summary(
+                self.result_data.summary_statistics,
+                export_dir / "interaction_summary.csv"
+            )
+        
+        self.logger.metric("Artifacts", str(len(self.result.artifacts)))
+        self.logger.success("Export complete")
+        
+        return {
+            "export_status": "complete",
+            "artifact_count": len(self.result.artifacts),
+            "interaction_index": self.result_data.interaction_index
+        }
+    
+    def compute(self) -> Dict[str, Any]:
+        """Run the full computation pipeline."""
+        self.logger.section("Feature Interaction Pipeline")
+        results = self.execute_pipeline()
+        self.result.status = "completed"
+        self.logger.success("Module 116 complete")
+        return results
+    
+    def run(self, filepath: str, output_dir=None):
+        """Run module on file."""
+        self._output_dir = Path(output_dir) if output_dir else None
+        return super().run(filepath, output_dir)
+    
+    def run_dataframe(self, df, dataset_id="in_memory", output_dir=None):
+        """Run module on DataFrame."""
+        self._output_dir = Path(output_dir) if output_dir else None
+        return super().run_dataframe(df, dataset_id, output_dir)

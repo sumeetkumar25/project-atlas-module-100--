@@ -1,0 +1,9 @@
+# atlas/modules/module115_feature_redundancy/__init__.py
+"""
+Module 115
+Feature Redundancy Analysis
+"""
+
+from .module import FeatureRedundancyResearch
+
+__all__ = ["FeatureRedundancyResearch"]

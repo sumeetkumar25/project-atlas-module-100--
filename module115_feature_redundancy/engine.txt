@@ -1,0 +1,452 @@
+# atlas/modules/module115_feature_redundancy/engine.py
+"""
+Module 115 - Feature Redundancy Analysis Engine
+
+Analyzes redundancy between features using multiple similarity measures.
+
+Methods:
+  1. Pearson Correlation: Linear relationship
+  2. Spearman Correlation: Monotonic relationship
+  3. Mutual Information: Nonlinear relationship
+  4. Distance Correlation: General dependence
+
+Output: Redundancy scores, feature clusters, and redundancy index.
+"""
+
+import numpy as np
+import pandas as pd
+from dataclasses import dataclass
+from typing import Optional, Dict, Any, List, Tuple
+from scipy.cluster.hierarchy import linkage, fcluster
+from scipy.spatial.distance import squareform
+from sklearn.feature_selection import mutual_info_regression
+import warnings
+warnings.filterwarnings('ignore')
+
+
+@dataclass
+class FeatureRedundancyResult:
+    """Results from feature redundancy analysis."""
+    redundancy_table: pd.DataFrame
+    similarity_matrices: Dict[str, pd.DataFrame]
+    clusters: pd.DataFrame
+    cluster_representatives: pd.DataFrame
+    redundancy_index: float
+    summary_statistics: Dict[str, Any]
+
+
+class FeatureRedundancyEngine:
+    """Core engine for feature redundancy analysis."""
+
+    # Columns to ignore (not features)
+    IGNORE_COLS = {
+        "timestamp", "date", "time", "index",
+        "open", "high", "low", "close", "volume",
+        "future_breakout"
+    }
+
+    # Weights for redundancy score
+    REDUNDANCY_WEIGHTS = {
+        "pearson": 0.30,
+        "spearman": 0.30,
+        "mutual_information": 0.20,
+        "distance_correlation": 0.20
+    }
+
+    def __init__(
+        self,
+        cluster_threshold: float = 0.40,
+        min_samples: int = 100,
+        random_state: int = 42
+    ):
+        """
+        Initialize the feature redundancy engine.
+        
+        Args:
+            cluster_threshold: Distance threshold for clustering (0-1)
+            min_samples: Minimum samples required
+            random_state: Random seed for reproducibility
+        """
+        self.cluster_threshold = cluster_threshold
+        self.min_samples = min_samples
+        self.random_state = random_state
+
+    def get_feature_columns(self, df: pd.DataFrame) -> List[str]:
+        """
+        Identify feature columns (exclude metadata and target).
+        """
+        features = [
+            c for c in df.columns
+            if c not in self.IGNORE_COLS
+            and pd.api.types.is_numeric_dtype(df[c])
+            and df[c].nunique() > 1
+        ]
+        return features
+
+    def pearson_matrix(
+        self,
+        df: pd.DataFrame,
+        features: List[str]
+    ) -> pd.DataFrame:
+        """
+        Compute Pearson correlation matrix.
+        """
+        return df[features].corr(method="pearson")
+
+    def spearman_matrix(
+        self,
+        df: pd.DataFrame,
+        features: List[str]
+    ) -> pd.DataFrame:
+        """
+        Compute Spearman correlation matrix.
+        """
+        return df[features].corr(method="spearman")
+
+    def mutual_information_matrix(
+        self,
+        df: pd.DataFrame,
+        features: List[str]
+    ) -> pd.DataFrame:
+        """
+        Compute Mutual Information matrix.
+        """
+        n = len(features)
+        matrix = np.zeros((n, n))
+        
+        for i in range(n):
+            x = df[[features[i]]]
+            for j in range(n):
+                if i == j:
+                    matrix[i, j] = 1.0
+                else:
+                    y = df[features[j]]
+                    try:
+                        mi = mutual_info_regression(
+                            x, y,
+                            random_state=self.random_state
+                        )[0]
+                        matrix[i, j] = max(0.0, mi)
+                    except:
+                        matrix[i, j] = 0.0
+        
+        # Normalize MI values within the dataset
+        max_mi = matrix.max()
+        if max_mi > 0:
+            matrix = matrix / max_mi
+        
+        # Symmetrize the matrix (MI should be symmetric)
+        matrix = (matrix + matrix.T) / 2
+        np.fill_diagonal(matrix, 1.0)
+        
+        return pd.DataFrame(matrix, index=features, columns=features)
+
+    def distance_correlation_matrix(
+        self,
+        df: pd.DataFrame,
+        features: List[str]
+    ) -> pd.DataFrame:
+        """
+        Compute Distance Correlation matrix.
+        
+        Implements distance correlation without external dependency.
+        """
+        def distance_correlation(x: np.ndarray, y: np.ndarray) -> float:
+            """Compute distance correlation between two vectors."""
+            # Center the distance matrices
+            def center_distance(d: np.ndarray) -> np.ndarray:
+                n = len(d)
+                row_mean = np.mean(d, axis=1, keepdims=True)
+                col_mean = np.mean(d, axis=0, keepdims=True)
+                total_mean = np.mean(d)
+                return d - row_mean - col_mean + total_mean
+            
+            # Compute distance matrices
+            n = len(x)
+            dx = np.zeros((n, n))
+            dy = np.zeros((n, n))
+            
+            for i in range(n):
+                for j in range(n):
+                    dx[i, j] = abs(x[i] - x[j])
+                    dy[i, j] = abs(y[i] - y[j])
+            
+            # Center the distance matrices
+            A = center_distance(dx)
+            B = center_distance(dy)
+            
+            # Compute distance covariance and variances
+            dcov2 = np.mean(A * B)
+            dvarx2 = np.mean(A * A)
+            dvar_y2 = np.mean(B * B)
+            
+            # Handle numerical issues
+            dcov2 = max(dcov2, 0.0)
+            dvarx2 = max(dvarx2, 1e-12)
+            dvar_y2 = max(dvar_y2, 1e-12)
+            
+            denom = np.sqrt(dvarx2 * dvar_y2)
+            
+            if denom < 1e-12:
+                return 0.0
+            
+            return np.sqrt(max(dcov2, 0.0) / denom)
+        
+        n = len(features)
+        matrix = np.zeros((n, n))
+        
+        for i in range(n):
+            x = df[features[i]].values
+            for j in range(n):
+                if i == j:
+                    matrix[i, j] = 1.0
+                else:
+                    y = df[features[j]].values
+                    try:
+                        dcorr = distance_correlation(x, y)
+                        matrix[i, j] = min(1.0, max(0.0, dcorr))
+                    except:
+                        matrix[i, j] = 0.0
+        
+        # Symmetrize the matrix
+        matrix = (matrix + matrix.T) / 2
+        np.fill_diagonal(matrix, 1.0)
+        
+        return pd.DataFrame(matrix, index=features, columns=features)
+
+    def compute_redundancy_score(
+        self,
+        pearson: pd.DataFrame,
+        spearman: pd.DataFrame,
+        mutual_info: pd.DataFrame,
+        distance_corr: pd.DataFrame,
+        features: List[str]
+    ) -> pd.DataFrame:
+        """
+        Compute combined redundancy score matrix.
+        """
+        n = len(features)
+        score_matrix = np.zeros((n, n))
+        
+        for i in range(n):
+            for j in range(n):
+                if i == j:
+                    score_matrix[i, j] = 1.0
+                else:
+                    p = abs(pearson.iloc[i, j])
+                    s = abs(spearman.iloc[i, j])
+                    mi = mutual_info.iloc[i, j]
+                    dc = distance_corr.iloc[i, j]
+                    
+                    redundancy = (
+                        self.REDUNDANCY_WEIGHTS["pearson"] * p +
+                        self.REDUNDANCY_WEIGHTS["spearman"] * s +
+                        self.REDUNDANCY_WEIGHTS["mutual_information"] * mi +
+                        self.REDUNDANCY_WEIGHTS["distance_correlation"] * dc
+                    )
+                    score_matrix[i, j] = np.clip(redundancy, 0, 1)
+        
+        # Symmetrize the matrix
+        score_matrix = (score_matrix + score_matrix.T) / 2
+        np.fill_diagonal(score_matrix, 1.0)
+        
+        return pd.DataFrame(score_matrix, index=features, columns=features)
+
+    def build_redundancy_table(
+        self,
+        pearson: pd.DataFrame,
+        spearman: pd.DataFrame,
+        mutual_info: pd.DataFrame,
+        distance_corr: pd.DataFrame,
+        redundancy_score: pd.DataFrame,
+        features: List[str]
+    ) -> pd.DataFrame:
+        """
+        Build redundancy table with all similarity measures.
+        """
+        rows = []
+        
+        for i, f1 in enumerate(features):
+            for j, f2 in enumerate(features):
+                if i >= j:
+                    continue
+                
+                rows.append({
+                    "feature_a": f1,
+                    "feature_b": f2,
+                    "pearson": float(pearson.loc[f1, f2]),
+                    "spearman": float(spearman.loc[f1, f2]),
+                    "mutual_information": float(mutual_info.loc[f1, f2]),
+                    "distance_correlation": float(distance_corr.loc[f1, f2]),
+                    "redundancy_score": float(redundancy_score.loc[f1, f2])
+                })
+        
+        return pd.DataFrame(rows)
+
+    def cluster_features(
+        self,
+        redundancy_score: pd.DataFrame,
+        features: List[str]
+    ) -> Tuple[pd.DataFrame, Dict[int, List[str]]]:
+        """
+        Cluster features based on redundancy.
+        
+        Returns:
+            (cluster_assignments, cluster_dict)
+        """
+        # Convert redundancy to distance
+        distance = 1 - redundancy_score.values
+        
+        # Ensure symmetry and valid diagonal
+        distance = (distance + distance.T) / 2
+        np.fill_diagonal(distance, 0)
+        distance = np.clip(distance, 0, 1)
+        
+        # Perform hierarchical clustering
+        condensed = squareform(distance)
+        Z = linkage(condensed, method="average")
+        
+        # Get cluster labels
+        cluster_labels = fcluster(Z, t=self.cluster_threshold, criterion="distance")
+        
+        # Create cluster assignments DataFrame
+        cluster_df = pd.DataFrame({
+            "feature": features,
+            "cluster": cluster_labels
+        })
+        
+        # Create cluster dictionary
+        cluster_dict = {}
+        for cluster in np.unique(cluster_labels):
+            cluster_dict[int(cluster)] = cluster_df[cluster_df["cluster"] == cluster]["feature"].tolist()
+        
+        return cluster_df, cluster_dict
+
+    def get_cluster_representatives(
+        self,
+        cluster_df: pd.DataFrame,
+        feature_importance: pd.Series
+    ) -> pd.DataFrame:
+        """
+        Select representative feature from each cluster.
+        
+        Uses feature_importance to select the most important feature per cluster.
+        """
+        reps = []
+        
+        for cluster in sorted(cluster_df["cluster"].unique()):
+            cluster_features = cluster_df[cluster_df["cluster"] == cluster]["feature"].tolist()
+            
+            # Get importance scores for features in this cluster
+            importance_scores = feature_importance[cluster_features]
+            representative = importance_scores.idxmax()
+            importance = float(importance_scores.max())
+            
+            reps.append({
+                "cluster": int(cluster),
+                "representative": representative,
+                "features": cluster_features,
+                "feature_count": len(cluster_features),
+                "importance": importance
+            })
+        
+        return pd.DataFrame(reps)
+
+    def compute_redundancy_index(self, redundancy_score: pd.DataFrame) -> float:
+        """
+        Compute global redundancy index.
+        
+        Average of upper triangle redundancy scores.
+        """
+        n = len(redundancy_score)
+        values = []
+        
+        for i in range(n):
+            for j in range(i + 1, n):
+                values.append(redundancy_score.iloc[i, j])
+        
+        if values:
+            return float(np.mean(values) * 100)
+        return 0.0
+
+    def compute(self, df: pd.DataFrame) -> FeatureRedundancyResult:
+        """
+        Main computation method.
+        """
+        print("\n  Computing Feature Redundancy...")
+        
+        # Get features
+        features = self.get_feature_columns(df)
+        print(f"  Found {len(features)} features")
+        
+        if len(features) < 2:
+            raise ValueError("Need at least 2 features for redundancy analysis")
+        
+        # Compute similarity matrices
+        print("  Computing Pearson correlation...")
+        pearson = self.pearson_matrix(df, features)
+        
+        print("  Computing Spearman correlation...")
+        spearman = self.spearman_matrix(df, features)
+        
+        print("  Computing Mutual Information...")
+        mutual_info = self.mutual_information_matrix(df, features)
+        
+        print("  Computing Distance Correlation...")
+        distance_corr = self.distance_correlation_matrix(df, features)
+        
+        # Compute redundancy score
+        print("  Computing redundancy scores...")
+        redundancy_score = self.compute_redundancy_score(
+            pearson, spearman, mutual_info, distance_corr, features
+        )
+        
+        # Build redundancy table
+        print("  Building redundancy table...")
+        redundancy_table = self.build_redundancy_table(
+            pearson, spearman, mutual_info, distance_corr, redundancy_score, features
+        )
+        
+        # Cluster features
+        print("  Clustering features...")
+        cluster_df, cluster_dict = self.cluster_features(redundancy_score, features)
+        
+        # Get cluster representatives (using variance as importance proxy)
+        feature_variance = df[features].var()
+        cluster_reps = self.get_cluster_representatives(cluster_df, feature_variance)
+        
+        # Compute redundancy index
+        redundancy_index = self.compute_redundancy_index(redundancy_score)
+        
+        # Summary
+        summary = {
+            'total_features': len(features),
+            'unique_clusters': len(cluster_dict),
+            'redundancy_index': redundancy_index,
+            'max_cluster_size': max(len(v) for v in cluster_dict.values()) if cluster_dict else 0,
+            'min_cluster_size': min(len(v) for v in cluster_dict.values()) if cluster_dict else 0,
+            'unique_features': len(cluster_reps),
+            'redundant_features': len(features) - len(cluster_reps)
+        }
+        
+        print(f"  Redundancy Index: {redundancy_index:.2f}/100")
+        print(f"  Unique Clusters: {len(cluster_dict)}")
+        print(f"  Redundant Features: {summary['redundant_features']}")
+        
+        # Store similarity matrices
+        similarity_matrices = {
+            'pearson': pearson,
+            'spearman': spearman,
+            'mutual_information': mutual_info,
+            'distance_correlation': distance_corr,
+            'redundancy_score': redundancy_score
+        }
+        
+        return FeatureRedundancyResult(
+            redundancy_table=redundancy_table,
+            similarity_matrices=similarity_matrices,
+            clusters=cluster_df,
+            cluster_representatives=cluster_reps,
+            redundancy_index=redundancy_index,
+            summary_statistics=summary
+        )
