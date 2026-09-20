@@ -1,0 +1,1 @@
+python -m atlas.modules.module124_feature_redundancy.test_module

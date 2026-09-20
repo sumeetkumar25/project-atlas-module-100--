@@ -1,0 +1,403 @@
+"""
+Module 124 - Integration Test
+
+Tests feature redundancy engine, statistics, validator, report, and pipeline.
+"""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+
+import numpy as np
+import pandas as pd
+
+from atlas.modules.module124_feature_redundancy.engine import FeatureRedundancyAnalysisEngine
+from atlas.modules.module124_feature_redundancy.statistics import FeatureRedundancyStatisticsEngine
+from atlas.modules.module124_feature_redundancy.validator import run_validation
+from atlas.modules.module124_feature_redundancy.module import FeatureRedundancyResearch
+
+
+def create_test_data(n=500, seed=42):
+    """Create synthetic test data with redundant features."""
+    np.random.seed(seed)
+    
+    # Base features
+    feature_a = np.random.randn(n)
+    feature_d = np.random.randn(n)
+    
+    # Redundant features (clusters)
+    feature_b = feature_a + np.random.randn(n) * 0.1  # Highly redundant with A
+    feature_c = feature_a * 2 + np.random.randn(n) * 0.05  # Highly redundant with A
+    feature_f = feature_d + np.random.randn(n) * 0.1  # Redundant with D
+    
+    # Independent features
+    feature_e = np.random.randn(n)
+    
+    # Target (random)
+    future_breakout = np.random.randint(0, 2, n)
+    
+    df = pd.DataFrame({
+        'timestamp': pd.date_range('2020-01-01', periods=n, freq='1h'),
+        'open': 100 + np.random.randn(n) * 10,
+        'high': 100 + np.random.randn(n) * 10 + np.abs(np.random.randn(n) * 2),
+        'low': 100 + np.random.randn(n) * 10 - np.abs(np.random.randn(n) * 2),
+        'close': 100 + np.random.randn(n) * 10,
+        'volume': np.random.randn(n) * 100 + 1000,
+        'feature_a': feature_a,
+        'feature_b': feature_b,
+        'feature_c': feature_c,
+        'feature_d': feature_d,
+        'feature_e': feature_e,
+        'feature_f': feature_f,
+        'future_breakout': future_breakout
+    })
+    
+    return df
+
+
+def test_engine_feature_detection():
+    """Test 1: Feature detection."""
+    print("\n" + "=" * 60)
+    print("TEST 1: Feature Detection")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeatureRedundancyAnalysisEngine()
+    
+    features = engine.get_feature_columns(df)
+    
+    assert 'feature_a' in features
+    assert 'feature_b' in features
+    assert 'feature_c' in features
+    assert 'feature_d' in features
+    assert 'feature_e' in features
+    assert 'feature_f' in features
+    assert 'close' not in features
+    assert 'future_breakout' not in features
+    
+    print(f"  Found {len(features)} features")
+    print("  ✓ Feature detection test passed")
+    return True
+
+
+def test_engine_pearson():
+    """Test 2: Pearson correlation."""
+    print("\n" + "=" * 60)
+    print("TEST 2: Pearson Correlation")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeatureRedundancyAnalysisEngine()
+    
+    # Highly correlated pair (should be ~0.99)
+    corr_ab = engine.compute_pearson(df, 'feature_a', 'feature_b')
+    assert abs(corr_ab) > 0.95
+    
+    # Independent pair
+    corr_ae = engine.compute_pearson(df, 'feature_a', 'feature_e')
+    assert abs(corr_ae) < 0.3
+    
+    print(f"  feature_a-feature_b: {corr_ab:.4f}")
+    print(f"  feature_a-feature_e: {corr_ae:.4f}")
+    print("  ✓ Pearson test passed")
+    return True
+
+
+def test_engine_mutual_information():
+    """Test 3: Mutual Information."""
+    print("\n" + "=" * 60)
+    print("TEST 3: Mutual Information")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeatureRedundancyAnalysisEngine()
+    
+    mi = engine.compute_mutual_information(df, 'feature_a', 'feature_b')
+    assert mi >= 0
+    
+    print(f"  MI feature_a-feature_b: {mi:.4f}")
+    print("  ✓ Mutual Information test passed")
+    return True
+
+
+def test_engine_vif():
+    """Test 4: VIF computation."""
+    print("\n" + "=" * 60)
+    print("TEST 4: VIF")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeatureRedundancyAnalysisEngine()
+    
+    features = ['feature_a', 'feature_b', 'feature_c']
+    vif = engine.compute_vif(df, 'feature_a', features)
+    
+    assert vif >= 1
+    
+    print(f"  VIF feature_a: {vif:.2f}")
+    print("  ✓ VIF test passed")
+    return True
+
+
+def test_engine_clustering():
+    """Test 5: Feature clustering."""
+    print("\n" + "=" * 60)
+    print("TEST 5: Feature Clustering")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeatureRedundancyAnalysisEngine()
+    
+    features = engine.get_feature_columns(df)
+    
+    # Build correlation matrix
+    n = len(features)
+    corr_matrix = np.zeros((n, n))
+    feature_index = {f: i for i, f in enumerate(features)}
+    
+    for f1, f2 in engine.generate_pairs(features):
+        i = feature_index[f1]
+        j = feature_index[f2]
+        corr = abs(engine.compute_pearson(df, f1, f2))
+        corr_matrix[i, j] = corr
+        corr_matrix[j, i] = corr
+    
+    np.fill_diagonal(corr_matrix, 1.0)
+    corr_matrix_df = pd.DataFrame(corr_matrix, index=features, columns=features)
+    
+    # Cluster
+    distance = 1 - corr_matrix
+    distance = (distance + distance.T) / 2
+    np.fill_diagonal(distance, 0)
+    distance = np.clip(distance, 0, 1)
+    
+    from scipy.cluster.hierarchy import linkage, fcluster
+    from scipy.spatial.distance import squareform
+    
+    condensed = squareform(distance)
+    Z = linkage(condensed, method='average')
+    cluster_labels = fcluster(Z, t=engine.cluster_threshold, criterion='distance')
+    
+    cluster_table = pd.DataFrame({
+        'feature': features,
+        'cluster_id': cluster_labels
+    })
+    
+    # Feature A, B, C should be in same cluster
+    cluster_a = cluster_table[cluster_table['feature'] == 'feature_a']['cluster_id'].iloc[0]
+    cluster_b = cluster_table[cluster_table['feature'] == 'feature_b']['cluster_id'].iloc[0]
+    cluster_c = cluster_table[cluster_table['feature'] == 'feature_c']['cluster_id'].iloc[0]
+    
+    assert cluster_a == cluster_b == cluster_c
+    
+    # Feature D and F should be in same cluster
+    cluster_d = cluster_table[cluster_table['feature'] == 'feature_d']['cluster_id'].iloc[0]
+    cluster_f = cluster_table[cluster_table['feature'] == 'feature_f']['cluster_id'].iloc[0]
+    
+    assert cluster_d == cluster_f
+    
+    print(f"  Found {cluster_table['cluster_id'].nunique()} clusters")
+    print("  ✓ Clustering test passed")
+    return True
+
+
+def test_engine_compute():
+    """Test 6: Full engine computation."""
+    print("\n" + "=" * 60)
+    print("TEST 6: Full Engine Computation")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeatureRedundancyAnalysisEngine()
+    
+    result = engine.compute(df)
+    
+    # Debug output to verify engine behavior
+    print("\n================ DEBUG ================\n")
+    print(
+        result.redundancy_table[
+            [
+                "feature",
+                "cluster_id",
+                "best_representative",
+                "is_representative",
+                "decision",
+                "redundancy_score"
+            ]
+        ]
+    )
+    
+    assert not result.redundancy_table.empty
+    assert not result.cluster_table.empty
+    assert result.summary_statistics['total_features'] > 0
+    assert result.summary_statistics['total_clusters'] > 0
+    
+    # Test 1: Exactly one representative per cluster
+    print("\n  Testing exactly one representative per cluster...")
+    for cid, grp in result.redundancy_table.groupby("cluster_id"):
+        rep_count = grp["is_representative"].sum()
+        assert rep_count == 1, f"Cluster {cid} has {rep_count} representatives (expected 1)"
+    print("    ✓ Exactly one representative per cluster")
+    
+    # Test 2: Representatives are kept (PASS)
+    print("  Testing representatives are kept...")
+    rep_mask = result.redundancy_table["is_representative"]
+    assert all(
+        result.redundancy_table.loc[rep_mask, "decision"] == "PASS"
+    ), "Some representatives are not PASS"
+    print("    ✓ All representatives are PASS")
+    
+    # Test 3: Non-representatives are removed (not PASS)
+    print("  Testing non-representatives are removed...")
+    non_rep_mask = ~result.redundancy_table["is_representative"]
+    non_rep_decisions = result.redundancy_table.loc[non_rep_mask, "decision"]
+    assert all(non_rep_decisions != "PASS"), "Some non-representatives are PASS"
+    print("    ✓ All non-representatives are not PASS")
+    
+    # Test 4: Three clusters
+    print("  Testing cluster count...")
+    assert result.summary_statistics["total_clusters"] == 3
+    print("    ✓ Exactly 3 clusters")
+    
+    # Test 5: Verify kept_features and removed_features
+    print("  Testing keep/remove counts...")
+    assert len(result.kept_features) + len(result.removed_features) == len(result.redundancy_table)
+    print(f"    ✓ {len(result.kept_features)} kept, {len(result.removed_features)} removed")
+    
+    # Test 6: Verify decisions are valid
+    print("  Testing decision validity...")
+    valid_decisions = {'PASS', 'WARNING', 'FAIL'}
+    assert set(result.redundancy_table['decision'].unique()).issubset(valid_decisions)
+    print("    ✓ All decisions are valid")
+    
+    # Test 7: Verify score range
+    print("  Testing score range...")
+    assert all(0 <= score <= 1 for score in result.redundancy_table['redundancy_score'])
+    print("    ✓ All scores in [0, 1] range")
+    
+    print(f"\n  Total features: {result.summary_statistics['total_features']}")
+    print(f"  Total clusters: {result.summary_statistics['total_clusters']}")
+    print(f"  Avg redundancy: {result.summary_statistics['average_redundancy']:.3f}")
+    print("  ✓ Full engine test passed")
+    return True
+
+
+def test_statistics():
+    """Test 7: Statistics engine."""
+    print("\n" + "=" * 60)
+    print("TEST 7: Statistics Engine")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeatureRedundancyAnalysisEngine()
+    stats_engine = FeatureRedundancyStatisticsEngine()
+    
+    result = engine.compute(df)
+    stats = stats_engine.analyze(result)
+    
+    assert stats.total_features == result.summary_statistics['total_features']
+    assert stats.total_clusters == result.summary_statistics['total_clusters']
+    assert stats.average_redundancy == result.summary_statistics['average_redundancy']
+    assert stats.kept_count == len(result.kept_features)
+    assert stats.removed_count == len(result.removed_features)
+    
+    print(f"  Total features: {stats.total_features}")
+    print(f"  Total clusters: {stats.total_clusters}")
+    print(f"  KEPT: {stats.kept_count}")
+    print(f"  REMOVED: {stats.removed_count}")
+    print("  ✓ Statistics test passed")
+    return True
+
+
+def test_validator():
+    """Test 8: Validator."""
+    print("\n" + "=" * 60)
+    print("TEST 8: Validator")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeatureRedundancyAnalysisEngine()
+    stats_engine = FeatureRedundancyStatisticsEngine()
+    
+    result = engine.compute(df)
+    stats = stats_engine.analyze(result)
+    
+    passed = run_validation(result, stats)
+    assert passed
+    
+    print("  ✓ Validator test passed")
+    return True
+
+
+def test_pipeline():
+    """Test 9: Full pipeline."""
+    print("\n" + "=" * 60)
+    print("TEST 9: Full Pipeline")
+    print("=" * 60)
+    
+    df = create_test_data()
+    
+    research = FeatureRedundancyResearch()
+    
+    result = research.run_dataframe(df, dataset_id="pipeline_test")
+    
+    assert result.status == "completed"
+    assert "redundancy_table" in result.artifacts
+    assert "cluster_table" in result.artifacts
+    assert "kept_features" in result.artifacts
+    assert "removed_features" in result.artifacts
+    assert "feature_redundancy_report" in result.artifacts
+    assert "redundancy_report" in result.artifacts
+    assert "cluster_report" in result.artifacts
+    assert result.statistics.get("software_validation_passed") == True
+    
+    print(f"  Total features: {result.statistics.get('total_features')}")
+    print(f"  Total clusters: {result.statistics.get('total_clusters')}")
+    print(f"  KEPT: {result.statistics.get('kept_count')}")
+    print(f"  REMOVED: {result.statistics.get('removed_count')}")
+    print("  ✓ Full pipeline test passed")
+    return True
+
+
+def main():
+    """Run all tests."""
+    print("\n" + "=" * 70)
+    print("PROJECT ATLAS - MODULE 124 INTEGRATION TEST")
+    print("Feature Redundancy")
+    print("=" * 70)
+    
+    results = {}
+    
+    results["feature_detection"] = test_engine_feature_detection()
+    results["pearson"] = test_engine_pearson()
+    results["mutual_information"] = test_engine_mutual_information()
+    results["vif"] = test_engine_vif()
+    results["clustering"] = test_engine_clustering()
+    results["full_engine"] = test_engine_compute()
+    results["statistics"] = test_statistics()
+    results["validator"] = test_validator()
+    results["pipeline"] = test_pipeline()
+    
+    print("\n" + "=" * 70)
+    print("RESULTS")
+    print("=" * 70)
+    
+    for name, ok in results.items():
+        print(f"  {'✓' if ok else '✗'} {name}")
+    
+    passed = sum(results.values())
+    total = len(results)
+    
+    print(f"\n  {passed}/{total} tests passed")
+    
+    if passed == total:
+        print("\n✓ Module 124 VALIDATED")
+        return 0
+    else:
+        print("\n⚠ Some tests failed")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,123 @@
+"""
+Module 124 - Feature Redundancy Validator
+"""
+
+import numpy as np
+import pandas as pd
+from .engine import FeatureRedundancyResult
+from .statistics import FeatureRedundancyStatistics
+
+
+class FeatureRedundancyValidator:
+    """Validator for feature redundancy results."""
+    
+    def validate(
+        self,
+        result: FeatureRedundancyResult,
+        statistics: FeatureRedundancyStatistics
+    ) -> bool:
+        """Validate results and statistics."""
+        issues = []
+        warnings = []
+        
+        # Check redundancy table
+        if result.redundancy_table.empty:
+            issues.append("Redundancy table is empty")
+        else:
+            required_cols = ['feature', 'redundancy_score', 'decision', 'cluster_id']
+            missing = set(required_cols) - set(result.redundancy_table.columns)
+            if missing:
+                issues.append(f"Missing columns in redundancy table: {missing}")
+            
+            # Check scores are in [0, 1]
+            if 'redundancy_score' in result.redundancy_table.columns:
+                if not np.all((0 <= result.redundancy_table['redundancy_score']) & 
+                            (result.redundancy_table['redundancy_score'] <= 1)):
+                    issues.append("Redundancy scores outside [0, 1] range")
+            
+            # Check decisions are valid
+            if 'decision' in result.redundancy_table.columns:
+                valid_decisions = {'PASS', 'WARNING', 'FAIL'}
+                invalid = set(result.redundancy_table['decision'].unique()) - valid_decisions
+                if invalid:
+                    issues.append(f"Invalid decisions found: {invalid}")
+        
+        # Check cluster table
+        if result.cluster_table.empty:
+            issues.append("Cluster table is empty")
+        else:
+            required_cols = ['feature', 'cluster_id']
+            missing = set(required_cols) - set(result.cluster_table.columns)
+            if missing:
+                issues.append(f"Missing columns in cluster table: {missing}")
+        
+        # Check feature lists
+        total_decision_count = len(result.kept_features) + len(result.removed_features)
+        if total_decision_count != len(result.redundancy_table):
+            issues.append(
+                f"Decision count mismatch: {total_decision_count} vs {len(result.redundancy_table)}"
+            )
+        
+        # Check statistics match result
+        if statistics.total_features != result.summary_statistics['total_features']:
+            issues.append(
+                f"Total features mismatch: stats={statistics.total_features}, "
+                f"result={result.summary_statistics['total_features']}"
+            )
+        
+        if statistics.kept_count != len(result.kept_features):
+            issues.append(
+                f"Kept count mismatch: stats={statistics.kept_count}, "
+                f"result={len(result.kept_features)}"
+            )
+        
+        if statistics.removed_count != len(result.removed_features):
+            issues.append(
+                f"Removed count mismatch: stats={statistics.removed_count}, "
+                f"result={len(result.removed_features)}"
+            )
+        
+        if statistics.total_clusters != result.cluster_table['cluster_id'].nunique():
+            issues.append(
+                f"Total clusters mismatch: stats={statistics.total_clusters}, "
+                f"result={result.cluster_table['cluster_id'].nunique()}"
+            )
+        
+        # Warnings (non-fatal)
+        if statistics.average_redundancy > 0.5:
+            warnings.append(f"High average redundancy: {statistics.average_redundancy:.3f}")
+        
+        if statistics.largest_cluster > 3:
+            warnings.append(f"Large cluster detected: {statistics.largest_cluster} features")
+        
+        if warnings:
+            print("\n  WARNINGS:")
+            for warning in warnings:
+                print(f"    ⚠ {warning}")
+        
+        if issues:
+            raise ValueError(
+                f"Feature Redundancy validation failed with {len(issues)} issue(s):\n" +
+                "\n".join(f"  - {issue}" for issue in issues)
+            )
+        
+        return True
+
+
+def run_validation(result, statistics):
+    """Run validation with user-friendly output."""
+    validator = FeatureRedundancyValidator()
+    
+    print("\n" + "=" * 60)
+    print("FEATURE REDUNDANCY VALIDATION")
+    print("=" * 60)
+    
+    try:
+        validator.validate(result, statistics)
+        print("\n  ✓ All validation checks passed")
+        print("=" * 60)
+        return True
+    except ValueError as e:
+        print(e)
+        print("=" * 60)
+        return False

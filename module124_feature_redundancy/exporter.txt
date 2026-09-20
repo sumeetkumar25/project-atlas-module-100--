@@ -1,0 +1,48 @@
+"""
+Module 124 - Feature Redundancy Exporter
+"""
+
+import pandas as pd
+from pathlib import Path
+
+
+class FeatureRedundancyExporter:
+    """Exporter for feature redundancy results."""
+    
+    @staticmethod
+    def export_redundancy_table(df: pd.DataFrame, filepath: str):
+        """Export redundancy table to CSV."""
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(path, index=False)
+    
+    @staticmethod
+    def export_cluster_table(df: pd.DataFrame, filepath: str):
+        """Export cluster table to CSV."""
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(path, index=False)
+    
+    @staticmethod
+    def export_kept_features(features: list, filepath: str):
+        """Export kept features to CSV."""
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        df = pd.DataFrame({'feature': features})
+        df.to_csv(path, index=False)
+    
+    @staticmethod
+    def export_removed_features(features: list, filepath: str):
+        """Export removed features to CSV."""
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        df = pd.DataFrame({'feature': features})
+        df.to_csv(path, index=False)
+    
+    @staticmethod
+    def export_summary(summary: dict, filepath: str):
+        """Export summary to CSV."""
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        df = pd.DataFrame([summary])
+        df.to_csv(path, index=False)

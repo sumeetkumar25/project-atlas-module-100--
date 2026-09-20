@@ -1,0 +1,509 @@
+# atlas/modules/module124_feature_redundancy/engine.py
+"""
+Module 124 - Feature Redundancy Analysis Engine
+
+Determines which features carry the same information.
+
+Methods:
+  1. Pearson Correlation: Linear redundancy
+  2. Spearman Correlation: Monotonic redundancy
+  3. Mutual Information: Nonlinear redundancy
+  4. Distance Correlation: Arbitrary dependence
+  5. Variance Inflation Factor (VIF): Multicollinearity
+  6. Hierarchical Clustering: Group redundant features
+
+Output: Redundancy score and PASS/WARNING/FAIL decision for each feature.
+"""
+
+import numpy as np
+import pandas as pd
+from dataclasses import dataclass
+from typing import Optional, Dict, Any, List, Tuple
+from itertools import combinations
+from scipy import stats
+from scipy.cluster.hierarchy import linkage, fcluster
+from scipy.spatial.distance import squareform
+from sklearn.feature_selection import mutual_info_regression
+from sklearn.linear_model import LinearRegression
+import warnings
+warnings.filterwarnings('ignore')
+
+
+@dataclass
+class FeatureRedundancyResult:
+    """Results from feature redundancy analysis."""
+    redundancy_table: pd.DataFrame
+    cluster_table: pd.DataFrame
+    kept_features: List[str]
+    removed_features: List[str]
+    summary_statistics: Dict[str, Any]
+
+
+class FeatureRedundancyAnalysisEngine:
+    """Core engine for feature redundancy analysis."""
+
+    # Columns to ignore (not features)
+    IGNORE_COLS = {
+        "timestamp", "date", "time", "index",
+        "open", "high", "low", "close", "volume",
+        "future_breakout"
+    }
+
+    # Redundancy thresholds
+    PASS_THRESHOLD = 0.30
+    WARNING_THRESHOLD = 0.60
+
+    # Cluster threshold
+    CLUSTER_THRESHOLD = 0.40
+
+    # Weights for redundancy score
+    REDUNDANCY_WEIGHTS = {
+        "max_correlation": 0.40,
+        "avg_correlation": 0.20,
+        "vif": 0.20,
+        "cluster_density": 0.20
+    }
+
+    def __init__(
+        self,
+        pass_threshold: float = 0.30,
+        warning_threshold: float = 0.60,
+        cluster_threshold: float = 0.40,
+        random_state: int = 42
+    ):
+        """
+        Initialize the feature redundancy analysis engine.
+        
+        Args:
+            pass_threshold: Score below this threshold = PASS
+            warning_threshold: Score below this threshold = WARNING
+            cluster_threshold: Distance threshold for clustering (0-1)
+            random_state: Random seed for reproducibility
+        """
+        self.pass_threshold = pass_threshold
+        self.warning_threshold = warning_threshold
+        self.cluster_threshold = cluster_threshold
+        self.random_state = random_state
+
+    def get_feature_columns(self, df: pd.DataFrame) -> List[str]:
+        """
+        Identify feature columns (exclude metadata and target).
+        """
+        features = [
+            c for c in df.columns
+            if c not in self.IGNORE_COLS
+            and pd.api.types.is_numeric_dtype(df[c])
+            and df[c].nunique() > 1
+        ]
+        return features
+
+    def generate_pairs(self, features: List[str]) -> List[Tuple[str, str]]:
+        """Generate all unique feature pairs."""
+        return list(combinations(features, 2))
+
+    def compute_pearson(self, df: pd.DataFrame, f1: str, f2: str) -> float:
+        """Compute Pearson correlation."""
+        corr = df[f1].corr(df[f2], method='pearson')
+        return float(corr) if not np.isnan(corr) else 0.0
+
+    def compute_spearman(self, df: pd.DataFrame, f1: str, f2: str) -> float:
+        """Compute Spearman correlation."""
+        corr = df[f1].corr(df[f2], method='spearman')
+        return float(corr) if not np.isnan(corr) else 0.0
+
+    def compute_mutual_information(self, df: pd.DataFrame, f1: str, f2: str) -> float:
+        """Compute Mutual Information."""
+        X = df[[f1]].values
+        y = df[f2].values
+        
+        try:
+            mi = mutual_info_regression(X, y, random_state=self.random_state)[0]
+            return float(min(1.0, max(0.0, mi)))
+        except:
+            return 0.0
+
+    def compute_distance_correlation(self, df: pd.DataFrame, f1: str, f2: str) -> float:
+        """Compute Distance Correlation with vectorized implementation."""
+        x = df[f1].values
+        y = df[f2].values
+        
+        try:
+            dx = np.abs(x[:, None] - x)
+            dy = np.abs(y[:, None] - y)
+            
+            def center_distance(d: np.ndarray) -> np.ndarray:
+                n = len(d)
+                row_mean = np.mean(d, axis=1, keepdims=True)
+                col_mean = np.mean(d, axis=0, keepdims=True)
+                total_mean = np.mean(d)
+                return d - row_mean - col_mean + total_mean
+            
+            A = center_distance(dx)
+            B = center_distance(dy)
+            
+            dcov2 = np.mean(A * B)
+            dvarx2 = np.mean(A * A)
+            dvar_y2 = np.mean(B * B)
+            
+            dcov2 = max(dcov2, 0.0)
+            dvarx2 = max(dvarx2, 1e-12)
+            dvar_y2 = max(dvar_y2, 1e-12)
+            
+            denom = np.sqrt(dvarx2 * dvar_y2)
+            
+            if denom < 1e-12:
+                return 0.0
+            
+            return float(min(1.0, max(0.0, np.sqrt(max(dcov2, 0.0) / denom))))
+        except:
+            return 0.0
+
+    def compute_vif(self, df: pd.DataFrame, feature: str, features: List[str]) -> float:
+        """Compute Variance Inflation Factor using Linear Regression."""
+        other_features = [f for f in features if f != feature]
+        
+        if not other_features:
+            return 1.0
+        
+        X = df[other_features].values
+        y = df[feature].values
+        
+        try:
+            lr = LinearRegression()
+            lr.fit(X, y)
+            
+            y_pred = lr.predict(X)
+            ss_res = np.sum((y - y_pred) ** 2)
+            ss_tot = np.sum((y - np.mean(y)) ** 2)
+            r_squared = 1 - (ss_res / (ss_tot + 1e-12))
+            
+            vif = 1.0 / (1.0 - r_squared + 1e-12)
+            return float(max(1.0, vif))
+        except:
+            return 1.0
+
+    def compute_cluster_representative(
+        self,
+        df: pd.DataFrame,
+        cluster_members: List[str]
+    ) -> str:
+        """
+        Find the best representative feature for a cluster.
+        
+        Uses variance as a proxy for information content.
+        The feature with highest variance is the representative.
+        """
+        if len(cluster_members) == 1:
+            return cluster_members[0]
+        
+        # Find feature with highest variance
+        variances = df[cluster_members].var()
+        return variances.idxmax()
+
+    def compute_cluster_density(
+        self,
+        cluster_members: List[str],
+        correlation_matrix: pd.DataFrame
+    ) -> float:
+        """
+        Compute cluster density (average pairwise correlation within cluster).
+        """
+        if len(cluster_members) < 2:
+            return 0.0
+        
+        corr_sum = 0.0
+        count = 0
+        
+        for i in range(len(cluster_members)):
+            for j in range(i + 1, len(cluster_members)):
+                f1 = cluster_members[i]
+                f2 = cluster_members[j]
+                corr_sum += abs(correlation_matrix.loc[f1, f2])
+                count += 1
+        
+        if count == 0:
+            return 0.0
+        
+        return corr_sum / count
+
+    def compute_redundancy_score(
+        self,
+        max_corr: float,
+        avg_corr: float,
+        vif: float,
+        cluster_density: float,
+        is_representative: bool
+    ) -> float:
+        """
+        Compute combined redundancy score.
+        
+        Representatives get a PASS (low score).
+        Non-representatives get high scores (WARNING or FAIL).
+        """
+        if is_representative:
+            # Representatives get a low redundancy score (PASS)
+            return 0.0
+        
+        # Non-representatives get a high redundancy score based on cluster characteristics
+        # Normalize max_corr to [0, 1]
+        max_corr_score = min(1.0, abs(max_corr))
+        
+        # Normalize avg_corr to [0, 1]
+        avg_corr_score = min(1.0, abs(avg_corr))
+        
+        # Normalize VIF: higher = more redundant, cap at 10
+        vif_score = min(1.0, (vif - 1) / 9)
+        
+        # Cluster density is already in [0, 1]
+        cluster_density_score = min(1.0, cluster_density)
+        
+        redundancy = (
+            self.REDUNDANCY_WEIGHTS['max_correlation'] * max_corr_score +
+            self.REDUNDANCY_WEIGHTS['avg_correlation'] * avg_corr_score +
+            self.REDUNDANCY_WEIGHTS['vif'] * vif_score +
+            self.REDUNDANCY_WEIGHTS['cluster_density'] * cluster_density_score
+        )
+        return np.clip(redundancy, 0.0, 1.0)
+
+    def make_decision(self, redundancy: float) -> str:
+        """
+        Make PASS/WARNING/FAIL decision based on redundancy score.
+        """
+        if redundancy <= self.pass_threshold:
+            return "PASS"
+        elif redundancy <= self.warning_threshold:
+            return "WARNING"
+        else:
+            return "FAIL"
+
+    def compute_statistics(
+        self,
+        redundancy_table: pd.DataFrame,
+        kept_features: List[str],
+        removed_features: List[str]
+    ) -> Dict[str, Any]:
+        """
+        Compute summary statistics.
+        """
+        total = len(redundancy_table)
+        scores = redundancy_table['redundancy_score']
+        
+        # Cluster statistics
+        cluster_sizes = redundancy_table.groupby('cluster_id').size()
+        largest_cluster = int(cluster_sizes.max()) if not cluster_sizes.empty else 0
+        smallest_cluster = int(cluster_sizes.min()) if not cluster_sizes.empty else 0
+        avg_cluster_size = float(cluster_sizes.mean()) if not cluster_sizes.empty else 0
+        
+        # Find best and worst features
+        # Sort ascending: lowest redundancy = best
+        sorted_table = redundancy_table.sort_values('redundancy_score', ascending=True)
+        best_feature = sorted_table.iloc[0]['feature'] if not sorted_table.empty else None
+        worst_feature = sorted_table.iloc[-1]['feature'] if not sorted_table.empty else None
+        best_score = float(sorted_table.iloc[0]['redundancy_score']) if not sorted_table.empty else 0
+        worst_score = float(sorted_table.iloc[-1]['redundancy_score']) if not sorted_table.empty else 0
+        
+        stats_dict = {
+            'total_features': total,
+            'kept_count': len(kept_features),
+            'removed_count': len(removed_features),
+            'kept_percentage': len(kept_features) / total * 100 if total > 0 else 0,
+            'removed_percentage': len(removed_features) / total * 100 if total > 0 else 0,
+            'average_redundancy': float(scores.mean()),
+            'median_redundancy': float(scores.median()),
+            'min_redundancy': float(scores.min()),
+            'max_redundancy': float(scores.max()),
+            'largest_cluster': largest_cluster,
+            'smallest_cluster': smallest_cluster,
+            'average_cluster_size': avg_cluster_size,
+            'best_feature': best_feature,
+            'worst_feature': worst_feature,
+            'best_score': best_score,
+            'worst_score': worst_score,
+            'total_clusters': len(cluster_sizes)
+        }
+        
+        return stats_dict
+
+    def compute(self, df: pd.DataFrame) -> FeatureRedundancyResult:
+        """
+        Main computation method.
+        """
+        print("\n  Computing Feature Redundancy...")
+        
+        # Get features
+        features = self.get_feature_columns(df)
+        print(f"  Found {len(features)} features")
+        
+        if len(features) < 2:
+            return FeatureRedundancyResult(
+                redundancy_table=pd.DataFrame(),
+                cluster_table=pd.DataFrame(),
+                kept_features=[],
+                removed_features=[],
+                summary_statistics={
+                    'total_features': len(features),
+                    'kept_count': 0,
+                    'removed_count': 0,
+                    'kept_percentage': 0,
+                    'removed_percentage': 0,
+                    'average_redundancy': 0,
+                    'median_redundancy': 0,
+                    'min_redundancy': 0,
+                    'max_redundancy': 0,
+                    'largest_cluster': 0,
+                    'smallest_cluster': 0,
+                    'average_cluster_size': 0,
+                    'best_feature': None,
+                    'worst_feature': None,
+                    'best_score': 0,
+                    'worst_score': 0,
+                    'total_clusters': 0
+                }
+            )
+        
+        # Generate pairs
+        pairs = self.generate_pairs(features)
+        print(f"  Analyzing {len(pairs)} feature pairs...")
+        
+        # Compute VIF for all features
+        print("  Computing VIF...")
+        vif_dict = {}
+        for feature in features:
+            vif_dict[feature] = self.compute_vif(df, feature, features)
+        
+        # Compute pairwise metrics
+        print("  Computing pairwise metrics...")
+        pair_metrics = []
+        
+        for f1, f2 in pairs:
+            pearson = self.compute_pearson(df, f1, f2)
+            spearman = self.compute_spearman(df, f1, f2)
+            mi = self.compute_mutual_information(df, f1, f2)
+            dcorr = self.compute_distance_correlation(df, f1, f2)
+            
+            pair_metrics.append({
+                'feature_a': f1,
+                'feature_b': f2,
+                'pearson': pearson,
+                'spearman': spearman,
+                'mutual_information': mi,
+                'distance_correlation': dcorr
+            })
+        
+        pair_df = pd.DataFrame(pair_metrics)
+        
+        # Build correlation matrix for clustering
+        n = len(features)
+        corr_matrix = np.zeros((n, n))
+        feature_index = {f: i for i, f in enumerate(features)}
+        
+        for _, row in pair_df.iterrows():
+            i = feature_index[row['feature_a']]
+            j = feature_index[row['feature_b']]
+            corr = abs(row['pearson'])
+            corr_matrix[i, j] = corr
+            corr_matrix[j, i] = corr
+        
+        np.fill_diagonal(corr_matrix, 1.0)
+        corr_matrix_df = pd.DataFrame(corr_matrix, index=features, columns=features)
+        
+        # Cluster features based on correlation distance
+        distance = 1 - corr_matrix
+        distance = (distance + distance.T) / 2
+        np.fill_diagonal(distance, 0)
+        distance = np.clip(distance, 0, 1)
+        
+        condensed = squareform(distance)
+        Z = linkage(condensed, method='average')
+        cluster_labels = fcluster(Z, t=self.cluster_threshold, criterion='distance')
+        
+        # Build cluster table
+        cluster_table = pd.DataFrame({
+            'feature': features,
+            'cluster_id': cluster_labels
+        })
+        
+        # Compute per-feature redundancy metrics
+        rows = []
+        kept_features = []
+        removed_features = []
+        
+        for cluster_id in sorted(cluster_table['cluster_id'].unique()):
+            cluster_members = cluster_table[cluster_table['cluster_id'] == cluster_id]['feature'].tolist()
+            
+            # Find representative (highest variance)
+            representative = self.compute_cluster_representative(df, cluster_members)
+            
+            # Cluster density
+            cluster_density = self.compute_cluster_density(cluster_members, corr_matrix_df)
+            
+            for feature in cluster_members:
+                is_representative = (feature == representative)
+                
+                # Compute max correlation with other features in cluster
+                max_corr = 0.0
+                avg_corr = 0.0
+                corr_count = 0
+                
+                for other in cluster_members:
+                    if other == feature:
+                        continue
+                    corr = abs(corr_matrix_df.loc[feature, other])
+                    max_corr = max(max_corr, corr)
+                    avg_corr += corr
+                    corr_count += 1
+                
+                if corr_count > 0:
+                    avg_corr /= corr_count
+                
+                # VIF for this feature
+                vif = vif_dict[feature]
+                
+                # Redundancy score
+                redundancy_score = self.compute_redundancy_score(
+                    max_corr, avg_corr, vif, cluster_density, is_representative
+                )
+                
+                # Decision
+                decision = self.make_decision(redundancy_score)
+                
+                # Track decisions
+                if is_representative or decision == "PASS":
+                    kept_features.append(feature)
+                else:
+                    removed_features.append(feature)
+                
+                rows.append({
+                    'feature': feature,
+                    'cluster_id': cluster_id,
+                    'cluster_size': len(cluster_members),
+                    'cluster_density': cluster_density,
+                    'max_correlation': max_corr,
+                    'avg_correlation': avg_corr,
+                    'vif': vif,
+                    'redundancy_score': redundancy_score,
+                    'decision': decision,
+                    'best_representative': representative,
+                    'is_representative': is_representative
+                })
+        
+        # Create redundancy table (sort descending for display)
+        redundancy_table = pd.DataFrame(rows)
+        redundancy_table = redundancy_table.sort_values('redundancy_score', ascending=False).reset_index(drop=True)
+        
+        # Compute statistics
+        stats = self.compute_statistics(redundancy_table, kept_features, removed_features)
+        
+        print(f"\n  Redundancy Results:")
+        print(f"    KEPT:   {len(kept_features)} features")
+        print(f"    REMOVED: {len(removed_features)} features")
+        print(f"    Total Clusters: {stats['total_clusters']}")
+        print(f"    Average Redundancy: {stats['average_redundancy']:.3f}")
+        
+        return FeatureRedundancyResult(
+            redundancy_table=redundancy_table,
+            cluster_table=cluster_table,
+            kept_features=kept_features,
+            removed_features=removed_features,
+            summary_statistics=stats
+        )

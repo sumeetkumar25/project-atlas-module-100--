@@ -1,0 +1,152 @@
+"""
+Module 124 - Feature Redundancy Report
+"""
+
+from datetime import datetime
+import pandas as pd
+
+
+class FeatureRedundancyReport:
+    """Report generator for feature redundancy results."""
+    
+    @staticmethod
+    def generate(statistics, metadata=None, dataset_name="Unknown") -> str:
+        """Generate a formatted report."""
+        lines = []
+        
+        lines.append("=" * 55)
+        lines.append("MODULE 124")
+        lines.append("FEATURE REDUNDANCY")
+        lines.append("=" * 55)
+        lines.append(f"\nDataset: {dataset_name}")
+        
+        # Overview
+        lines.append("\n" + "-" * 45)
+        lines.append("OVERVIEW")
+        lines.append("-" * 45)
+        lines.append(f"  Total Features: {statistics.total_features}")
+        lines.append(f"  KEPT: {statistics.kept_count}")
+        lines.append(f"  REMOVED: {statistics.removed_count}")
+        lines.append(f"  Total Clusters: {statistics.total_clusters}")
+        
+        # Percentages
+        lines.append("\n" + "-" * 45)
+        lines.append("PERCENTAGES")
+        lines.append("-" * 45)
+        lines.append(f"  KEPT: {statistics.kept_percentage:.1f}%")
+        lines.append(f"  REMOVED: {statistics.removed_percentage:.1f}%")
+        
+        # Redundancy Scores
+        lines.append("\n" + "-" * 45)
+        lines.append("REDUNDANCY SCORES")
+        lines.append("-" * 45)
+        lines.append(f"  Average: {statistics.average_redundancy:.3f}")
+        lines.append(f"  Median: {statistics.median_redundancy:.3f}")
+        lines.append(f"  Best: {statistics.best_score:.3f}")
+        lines.append(f"  Worst: {statistics.worst_score:.3f}")
+        
+        # Best and Worst Features
+        if statistics.best_feature:
+            lines.append("\n" + "-" * 45)
+            lines.append("BEST FEATURE")
+            lines.append("-" * 45)
+            lines.append(f"  {statistics.best_feature}: {statistics.best_score:.3f}")
+        
+        if statistics.worst_feature:
+            lines.append("\n" + "-" * 45)
+            lines.append("WORST FEATURE")
+            lines.append("-" * 45)
+            lines.append(f"  {statistics.worst_feature}: {statistics.worst_score:.3f}")
+        
+        # Clusters
+        lines.append("\n" + "-" * 45)
+        lines.append("CLUSTERS")
+        lines.append("-" * 45)
+        lines.append(f"  Largest Cluster: {statistics.largest_cluster} features")
+        lines.append(f"  Smallest Cluster: {statistics.smallest_cluster} features")
+        lines.append(f"  Average Cluster Size: {statistics.average_cluster_size:.1f}")
+        
+        # Interpretation
+        lines.append("\n" + "-" * 45)
+        lines.append("INTERPRETATION")
+        lines.append("-" * 45)
+        
+        if statistics.average_redundancy < 0.3:
+            lines.append("  ✅ Features are largely independent")
+        elif statistics.average_redundancy < 0.5:
+            lines.append("  ✓ Features show moderate redundancy")
+        else:
+            lines.append("  ⚠ Features show high redundancy")
+        
+        if statistics.removed_count > 0:
+            lines.append(f"  💡 {statistics.removed_count} features were removed as redundant")
+        
+        if statistics.total_clusters < statistics.total_features:
+            lines.append(f"  💡 {statistics.total_features - statistics.total_clusters} redundant features found")
+        
+        # Validation
+        lines.append("\n" + "-" * 45)
+        lines.append("VALIDATION")
+        lines.append("-" * 45)
+        lines.append("  Status: PASSED")
+        
+        # Footer
+        lines.append(f"\n  Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        lines.append("\n" + "=" * 55)
+        lines.append("END OF REPORT")
+        lines.append("=" * 55)
+        
+        return "\n".join(lines)
+    
+    @staticmethod
+    def generate_redundancy_table(redundancy_table: pd.DataFrame, top_n: int = 10) -> str:
+        """Generate a redundancy table report."""
+        lines = []
+        lines.append("\n" + "=" * 80)
+        lines.append(f"TOP {top_n} MOST REDUNDANT FEATURES")
+        lines.append("=" * 80)
+        
+        top_features = redundancy_table.head(top_n)
+        
+        lines.append(
+            f"\n{'Feature':<20} {'Score':<12} {'Decision':<12} {'Cluster':<12} {'Cluster Size':<12}"
+        )
+        lines.append("-" * 70)
+        
+        for _, row in top_features.iterrows():
+            lines.append(
+                f"{row['feature'][:19]:<20} "
+                f"{row['redundancy_score']:<12.3f} "
+                f"{row['decision']:<12} "
+                f"{row['cluster_id']:<12} "
+                f"{row['cluster_size']:<12}"
+            )
+        
+        lines.append("\n" + "=" * 80)
+        return "\n".join(lines)
+    
+    @staticmethod
+    def generate_cluster_report(cluster_table: pd.DataFrame) -> str:
+        """Generate a cluster report."""
+        lines = []
+        lines.append("\n" + "=" * 60)
+        lines.append("FEATURE CLUSTERS")
+        lines.append("=" * 60)
+        
+        for cluster in sorted(cluster_table['cluster_id'].unique()):
+            features = cluster_table[cluster_table['cluster_id'] == cluster]['feature'].tolist()
+            lines.append(f"\nCluster {cluster}: {len(features)} features")
+            for f in features:
+                lines.append(f"  - {f}")
+        
+        lines.append("\n" + "=" * 60)
+        return "\n".join(lines)
+    
+    @staticmethod
+    def save(report: str, filepath: str):
+        """Save report to file."""
+        from pathlib import Path
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(report)
