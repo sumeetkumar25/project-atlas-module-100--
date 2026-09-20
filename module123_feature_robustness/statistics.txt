@@ -1,0 +1,73 @@
+# atlas/modules/module123_feature_robustness/statistics.py
+"""
+Module 123 - Feature Robustness Statistics
+"""
+
+from dataclasses import dataclass, asdict
+import pandas as pd
+from .engine import FeatureRobustnessResult
+
+
+@dataclass
+class FeatureRobustnessStatistics:
+    """High-level statistics from feature robustness analysis."""
+    total_features: int
+    passed_count: int
+    warning_count: int
+    failed_count: int
+    passed_percentage: float
+    warning_percentage: float
+    failed_percentage: float
+    average_robustness: float
+    median_robustness: float
+    min_robustness: float
+    max_robustness: float
+    average_mean_score: float
+    average_std_score: float
+    average_consistency: float
+    best_feature: str
+    worst_feature: str
+    best_score: float
+    worst_score: float
+
+
+class FeatureRobustnessStatisticsEngine:
+    """Engine for generating high-level statistics."""
+    
+    METADATA = {
+        "module": 123,
+        "name": "Feature Robustness",
+        "version": "1.0.0",
+        "description": "Evaluates feature performance under different market environments"
+    }
+    
+    def analyze(self, result: FeatureRobustnessResult) -> FeatureRobustnessStatistics:
+        """Analyze results and generate high-level statistics."""
+        return FeatureRobustnessStatistics(
+            total_features=result.summary_statistics['total_features'],
+            passed_count=result.summary_statistics['passed_count'],
+            warning_count=result.summary_statistics['warning_count'],
+            failed_count=result.summary_statistics['failed_count'],
+            passed_percentage=result.summary_statistics['passed_percentage'],
+            warning_percentage=result.summary_statistics['warning_percentage'],
+            failed_percentage=result.summary_statistics['failed_percentage'],
+            average_robustness=result.summary_statistics['average_robustness'],
+            median_robustness=result.summary_statistics['median_robustness'],
+            min_robustness=result.summary_statistics['min_robustness'],
+            max_robustness=result.summary_statistics['max_robustness'],
+            average_mean_score=result.summary_statistics['average_mean_score'],
+            average_std_score=result.summary_statistics['average_std_score'],
+            average_consistency=result.summary_statistics['average_consistency'],
+            best_feature=result.summary_statistics['best_feature'],
+            worst_feature=result.summary_statistics['worst_feature'],
+            best_score=result.summary_statistics['best_score'],
+            worst_score=result.summary_statistics['worst_score']
+        )
+    
+    def summary_dataframe(self, stats: FeatureRobustnessStatistics) -> pd.DataFrame:
+        """Convert statistics to DataFrame."""
+        return pd.DataFrame([asdict(stats)])
+    
+    def summary_dict(self, stats: FeatureRobustnessStatistics) -> dict:
+        """Convert statistics to dictionary."""
+        return asdict(stats)

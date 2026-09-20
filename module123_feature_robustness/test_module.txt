@@ -1,0 +1,413 @@
+# atlas/modules/module123_feature_robustness/test_module.py
+"""
+Module 123 - Integration Test
+
+Tests feature robustness engine, statistics, validator, report, and pipeline.
+"""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+
+import numpy as np
+import pandas as pd
+
+from atlas.modules.module123_feature_robustness.engine import FeatureRobustnessEngine
+from atlas.modules.module123_feature_robustness.statistics import FeatureRobustnessStatisticsEngine
+from atlas.modules.module123_feature_robustness.validator import run_validation
+from atlas.modules.module123_feature_robustness.module import FeatureRobustnessResearch
+
+
+def create_test_data(n=1000, seed=42):
+    """Create synthetic test data with regimes and feature robustness."""
+    np.random.seed(seed)
+    
+    # Create price data with regimes
+    close = pd.Series(
+        100 + np.cumsum(np.random.randn(n) * 0.5)
+    )
+    high = close + np.abs(np.random.randn(n) * 1.0)
+    low = close - np.abs(np.random.randn(n) * 1.0)
+    volume = np.random.randn(n) * 100 + 1000
+    
+    # Create signal from price
+    signal = close.diff().shift(1).fillna(0)
+    
+    # Target directly from signal (deterministic)
+    target = (signal > 0).astype(int)
+    
+    # Feature 1: Perfect predictor (signal)
+    perfect_feature = signal
+    
+    # Feature 2: Robust across all regimes (signal + small noise)
+    robust_feature = signal + np.random.randn(n) * 0.10
+    
+    # Feature 3: Fragile - only predictive in first half
+    fragile_feature = signal.copy()
+    half = n // 2
+    fragile_feature.iloc[:half] += np.random.randn(half) * 0.10
+    fragile_feature.iloc[half:] = np.random.randn(n - half) * 0.5
+    
+    # Feature 4: Noise (not predictive)
+    noise_feature = np.random.randn(n) * 0.5
+    
+    df = pd.DataFrame({
+        'timestamp': pd.date_range('2020-01-01', periods=n, freq='1h'),
+        'open': 100 + np.random.randn(n) * 10,
+        'high': high,
+        'low': low,
+        'close': close,
+        'volume': volume,
+        'perfect_feature': perfect_feature,
+        'robust_feature': robust_feature,
+        'fragile_feature': fragile_feature,
+        'noise_feature': noise_feature,
+        'future_breakout': target
+    })
+    
+    return df
+
+
+def test_engine_feature_detection():
+    """Test 1: Feature detection."""
+    print("\n" + "=" * 60)
+    print("TEST 1: Feature Detection")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeatureRobustnessEngine()
+    
+    features = engine.get_feature_columns(df)
+    
+    assert 'perfect_feature' in features
+    assert 'robust_feature' in features
+    assert 'fragile_feature' in features
+    assert 'noise_feature' in features
+    assert 'close' not in features
+    assert 'future_breakout' not in features
+    
+    print(f"  Found {len(features)} features")
+    print("  ✓ Feature detection test passed")
+    return True
+
+
+def test_engine_trend_regime():
+    """Test 2: Trend regime classification."""
+    print("\n" + "=" * 60)
+    print("TEST 2: Trend Regime")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeatureRobustnessEngine()
+    
+    trend = engine.compute_trend_regime(df)
+    
+    assert set(trend.unique()).issubset({'Bull', 'Bear', 'Sideways'})
+    assert len(trend) == len(df)
+    assert not trend.isna().any()
+    
+    print(f"  Trend regimes: {trend.unique().tolist()}")
+    print("  ✓ Trend regime test passed")
+    return True
+
+
+def test_engine_volatility_regime():
+    """Test 3: Volatility regime classification."""
+    print("\n" + "=" * 60)
+    print("TEST 3: Volatility Regime")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeatureRobustnessEngine()
+    
+    vol = engine.compute_volatility_regime(df)
+    
+    assert set(vol.unique()).issubset({'Low Vol', 'Medium Vol', 'High Vol'})
+    assert len(vol) == len(df)
+    assert not vol.isna().any()
+    
+    print(f"  Volatility regimes: {vol.unique().tolist()}")
+    print("  ✓ Volatility regime test passed")
+    return True
+
+
+def test_engine_volume_regime():
+    """Test 4: Volume regime classification."""
+    print("\n" + "=" * 60)
+    print("TEST 4: Volume Regime")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeatureRobustnessEngine()
+    
+    volume = engine.compute_volume_regime(df)
+    
+    assert set(volume.unique()).issubset({'Low Volume', 'Medium Volume', 'High Volume'})
+    assert len(volume) == len(df)
+    assert not volume.isna().any()
+    
+    print(f"  Volume regimes: {volume.unique().tolist()}")
+    print("  ✓ Volume regime test passed")
+    return True
+
+
+def test_engine_trending_regime():
+    """Test 5: Trending regime classification."""
+    print("\n" + "=" * 60)
+    print("TEST 5: Trending Regime")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeatureRobustnessEngine()
+    
+    trending = engine.compute_trending_regime(df)
+    
+    assert set(trending.unique()).issubset({'Trending', 'Range'})
+    assert len(trending) == len(df)
+    assert not trending.isna().any()
+    
+    print(f"  Trending regimes: {trending.unique().tolist()}")
+    print("  ✓ Trending regime test passed")
+    return True
+
+
+def test_engine_regime_scores():
+    """Test 6: Regime scores computation."""
+    print("\n" + "=" * 60)
+    print("TEST 6: Regime Scores")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeatureRobustnessEngine()
+    
+    features = engine.get_feature_columns(df)
+    y = df['future_breakout'].values
+    
+    regime_scores = engine.compute_regime_scores(df, features, y)
+    
+    assert not regime_scores.empty
+    assert 'feature' in regime_scores.columns
+    assert 'regime' in regime_scores.columns
+    assert 'score' in regime_scores.columns
+    
+    print(f"  Regime scores: {len(regime_scores)} rows")
+    print("  ✓ Regime scores test passed")
+    return True
+
+
+def test_engine_robustness_metrics():
+    """Test 7: Robustness metrics computation."""
+    print("\n" + "=" * 60)
+    print("TEST 7: Robustness Metrics")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeatureRobustnessEngine()
+    
+    features = engine.get_feature_columns(df)
+    y = df['future_breakout'].values
+    
+    regime_scores = engine.compute_regime_scores(df, features, y)
+    metrics = engine.compute_robustness_metrics(regime_scores)
+    
+    # Debug output to understand feature rankings
+    print("\n================ ROBUSTNESS TABLE ================\n")
+    print(
+        metrics[
+            [
+                "feature",
+                "mean_score",
+                "min_score",
+                "max_score",
+                "consistency_index",
+                "robustness_score",
+                "decision",
+            ]
+        ].sort_values("robustness_score", ascending=False)
+    )
+    
+    print("\n================ REGIME SCORES ================\n")
+    print(
+        regime_scores.pivot_table(
+            index="feature",
+            columns="regime",
+            values="score"
+        ).round(3)
+    )
+    
+    assert not metrics.empty
+    assert 'robustness_score' in metrics.columns
+    assert 'consistency_index' in metrics.columns
+    assert 'decision' in metrics.columns
+    
+    # Perfect feature should have very high robustness (> 0.90)
+    perfect_row = metrics[metrics['feature'] == 'perfect_feature']
+    if not perfect_row.empty:
+        assert perfect_row['robustness_score'].iloc[0] > 0.90
+    
+    # Noise feature should be classified as FAIL
+    noise_row = metrics[metrics['feature'] == 'noise_feature']
+    if not noise_row.empty:
+        # Validate that the engine correctly classifies noise as FAIL
+        assert noise_row['decision'].iloc[0] == "FAIL"
+        # Validate that noise score is below the warning threshold
+        assert noise_row['robustness_score'].iloc[0] < engine.warning_threshold
+    
+    print(f"  Robustness metrics: {len(metrics)} rows")
+    print("  ✓ Robustness metrics test passed")
+    return True
+
+
+def test_engine_compute():
+    """Test 8: Full engine computation."""
+    print("\n" + "=" * 60)
+    print("TEST 8: Full Engine Computation")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeatureRobustnessEngine()
+    
+    result = engine.compute(df)
+    
+    assert not result.robustness_table.empty
+    assert not result.regime_scores.empty
+    assert (
+        len(result.passed_features)
+        + len(result.warning_features)
+        + len(result.failed_features)
+        == result.summary_statistics["total_features"]
+    )
+    assert result.summary_statistics["average_robustness"] > 0
+    
+    # Perfect feature should be in PASS
+    assert 'perfect_feature' in result.passed_features
+    
+    # Noise feature should be in FAIL
+    assert 'noise_feature' in result.failed_features
+    
+    print(f"  PASS: {len(result.passed_features)}")
+    print(f"  WARNING: {len(result.warning_features)}")
+    print(f"  FAIL: {len(result.failed_features)}")
+    print(f"  Avg Robustness: {result.summary_statistics['average_robustness']:.3f}")
+    print("  ✓ Full engine test passed")
+    return True
+
+
+def test_statistics():
+    """Test 9: Statistics engine."""
+    print("\n" + "=" * 60)
+    print("TEST 9: Statistics Engine")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeatureRobustnessEngine()
+    stats_engine = FeatureRobustnessStatisticsEngine()
+    
+    result = engine.compute(df)
+    stats = stats_engine.analyze(result)
+    
+    assert stats.total_features == result.summary_statistics['total_features']
+    assert stats.passed_count == len(result.passed_features)
+    assert stats.failed_count == len(result.failed_features)
+    assert stats.best_feature is not None
+    
+    print(f"  Total: {stats.total_features}")
+    print(f"  PASS: {stats.passed_count}")
+    print(f"  FAIL: {stats.failed_count}")
+    print("  ✓ Statistics test passed")
+    return True
+
+
+def test_validator():
+    """Test 10: Validator."""
+    print("\n" + "=" * 60)
+    print("TEST 10: Validator")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeatureRobustnessEngine()
+    stats_engine = FeatureRobustnessStatisticsEngine()
+    
+    result = engine.compute(df)
+    stats = stats_engine.analyze(result)
+    
+    passed = run_validation(result, stats)
+    assert passed
+    
+    print("  ✓ Validator test passed")
+    return True
+
+
+def test_pipeline():
+    """Test 11: Full pipeline."""
+    print("\n" + "=" * 60)
+    print("TEST 11: Full Pipeline")
+    print("=" * 60)
+    
+    df = create_test_data()
+    
+    research = FeatureRobustnessResearch()
+    
+    result = research.run_dataframe(df, dataset_id="pipeline_test")
+    
+    assert result.status == "completed"
+    assert "robustness_table" in result.artifacts
+    assert "regime_scores" in result.artifacts
+    assert "passed_features" in result.artifacts
+    assert "warning_features" in result.artifacts
+    assert "failed_features" in result.artifacts
+    assert "feature_robustness_report" in result.artifacts
+    assert "robustness_report" in result.artifacts
+    assert "regime_report" in result.artifacts
+    assert result.statistics.get("software_validation_passed") == True
+    
+    print(f"  PASS: {result.statistics.get('passed_count')}")
+    print(f"  FAIL: {result.statistics.get('failed_count')}")
+    print("  ✓ Full pipeline test passed")
+    return True
+
+
+def main():
+    """Run all tests."""
+    print("\n" + "=" * 70)
+    print("PROJECT ATLAS - MODULE 123 INTEGRATION TEST")
+    print("Feature Robustness")
+    print("=" * 70)
+    
+    results = {}
+    
+    results["feature_detection"] = test_engine_feature_detection()
+    results["trend_regime"] = test_engine_trend_regime()
+    results["volatility_regime"] = test_engine_volatility_regime()
+    results["volume_regime"] = test_engine_volume_regime()
+    results["trending_regime"] = test_engine_trending_regime()
+    results["regime_scores"] = test_engine_regime_scores()
+    results["robustness_metrics"] = test_engine_robustness_metrics()
+    results["full_engine"] = test_engine_compute()
+    results["statistics"] = test_statistics()
+    results["validator"] = test_validator()
+    results["pipeline"] = test_pipeline()
+    
+    print("\n" + "=" * 70)
+    print("RESULTS")
+    print("=" * 70)
+    
+    for name, ok in results.items():
+        print(f"  {'✓' if ok else '✗'} {name}")
+    
+    passed = sum(results.values())
+    total = len(results)
+    
+    print(f"\n  {passed}/{total} tests passed")
+    
+    if passed == total:
+        print("\n✓ Module 123 VALIDATED")
+        return 0
+    else:
+        print("\n⚠ Some tests failed")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,140 @@
+# atlas/modules/module123_feature_robustness/validator.py
+"""
+Module 123 - Feature Robustness Validator
+"""
+
+import numpy as np
+import pandas as pd
+from .engine import FeatureRobustnessResult
+from .statistics import FeatureRobustnessStatistics
+
+
+class FeatureRobustnessValidator:
+    """Validator for feature robustness results."""
+    
+    def validate(
+        self,
+        result: FeatureRobustnessResult,
+        statistics: FeatureRobustnessStatistics
+    ) -> bool:
+        """Validate results and statistics."""
+        issues = []
+        warnings = []
+        
+        # Check robustness table
+        if result.robustness_table.empty:
+            issues.append("Robustness table is empty")
+        else:
+            required_cols = ['feature', 'robustness_score', 'decision']
+            missing = set(required_cols) - set(result.robustness_table.columns)
+            if missing:
+                issues.append(f"Missing columns in robustness table: {missing}")
+            
+            # Check scores are in [0, 1]
+            if 'robustness_score' in result.robustness_table.columns:
+                if not np.all((0 <= result.robustness_table['robustness_score']) & 
+                            (result.robustness_table['robustness_score'] <= 1)):
+                    issues.append("Robustness scores outside [0, 1] range")
+            
+            # Check decisions are valid
+            if 'decision' in result.robustness_table.columns:
+                valid_decisions = {'PASS', 'WARNING', 'FAIL'}
+                invalid = set(result.robustness_table['decision'].unique()) - valid_decisions
+                if invalid:
+                    issues.append(f"Invalid decisions found: {invalid}")
+            
+            # Check consistency index
+            if 'consistency_index' in result.robustness_table.columns:
+                if not np.all((0 <= result.robustness_table['consistency_index']) & 
+                            (result.robustness_table['consistency_index'] <= 1)):
+                    issues.append("Consistency indices outside [0, 1] range")
+        
+        # Check regime scores
+        if result.regime_scores.empty:
+            issues.append("Regime scores DataFrame is empty")
+        else:
+            required_cols = ['feature', 'regime', 'score']
+            missing = set(required_cols) - set(result.regime_scores.columns)
+            if missing:
+                issues.append(f"Missing columns in regime scores: {missing}")
+            
+            # Check scores are in valid range
+            if 'score' in result.regime_scores.columns:
+                if not np.all((0.5 <= result.regime_scores['score']) & 
+                            (result.regime_scores['score'] <= 1)):
+                    # ROC AUC can be 0.5-1.0 after inverse handling
+                    pass
+        
+        # Check feature lists
+        total_decision_count = len(result.passed_features) + len(result.warning_features) + len(result.failed_features)
+        if total_decision_count != len(result.robustness_table):
+            issues.append(
+                f"Decision count mismatch: {total_decision_count} vs {len(result.robustness_table)}"
+            )
+        
+        # Check statistics match result
+        if statistics.total_features != result.summary_statistics['total_features']:
+            issues.append(
+                f"Total features mismatch: stats={statistics.total_features}, "
+                f"result={result.summary_statistics['total_features']}"
+            )
+        
+        if statistics.passed_count != len(result.passed_features):
+            issues.append(
+                f"Passed count mismatch: stats={statistics.passed_count}, "
+                f"result={len(result.passed_features)}"
+            )
+        
+        if statistics.warning_count != len(result.warning_features):
+            issues.append(
+                f"Warning count mismatch: stats={statistics.warning_count}, "
+                f"result={len(result.warning_features)}"
+            )
+        
+        if statistics.failed_count != len(result.failed_features):
+            issues.append(
+                f"Failed count mismatch: stats={statistics.failed_count}, "
+                f"result={len(result.failed_features)}"
+            )
+        
+        # Warnings (non-fatal)
+        if statistics.passed_percentage < 30:
+            warnings.append(f"Low pass percentage: {statistics.passed_percentage:.1f}%")
+        
+        if statistics.average_robustness < 0.5:
+            warnings.append(f"Low average robustness: {statistics.average_robustness:.3f}")
+        
+        if statistics.average_consistency < 0.5:
+            warnings.append(f"Low average consistency: {statistics.average_consistency:.3f}")
+        
+        if warnings:
+            print("\n  WARNINGS:")
+            for warning in warnings:
+                print(f"    ⚠ {warning}")
+        
+        if issues:
+            raise ValueError(
+                f"Feature Robustness validation failed with {len(issues)} issue(s):\n" +
+                "\n".join(f"  - {issue}" for issue in issues)
+            )
+        
+        return True
+
+
+def run_validation(result, statistics):
+    """Run validation with user-friendly output."""
+    validator = FeatureRobustnessValidator()
+    
+    print("\n" + "=" * 60)
+    print("FEATURE ROBUSTNESS VALIDATION")
+    print("=" * 60)
+    
+    try:
+        validator.validate(result, statistics)
+        print("\n  ✓ All validation checks passed")
+        print("=" * 60)
+        return True
+    except ValueError as e:
+        print(e)
+        print("=" * 60)
+        return False

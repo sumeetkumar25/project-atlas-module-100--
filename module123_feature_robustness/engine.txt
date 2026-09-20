@@ -1,0 +1,494 @@
+# atlas/modules/module123_feature_robustness/engine.py
+"""
+Module 123 - Feature Robustness Engine
+
+Evaluates feature performance under different market environments (regimes).
+
+Regimes:
+  - Bull Market
+  - Bear Market
+  - Sideways
+  - High Volatility
+  - Low Volatility
+  - High Volume
+  - Low Volume
+  - Trending
+  - Range
+
+Output: Robustness score and PASS/WARNING/FAIL decision for each feature.
+"""
+
+import numpy as np
+import pandas as pd
+from dataclasses import dataclass
+from typing import Optional, Dict, Any, List, Tuple
+from scipy import stats
+from sklearn.metrics import roc_auc_score
+import warnings
+warnings.filterwarnings('ignore')
+
+
+@dataclass
+class FeatureRobustnessResult:
+    """Results from feature robustness analysis."""
+    robustness_table: pd.DataFrame
+    regime_scores: pd.DataFrame
+    passed_features: List[str]
+    warning_features: List[str]
+    failed_features: List[str]
+    summary_statistics: Dict[str, Any]
+
+
+class FeatureRobustnessEngine:
+    """Core engine for feature robustness analysis."""
+
+    # Columns to ignore (not features)
+    IGNORE_COLS = {
+        "timestamp", "date", "time", "index",
+        "open", "high", "low", "close", "volume",
+        "future_breakout"
+    }
+
+    # Robustness thresholds
+    PASS_THRESHOLD = 0.80
+    WARNING_THRESHOLD = 0.60
+
+    # Regime definitions
+    TREND_EMA_PERIOD = 200
+    ATR_PERIOD = 14
+    VOLUME_THRESHOLDS = (0.33, 0.67)
+    VOLATILITY_THRESHOLDS = (0.33, 0.67)
+
+    def __init__(
+        self,
+        pass_threshold: float = 0.80,
+        warning_threshold: float = 0.60,
+        price_column: str = "close",
+        target_column: str = "future_breakout"
+    ):
+        """
+        Initialize the feature robustness engine.
+        
+        Args:
+            pass_threshold: Score above this threshold = PASS
+            warning_threshold: Score above this threshold = WARNING
+            price_column: Column name for price data
+            target_column: Column name for target variable
+        """
+        self.pass_threshold = pass_threshold
+        self.warning_threshold = warning_threshold
+        self.price_column = price_column
+        self.target_column = target_column
+
+    def get_feature_columns(self, df: pd.DataFrame) -> List[str]:
+        """
+        Identify feature columns (exclude metadata and target).
+        """
+        features = [
+            c for c in df.columns
+            if c not in self.IGNORE_COLS
+            and c != self.target_column
+            and pd.api.types.is_numeric_dtype(df[c])
+            and df[c].nunique() > 1
+        ]
+        return features
+
+    def compute_trend_regime(self, df: pd.DataFrame) -> pd.Series:
+        """
+        Compute trend regime using EMA200.
+        
+        Returns:
+            Series with values: 'Bull', 'Bear', 'Sideways'
+        """
+        close = df[self.price_column]
+        ema = close.ewm(span=self.TREND_EMA_PERIOD, adjust=False).mean()
+        
+        relative = (close - ema) / ema
+        threshold = 0.02
+        
+        regimes = pd.Series(index=df.index, dtype='object')
+        regimes[relative > threshold] = 'Bull'
+        regimes[relative < -threshold] = 'Bear'
+        regimes[(relative >= -threshold) & (relative <= threshold)] = 'Sideways'
+        regimes = regimes.fillna('Sideways')
+        
+        return regimes
+
+    def compute_volatility_regime(self, df: pd.DataFrame) -> pd.Series:
+        """
+        Compute volatility regime using ATR percentile.
+        
+        Returns:
+            Series with values: 'High Vol', 'Medium Vol', 'Low Vol'
+        """
+        high = df['high']
+        low = df['low']
+        close = df[self.price_column]
+        
+        tr1 = high - low
+        tr2 = abs(high - close.shift())
+        tr3 = abs(low - close.shift())
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = tr.rolling(window=self.ATR_PERIOD).mean()
+        
+        atr_pct = atr.rank(pct=True)
+        atr_pct = atr_pct.fillna(0.5)
+        
+        regimes = pd.Series(index=df.index, dtype='object')
+        regimes[atr_pct <= self.VOLATILITY_THRESHOLDS[0]] = 'Low Vol'
+        regimes[(atr_pct > self.VOLATILITY_THRESHOLDS[0]) & (atr_pct <= self.VOLATILITY_THRESHOLDS[1])] = 'Medium Vol'
+        regimes[atr_pct > self.VOLATILITY_THRESHOLDS[1]] = 'High Vol'
+        regimes = regimes.fillna('Medium Vol')
+        
+        return regimes
+
+    def compute_volume_regime(self, df: pd.DataFrame) -> pd.Series:
+        """
+        Compute volume regime using volume percentile.
+        
+        Returns:
+            Series with values: 'High Volume', 'Medium Volume', 'Low Volume'
+        """
+        if 'volume' not in df.columns:
+            return pd.Series('Medium Volume', index=df.index)
+        
+        volume = df['volume']
+        volume_pct = volume.rank(pct=True)
+        volume_pct = volume_pct.fillna(0.5)
+        
+        regimes = pd.Series(index=df.index, dtype='object')
+        regimes[volume_pct <= self.VOLUME_THRESHOLDS[0]] = 'Low Volume'
+        regimes[(volume_pct > self.VOLUME_THRESHOLDS[0]) & (volume_pct <= self.VOLUME_THRESHOLDS[1])] = 'Medium Volume'
+        regimes[volume_pct > self.VOLUME_THRESHOLDS[1]] = 'High Volume'
+        regimes = regimes.fillna('Medium Volume')
+        
+        return regimes
+
+    def compute_trending_regime(self, df: pd.DataFrame) -> pd.Series:
+        """
+        Compute trending vs range regime.
+        
+        Returns:
+            Series with values: 'Trending', 'Range'
+        """
+        close = df[self.price_column]
+        
+        # Use ADX-like measure (simplified: compare high-low range to ATR)
+        high = df['high']
+        low = df['low']
+        tr = high - low
+        atr = tr.rolling(window=self.ATR_PERIOD).mean()
+        
+        # Price movement relative to ATR
+        price_move = close.diff().abs()
+        move_ratio = price_move.rolling(window=self.ATR_PERIOD).mean() / (atr + 1e-12)
+        
+        threshold = 0.5
+        regimes = pd.Series(index=df.index, dtype='object')
+        regimes[move_ratio > threshold] = 'Trending'
+        regimes[move_ratio <= threshold] = 'Range'
+        regimes = regimes.fillna('Range')
+        
+        return regimes
+
+    def compute_feature_score(self, X: np.ndarray, y: np.ndarray) -> float:
+        """
+        Compute feature predictive score using ROC AUC.
+        """
+        try:
+            if len(np.unique(y)) < 2:
+                return 0.0
+            auc = roc_auc_score(y, X)
+            # Treat inverse predictors as equally informative
+            auc = max(auc, 1.0 - auc)
+            return float(np.clip(auc, 0.5, 1.0))
+        except:
+            return 0.0
+
+    def compute_regime_scores(
+        self,
+        df: pd.DataFrame,
+        features: List[str],
+        y: np.ndarray
+    ) -> pd.DataFrame:
+        """
+        Compute feature scores across all regimes.
+        
+        Returns:
+            DataFrame with feature, regime, and score
+        """
+        # Compute all regimes
+        trend = self.compute_trend_regime(df)
+        vol = self.compute_volatility_regime(df)
+        volume = self.compute_volume_regime(df)
+        trending = self.compute_trending_regime(df)
+        
+        regimes = {
+            'Trend': trend,
+            'Volatility': vol,
+            'Volume': volume,
+            'Trending': trending
+        }
+        
+        rows = []
+        
+        for regime_type, regime_series in regimes.items():
+            for regime_value in regime_series.unique():
+                if pd.isna(regime_value):
+                    continue
+                
+                mask = regime_series == regime_value
+                y_regime = y[mask]
+                
+                if len(np.unique(y_regime)) < 2:
+                    continue
+                
+                for feature in features:
+                    X = df.loc[mask, feature].values
+                    score = self.compute_feature_score(X, y_regime)
+                    
+                    rows.append({
+                        'feature': feature,
+                        'regime_type': regime_type,
+                        'regime': regime_value,
+                        'score': score,
+                        'sample_size': np.sum(mask)
+                    })
+        
+        return pd.DataFrame(rows)
+
+    def compute_robustness_metrics(
+        self,
+        regime_scores: pd.DataFrame
+    ) -> pd.DataFrame:
+        """
+        Compute robustness metrics for each feature.
+        """
+        metrics_rows = []
+        
+        for feature in regime_scores['feature'].unique():
+            feature_scores = regime_scores[regime_scores['feature'] == feature]
+            scores = feature_scores['score'].values
+            
+            if len(scores) < 2:
+                # Not enough regimes
+                metrics_rows.append({
+                    'feature': feature,
+                    'mean_score': 0.0,
+                    'std_score': 0.0,
+                    'cv_score': 0.0,
+                    'min_score': 0.0,
+                    'max_score': 0.0,
+                    'range_score': 0.0,
+                    'consistency_index': 0.0,
+                    'robustness_score': 0.0,
+                    'decision': 'FAIL',
+                    'n_regimes': len(scores)
+                })
+                continue
+            
+            mean_score = np.mean(scores)
+            std_score = np.std(scores)
+            cv_score = std_score / (mean_score + 1e-12)
+            min_score = np.min(scores)
+            max_score = np.max(scores)
+            range_score = max_score - min_score
+            
+            # Consistency Index: 1 - normalized variance
+            # If all scores are equal (perfect consistency), index = 1
+            # If scores vary widely, index approaches 0
+            if mean_score > 0:
+                # Normalize std by mean (coefficient of variation)
+                normalized_variance = cv_score / (1 + cv_score)  # Maps CV to [0, 1]
+                consistency_index = 1 - normalized_variance
+            else:
+                consistency_index = 0.0
+            
+            # ---------------------------------------------------------
+            # Normalize predictive performance
+            # ROC AUC:
+            #   0.50 = random
+            #   1.00 = perfect
+            # Convert to:
+            #   0.00 = random
+            #   1.00 = perfect
+            # ---------------------------------------------------------
+            
+            mean_component = np.clip((mean_score - 0.5) / 0.5, 0.0, 1.0)
+            min_component = np.clip((min_score - 0.5) / 0.5, 0.0, 1.0)
+            
+            # ---------------------------------------------------------
+            # Stability penalty
+            # Smaller variation across regimes is better.
+            # ---------------------------------------------------------
+            
+            variance_penalty = np.clip(range_score / 0.5, 0.0, 1.0)
+            
+            # ---------------------------------------------------------
+            # Final Robustness Score
+            #
+            # 50% Consistency
+            # 30% Worst-case performance
+            # 20% Average performance
+            #
+            # Finally apply variance penalty.
+            # ---------------------------------------------------------
+            
+            robustness_score = (
+                0.50 * consistency_index +
+                0.30 * min_component +
+                0.20 * mean_component
+            )
+            
+            robustness_score *= (1.0 - 0.25 * variance_penalty)
+            
+            robustness_score = float(np.clip(robustness_score, 0.0, 1.0))
+            
+            # Decision
+            if robustness_score >= self.pass_threshold:
+                decision = "PASS"
+            elif robustness_score >= self.warning_threshold:
+                decision = "WARNING"
+            else:
+                decision = "FAIL"
+            
+            metrics_rows.append({
+                'feature': feature,
+                'mean_score': float(mean_score),
+                'std_score': float(std_score),
+                'cv_score': float(cv_score),
+                'min_score': float(min_score),
+                'max_score': float(max_score),
+                'range_score': float(range_score),
+                'consistency_index': float(consistency_index),
+                'min_component': float(min_component),
+                'mean_component': float(mean_component),
+                'variance_penalty': float(variance_penalty),
+                'robustness_score': float(robustness_score),
+                'decision': decision,
+                'n_regimes': len(scores)
+            })
+        
+        return pd.DataFrame(metrics_rows)
+
+    def compute_statistics(
+        self,
+        robustness_table: pd.DataFrame,
+        passed_features: List[str],
+        warning_features: List[str],
+        failed_features: List[str]
+    ) -> Dict[str, Any]:
+        """
+        Compute summary statistics.
+        """
+        total = len(robustness_table)
+        scores = robustness_table['robustness_score']
+        
+        stats_dict = {
+            'total_features': total,
+            'passed_count': len(passed_features),
+            'warning_count': len(warning_features),
+            'failed_count': len(failed_features),
+            'passed_percentage': len(passed_features) / total * 100 if total > 0 else 0,
+            'warning_percentage': len(warning_features) / total * 100 if total > 0 else 0,
+            'failed_percentage': len(failed_features) / total * 100 if total > 0 else 0,
+            'average_robustness': float(scores.mean()),
+            'median_robustness': float(scores.median()),
+            'min_robustness': float(scores.min()),
+            'max_robustness': float(scores.max()),
+            'average_mean_score': float(robustness_table['mean_score'].mean()) if not robustness_table.empty else 0,
+            'average_std_score': float(robustness_table['std_score'].mean()) if not robustness_table.empty else 0,
+            'average_consistency': float(robustness_table['consistency_index'].mean()) if not robustness_table.empty else 0,
+            'best_feature': robustness_table.iloc[0]['feature'] if not robustness_table.empty else None,
+            'worst_feature': robustness_table.iloc[-1]['feature'] if not robustness_table.empty else None,
+            'best_score': float(robustness_table.iloc[0]['robustness_score']) if not robustness_table.empty else 0,
+            'worst_score': float(robustness_table.iloc[-1]['robustness_score']) if not robustness_table.empty else 0
+        }
+        
+        return stats_dict
+
+    def compute(self, df: pd.DataFrame) -> FeatureRobustnessResult:
+        """
+        Main computation method.
+        """
+        print("\n  Computing Feature Robustness...")
+        
+        # Get target
+        if self.target_column not in df.columns:
+            raise ValueError(f"Target column '{self.target_column}' not found")
+        
+        y = df[self.target_column].values
+        
+        # Get features
+        features = self.get_feature_columns(df)
+        print(f"  Found {len(features)} features")
+        
+        if not features:
+            return FeatureRobustnessResult(
+                robustness_table=pd.DataFrame(),
+                regime_scores=pd.DataFrame(),
+                passed_features=[],
+                warning_features=[],
+                failed_features=[],
+                summary_statistics={
+                    'total_features': 0,
+                    'passed_count': 0,
+                    'warning_count': 0,
+                    'failed_count': 0,
+                    'passed_percentage': 0,
+                    'warning_percentage': 0,
+                    'failed_percentage': 0,
+                    'average_robustness': 0,
+                    'median_robustness': 0,
+                    'min_robustness': 0,
+                    'max_robustness': 0,
+                    'average_mean_score': 0,
+                    'average_std_score': 0,
+                    'average_consistency': 0,
+                    'best_feature': None,
+                    'worst_feature': None,
+                    'best_score': 0,
+                    'worst_score': 0
+                }
+            )
+        
+        # Compute regime scores
+        print("  Computing regime scores...")
+        regime_scores = self.compute_regime_scores(df, features, y)
+        
+        # Compute robustness metrics
+        print("  Computing robustness metrics...")
+        robustness_table = self.compute_robustness_metrics(regime_scores)
+        robustness_table = robustness_table.sort_values('robustness_score', ascending=False).reset_index(drop=True)
+        
+        # Track decisions
+        passed = []
+        warning = []
+        failed = []
+        
+        for _, row in robustness_table.iterrows():
+            if row['decision'] == "PASS":
+                passed.append(row['feature'])
+            elif row['decision'] == "WARNING":
+                warning.append(row['feature'])
+            else:
+                failed.append(row['feature'])
+        
+        # Compute statistics
+        stats = self.compute_statistics(robustness_table, passed, warning, failed)
+        
+        print(f"\n  Robustness Results:")
+        print(f"    PASS:   {len(passed)} features")
+        print(f"    WARNING: {len(warning)} features")
+        print(f"    FAIL:   {len(failed)} features")
+        print(f"    Average Robustness: {stats['average_robustness']:.3f}")
+        print(f"    Average Consistency: {stats['average_consistency']:.3f}")
+        
+        return FeatureRobustnessResult(
+            robustness_table=robustness_table,
+            regime_scores=regime_scores,
+            passed_features=passed,
+            warning_features=warning,
+            failed_features=failed,
+            summary_statistics=stats
+        )
