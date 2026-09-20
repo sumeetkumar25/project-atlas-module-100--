@@ -1,0 +1,421 @@
+# atlas/modules/module122_feature_predictive_power/test_module.py
+"""
+Module 122 - Integration Test
+
+Tests feature predictive power engine, statistics, validator, report, and pipeline.
+"""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+
+import numpy as np
+import pandas as pd
+
+from atlas.modules.module122_feature_predictive_power.engine import FeaturePredictivePowerEngine
+from atlas.modules.module122_feature_predictive_power.statistics import FeaturePredictivePowerStatisticsEngine
+from atlas.modules.module122_feature_predictive_power.validator import run_validation
+from atlas.modules.module122_feature_predictive_power.module import FeaturePredictivePowerResearch
+
+
+def create_test_data(n=500, seed=42):
+    """Create synthetic test data with various predictive power levels."""
+    np.random.seed(seed)
+    
+    # Strong predictive feature
+    strong = np.random.randn(n) * 0.5 + 0
+    strong_target = 1 / (1 + np.exp(-strong))
+    strong_label = (strong_target > 0.5).astype(int)
+    
+    # Moderate predictive feature
+    moderate = np.random.randn(n) * 0.5 + 0
+    moderate_target = 1 / (1 + np.exp(-moderate * 0.3))
+    moderate_label = (moderate_target > 0.5).astype(int)
+    
+    # Weak predictive feature
+    weak = np.random.randn(n) * 0.5 + 0
+    weak_target = 1 / (1 + np.exp(-weak * 0.1))
+    weak_label = (weak_target > 0.5).astype(int)
+    
+    # Noise feature (no predictive power)
+    noise = np.random.randn(n)
+    noise_label = np.random.randint(0, 2, n)
+    
+    # Target
+    target = strong_label
+    
+    df = pd.DataFrame({
+        'timestamp': pd.date_range('2020-01-01', periods=n, freq='1h'),
+        'open': 100 + np.random.randn(n) * 10,
+        'high': 100 + np.random.randn(n) * 10 + np.abs(np.random.randn(n) * 2),
+        'low': 100 + np.random.randn(n) * 10 - np.abs(np.random.randn(n) * 2),
+        'close': 100 + np.random.randn(n) * 10,
+        'volume': np.random.randn(n) * 100 + 1000,
+        'strong_feature': strong,
+        'moderate_feature': moderate,
+        'weak_feature': weak,
+        'noise_feature': noise,
+        'future_breakout': target
+    })
+    
+    return df
+
+
+def test_engine_feature_detection():
+    """Test 1: Feature detection."""
+    print("\n" + "=" * 60)
+    print("TEST 1: Feature Detection")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeaturePredictivePowerEngine()
+    
+    features = engine.get_feature_columns(df)
+    
+    assert 'strong_feature' in features
+    assert 'moderate_feature' in features
+    assert 'weak_feature' in features
+    assert 'noise_feature' in features
+    assert 'close' not in features
+    assert 'future_breakout' not in features
+    
+    print(f"  Found {len(features)} features")
+    print("  ✓ Feature detection test passed")
+    return True
+
+
+def test_engine_pearson():
+    """Test 2: Pearson correlation."""
+    print("\n" + "=" * 60)
+    print("TEST 2: Pearson Correlation")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeaturePredictivePowerEngine()
+    y = df['future_breakout'].values
+    
+    strong_corr = engine.compute_pearson(df['strong_feature'].values, y)
+    noise_corr = engine.compute_pearson(df['noise_feature'].values, y)
+    
+    assert abs(strong_corr) > abs(noise_corr)
+    assert -1 <= strong_corr <= 1
+    
+    print(f"  Strong feature correlation: {strong_corr:.4f}")
+    print("  ✓ Pearson test passed")
+    return True
+
+
+def test_engine_spearman():
+    """Test 3: Spearman correlation."""
+    print("\n" + "=" * 60)
+    print("TEST 3: Spearman Correlation")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeaturePredictivePowerEngine()
+    y = df['future_breakout'].values
+    
+    strong_corr = engine.compute_spearman(df['strong_feature'].values, y)
+    noise_corr = engine.compute_spearman(df['noise_feature'].values, y)
+    
+    assert abs(strong_corr) > abs(noise_corr)
+    assert -1 <= strong_corr <= 1
+    
+    print(f"  Strong feature Spearman: {strong_corr:.4f}")
+    print("  ✓ Spearman test passed")
+    return True
+
+
+def test_engine_mutual_information():
+    """Test 4: Mutual Information."""
+    print("\n" + "=" * 60)
+    print("TEST 4: Mutual Information")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeaturePredictivePowerEngine()
+    y = df['future_breakout'].values
+    
+    strong_mi = engine.compute_mutual_information(df['strong_feature'].values, y)
+    noise_mi = engine.compute_mutual_information(df['noise_feature'].values, y)
+    
+    assert strong_mi > noise_mi
+    assert strong_mi >= 0
+    
+    print(f"  Strong feature MI: {strong_mi:.4f}")
+    print("  ✓ Mutual Information test passed")
+    return True
+
+
+def test_engine_anova():
+    """Test 5: ANOVA F-score."""
+    print("\n" + "=" * 60)
+    print("TEST 5: ANOVA F-score")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeaturePredictivePowerEngine()
+    y = df['future_breakout'].values
+    
+    strong_anova = engine.compute_anova(df['strong_feature'].values, y)
+    noise_anova = engine.compute_anova(df['noise_feature'].values, y)
+    
+    assert strong_anova > noise_anova
+    assert 0 <= strong_anova <= 1
+    
+    print(f"  Strong feature ANOVA: {strong_anova:.4f}")
+    print("  ✓ ANOVA test passed")
+    return True
+
+
+def test_engine_roc_auc():
+    """Test 6: ROC AUC."""
+    print("\n" + "=" * 60)
+    print("TEST 6: ROC AUC")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeaturePredictivePowerEngine()
+    y = df['future_breakout'].values
+    
+    strong_auc = engine.compute_roc_auc(df['strong_feature'].values, y)
+    noise_auc = engine.compute_roc_auc(df['noise_feature'].values, y)
+    
+    assert strong_auc > noise_auc
+    assert 0 <= strong_auc <= 1
+    
+    print(f"  Strong feature ROC AUC: {strong_auc:.4f}")
+    print("  ✓ ROC AUC test passed")
+    return True
+
+
+def test_engine_point_biserial():
+    """Test 7: Point-Biserial correlation."""
+    print("\n" + "=" * 60)
+    print("TEST 7: Point-Biserial Correlation")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeaturePredictivePowerEngine()
+    y = df['future_breakout'].values
+    
+    strong_pb = engine.compute_point_biserial(df['strong_feature'].values, y)
+    noise_pb = engine.compute_point_biserial(df['noise_feature'].values, y)
+    
+    assert strong_pb > noise_pb
+    assert 0 <= strong_pb <= 1
+    
+    print(f"  Strong feature Point-Biserial: {strong_pb:.4f}")
+    print("  ✓ Point-Biserial test passed")
+    return True
+
+
+def test_engine_predictive_score():
+    """Test 8: Predictive score computation."""
+    print("\n" + "=" * 60)
+    print("TEST 8: Predictive Score")
+    print("=" * 60)
+    
+    engine = FeaturePredictivePowerEngine()
+    
+    # Strong metrics
+    strong_metrics = {
+        'mutual_information': 0.8,
+        'roc_auc': 0.8,
+        'anova': 0.8,
+        'pearson': 0.7,
+        'spearman': 0.7,
+        'kendall': 0.6,
+        'point_biserial': 0.6,
+        'cohens_d': 0.6
+    }
+    strong_score = engine.compute_predictive_score(strong_metrics)
+    assert strong_score > 0.7
+    
+    # Weak metrics
+    weak_metrics = {
+        'mutual_information': 0.1,
+        'roc_auc': 0.1,
+        'anova': 0.1,
+        'pearson': 0.05,
+        'spearman': 0.05,
+        'kendall': 0.05,
+        'point_biserial': 0.05,
+        'cohens_d': 0.05
+    }
+    weak_score = engine.compute_predictive_score(weak_metrics)
+    assert weak_score < 0.3
+    
+    print("  ✓ Predictive score test passed")
+    return True
+
+
+def test_engine_decisions():
+    """Test 9: Decision making."""
+    print("\n" + "=" * 60)
+    print("TEST 9: Decision Making")
+    print("=" * 60)
+    
+    engine = FeaturePredictivePowerEngine(
+        pass_threshold=0.80,
+        warning_threshold=0.60
+    )
+    
+    assert engine.make_decision(0.90) == "PASS"
+    assert engine.make_decision(0.70) == "WARNING"
+    assert engine.make_decision(0.50) == "FAIL"
+    assert engine.make_decision(0.80) == "PASS"
+    assert engine.make_decision(0.60) == "WARNING"
+    assert engine.make_decision(0.59) == "FAIL"
+    
+    print("  ✓ Decision making test passed")
+    return True
+
+
+def test_engine_compute():
+    """Test 10: Full engine computation."""
+    print("\n" + "=" * 60)
+    print("TEST 10: Full Engine Computation")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeaturePredictivePowerEngine()
+    
+    result = engine.compute(df)
+    
+    assert not result.predictive_table.empty
+    assert len(result.passed_features) >= 1
+    assert (
+        len(result.passed_features)
+        + len(result.warning_features)
+        + len(result.failed_features)
+        == result.summary_statistics["total_features"]
+    )
+    assert result.summary_statistics["average_predictive_score"] > 0
+    
+    print(f"  PASS: {len(result.passed_features)}")
+    print(f"  WARNING: {len(result.warning_features)}")
+    print(f"  FAIL: {len(result.failed_features)}")
+    print(f"  Avg Predictive Score: {result.summary_statistics['average_predictive_score']:.3f}")
+    print("  ✓ Full engine test passed")
+    return True
+
+
+def test_statistics():
+    """Test 11: Statistics engine."""
+    print("\n" + "=" * 60)
+    print("TEST 11: Statistics Engine")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeaturePredictivePowerEngine()
+    stats_engine = FeaturePredictivePowerStatisticsEngine()
+    
+    result = engine.compute(df)
+    stats = stats_engine.analyze(result)
+    
+    assert stats.total_features == result.summary_statistics['total_features']
+    assert stats.passed_count == len(result.passed_features)
+    assert stats.failed_count == len(result.failed_features)
+    assert stats.best_feature is not None
+    
+    print(f"  Total: {stats.total_features}")
+    print(f"  PASS: {stats.passed_count}")
+    print(f"  FAIL: {stats.failed_count}")
+    print("  ✓ Statistics test passed")
+    return True
+
+
+def test_validator():
+    """Test 12: Validator."""
+    print("\n" + "=" * 60)
+    print("TEST 12: Validator")
+    print("=" * 60)
+    
+    df = create_test_data()
+    engine = FeaturePredictivePowerEngine()
+    stats_engine = FeaturePredictivePowerStatisticsEngine()
+    
+    result = engine.compute(df)
+    stats = stats_engine.analyze(result)
+    
+    passed = run_validation(result, stats)
+    assert passed
+    
+    print("  ✓ Validator test passed")
+    return True
+
+
+def test_pipeline():
+    """Test 13: Full pipeline."""
+    print("\n" + "=" * 60)
+    print("TEST 13: Full Pipeline")
+    print("=" * 60)
+    
+    df = create_test_data()
+    
+    research = FeaturePredictivePowerResearch()
+    
+    result = research.run_dataframe(df, dataset_id="pipeline_test")
+    
+    assert result.status == "completed"
+    assert "predictive_table" in result.artifacts
+    assert "passed_features" in result.artifacts
+    assert "warning_features" in result.artifacts
+    assert "failed_features" in result.artifacts
+    assert "feature_predictive_power_report" in result.artifacts
+    assert "predictive_report" in result.artifacts
+    assert result.statistics.get("software_validation_passed") == True
+    
+    print(f"  PASS: {result.statistics.get('passed_count')}")
+    print(f"  FAIL: {result.statistics.get('failed_count')}")
+    print("  ✓ Full pipeline test passed")
+    return True
+
+
+def main():
+    """Run all tests."""
+    print("\n" + "=" * 70)
+    print("PROJECT ATLAS - MODULE 122 INTEGRATION TEST")
+    print("Feature Predictive Power")
+    print("=" * 70)
+    
+    results = {}
+    
+    results["feature_detection"] = test_engine_feature_detection()
+    results["pearson"] = test_engine_pearson()
+    results["spearman"] = test_engine_spearman()
+    results["mutual_information"] = test_engine_mutual_information()
+    results["anova"] = test_engine_anova()
+    results["roc_auc"] = test_engine_roc_auc()
+    results["point_biserial"] = test_engine_point_biserial()
+    results["predictive_score"] = test_engine_predictive_score()
+    results["decisions"] = test_engine_decisions()
+    results["full_engine"] = test_engine_compute()
+    results["statistics"] = test_statistics()
+    results["validator"] = test_validator()
+    results["pipeline"] = test_pipeline()
+    
+    print("\n" + "=" * 70)
+    print("RESULTS")
+    print("=" * 70)
+    
+    for name, ok in results.items():
+        print(f"  {'✓' if ok else '✗'} {name}")
+    
+    passed = sum(results.values())
+    total = len(results)
+    
+    print(f"\n  {passed}/{total} tests passed")
+    
+    if passed == total:
+        print("\n✓ Module 122 VALIDATED")
+        return 0
+    else:
+        print("\n⚠ Some tests failed")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

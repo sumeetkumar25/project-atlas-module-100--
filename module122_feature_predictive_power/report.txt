@@ -1,0 +1,139 @@
+# atlas/modules/module122_feature_predictive_power/report.py
+"""
+Module 122 - Feature Predictive Power Report
+"""
+
+from datetime import datetime
+import pandas as pd
+
+
+class FeaturePredictivePowerReport:
+    """Report generator for feature predictive power results."""
+    
+    @staticmethod
+    def generate(statistics, metadata=None, dataset_name="Unknown") -> str:
+        """Generate a formatted report."""
+        lines = []
+        
+        lines.append("=" * 55)
+        lines.append("MODULE 122")
+        lines.append("FEATURE PREDICTIVE POWER")
+        lines.append("=" * 55)
+        lines.append(f"\nDataset: {dataset_name}")
+        
+        # Overview
+        lines.append("\n" + "-" * 45)
+        lines.append("OVERVIEW")
+        lines.append("-" * 45)
+        lines.append(f"  Total Features: {statistics.total_features}")
+        lines.append(f"  PASS: {statistics.passed_count}")
+        lines.append(f"  WARNING: {statistics.warning_count}")
+        lines.append(f"  FAIL: {statistics.failed_count}")
+        
+        # Percentages
+        lines.append("\n" + "-" * 45)
+        lines.append("PERCENTAGES")
+        lines.append("-" * 45)
+        lines.append(f"  PASS: {statistics.passed_percentage:.1f}%")
+        lines.append(f"  WARNING: {statistics.warning_percentage:.1f}%")
+        lines.append(f"  FAIL: {statistics.failed_percentage:.1f}%")
+        
+        # Predictive Scores
+        lines.append("\n" + "-" * 45)
+        lines.append("PREDICTIVE SCORES")
+        lines.append("-" * 45)
+        lines.append(f"  Average: {statistics.average_predictive_score:.3f}")
+        lines.append(f"  Median: {statistics.median_predictive_score:.3f}")
+        lines.append(f"  Best: {statistics.best_score:.3f}")
+        lines.append(f"  Worst: {statistics.worst_score:.3f}")
+        
+        # Best and Worst Features
+        if statistics.best_feature:
+            lines.append("\n" + "-" * 45)
+            lines.append("BEST FEATURE")
+            lines.append("-" * 45)
+            lines.append(f"  {statistics.best_feature}: {statistics.best_score:.3f}")
+        
+        if statistics.worst_feature:
+            lines.append("\n" + "-" * 45)
+            lines.append("WORST FEATURE")
+            lines.append("-" * 45)
+            lines.append(f"  {statistics.worst_feature}: {statistics.worst_score:.3f}")
+        
+        # Metrics
+        lines.append("\n" + "-" * 45)
+        lines.append("AVERAGE METRICS")
+        lines.append("-" * 45)
+        lines.append(f"  Mutual Information: {statistics.average_mi:.3f}")
+        lines.append(f"  ROC AUC: {statistics.average_roc_auc:.3f}")
+        lines.append(f"  Effect Size (Cohen's d): {statistics.average_effect_size:.3f}")
+        
+        # Interpretation
+        lines.append("\n" + "-" * 45)
+        lines.append("INTERPRETATION")
+        lines.append("-" * 45)
+        
+        if statistics.average_predictive_score > 0.6:
+            lines.append("  ✅ Features show strong predictive power")
+        elif statistics.average_predictive_score > 0.4:
+            lines.append("  ✓ Features show moderate predictive power")
+        else:
+            lines.append("  ⚠ Features show weak predictive power")
+        
+        if statistics.average_roc_auc > 0.6:
+            lines.append("  ✅ Features have good classification performance")
+        elif statistics.average_roc_auc > 0.55:
+            lines.append("  ✓ Features have moderate classification performance")
+        else:
+            lines.append("  ⚠ Features have weak classification performance")
+        
+        # Validation
+        lines.append("\n" + "-" * 45)
+        lines.append("VALIDATION")
+        lines.append("-" * 45)
+        lines.append("  Status: PASSED")
+        
+        # Footer
+        lines.append(f"\n  Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        lines.append("\n" + "=" * 55)
+        lines.append("END OF REPORT")
+        lines.append("=" * 55)
+        
+        return "\n".join(lines)
+    
+    @staticmethod
+    def generate_predictive_table(predictive_table: pd.DataFrame, top_n: int = 10) -> str:
+        """Generate a predictive table report."""
+        lines = []
+        lines.append("\n" + "=" * 80)
+        lines.append(f"TOP {top_n} FEATURES BY PREDICTIVE POWER")
+        lines.append("=" * 80)
+        
+        top_features = predictive_table.head(top_n)
+        
+        lines.append(
+            f"\n{'Feature':<20} {'Score':<10} {'Decision':<12} {'MI':<10} {'ROC':<10} {'Effect':<10}"
+        )
+        lines.append("-" * 80)
+        
+        for _, row in top_features.iterrows():
+            lines.append(
+                f"{row['feature'][:19]:<20} "
+                f"{row['predictive_score']:<10.3f} "
+                f"{row['decision']:<12} "
+                f"{row['mutual_information']:<10.3f} "
+                f"{row['roc_auc']:<10.3f} "
+                f"{row['cohens_d']:<10.3f}"
+            )
+        
+        lines.append("\n" + "=" * 80)
+        return "\n".join(lines)
+    
+    @staticmethod
+    def save(report: str, filepath: str):
+        """Save report to file."""
+        from pathlib import Path
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(report)

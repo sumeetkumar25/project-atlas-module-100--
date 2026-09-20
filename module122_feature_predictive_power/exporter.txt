@@ -1,0 +1,50 @@
+# atlas/modules/module122_feature_predictive_power/exporter.py
+"""
+Module 122 - Feature Predictive Power Exporter
+"""
+
+import pandas as pd
+from pathlib import Path
+
+
+class FeaturePredictivePowerExporter:
+    """Exporter for feature predictive power results."""
+    
+    @staticmethod
+    def export_predictive_table(df: pd.DataFrame, filepath: str):
+        """Export predictive table to CSV."""
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(path, index=False)
+    
+    @staticmethod
+    def export_passed_features(features: list, filepath: str):
+        """Export passed features to CSV."""
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        df = pd.DataFrame({'feature': features})
+        df.to_csv(path, index=False)
+    
+    @staticmethod
+    def export_warning_features(features: list, filepath: str):
+        """Export warning features to CSV."""
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        df = pd.DataFrame({'feature': features})
+        df.to_csv(path, index=False)
+    
+    @staticmethod
+    def export_failed_features(features: list, filepath: str):
+        """Export failed features to CSV."""
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        df = pd.DataFrame({'feature': features})
+        df.to_csv(path, index=False)
+    
+    @staticmethod
+    def export_summary(summary: dict, filepath: str):
+        """Export summary to CSV."""
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        df = pd.DataFrame([summary])
+        df.to_csv(path, index=False)

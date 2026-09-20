@@ -1,0 +1,234 @@
+# atlas/modules/module122_feature_predictive_power/module.py
+"""
+Module 122
+Feature Predictive Power
+
+Evaluates every feature individually against the prediction target.
+
+Pipeline: detect features → compute predictive metrics →
+          predictive score → decisions → statistics → validation → report → export
+"""
+
+from typing import Optional, Dict, Any
+import pandas as pd
+from pathlib import Path
+
+from atlas.core.base_research_module import BaseResearchModule
+from atlas.framework.registry import AtlasRegistry
+
+from .engine import FeaturePredictivePowerEngine
+from .statistics import FeaturePredictivePowerStatisticsEngine
+from .validator import run_validation
+from .report import FeaturePredictivePowerReport
+from .exporter import FeaturePredictivePowerExporter
+
+
+class FeaturePredictivePowerResearch(BaseResearchModule):
+    """Main research module for feature predictive power analysis."""
+    
+    MODULE_OUTPUT = "module122"
+    METADATA = FeaturePredictivePowerStatisticsEngine.METADATA
+    
+    def __init__(
+        self,
+        registry: Optional[AtlasRegistry] = None,
+        pass_threshold: float = 0.80,
+        warning_threshold: float = 0.60,
+        target_column: str = "future_breakout"
+    ):
+        """
+        Initialize the feature predictive power module.
+        
+        Args:
+            registry: Optional Atlas registry
+            pass_threshold: Score above this threshold = PASS
+            warning_threshold: Score above this threshold = WARNING
+            target_column: Name of the target column
+        """
+        super().__init__(
+            module_name="Feature Predictive Power",
+            module_version=self.METADATA["version"],
+        )
+        
+        self.registry = registry or AtlasRegistry()
+        self.engine = FeaturePredictivePowerEngine(
+            pass_threshold=pass_threshold,
+            warning_threshold=warning_threshold,
+            target_column=target_column
+        )
+        self.stats_engine = FeaturePredictivePowerStatisticsEngine()
+        self.result_data = None
+        self.statistics = None
+        self.predictive_report = None
+        self._output_dir = None
+
+    def _register_pipeline_steps(self):
+        """Register pipeline steps."""
+        self.pipeline_steps = [
+            ("feature_predictive_power", self._compute_predictive),
+            ("statistics", self._compute_statistics),
+            ("validate", self._validate),
+            ("export", self._export_results),
+        ]
+    
+    def _prepare_data(self) -> Dict[str, Any]:
+        """Prepare data from DataFrame."""
+        return {"df": self.df}
+    
+    def _compute_predictive(self) -> Dict[str, Any]:
+        """Step 1: Compute feature predictive power."""
+        self.logger.info("Step 1: Computing feature predictive power")
+        
+        prepared = self._prepare_data()
+        
+        self.result_data = self.engine.compute(
+            df=prepared["df"]
+        )
+        
+        self.logger.metric(
+            "PASS",
+            f"{len(self.result_data.passed_features)} features"
+        )
+        self.logger.metric(
+            "WARNING",
+            f"{len(self.result_data.warning_features)} features"
+        )
+        self.logger.metric(
+            "FAIL",
+            f"{len(self.result_data.failed_features)} features"
+        )
+        self.logger.metric(
+            "Avg Predictive Score",
+            f"{self.result_data.summary_statistics['average_predictive_score']:.3f}"
+        )
+        self.logger.metric(
+            "Avg ROC AUC",
+            f"{self.result_data.summary_statistics['average_roc_auc']:.3f}"
+        )
+        self.logger.success("Feature predictive power computed")
+        
+        # Generate report
+        self.predictive_report = FeaturePredictivePowerReport.generate_predictive_table(
+            self.result_data.predictive_table,
+            top_n=10
+        )
+        
+        return {
+            "passed_count": len(self.result_data.passed_features),
+            "warning_count": len(self.result_data.warning_features),
+            "failed_count": len(self.result_data.failed_features),
+            "average_predictive_score": self.result_data.summary_statistics["average_predictive_score"],
+            "average_roc_auc": self.result_data.summary_statistics["average_roc_auc"]
+        }
+    
+    def _compute_statistics(self) -> Dict[str, Any]:
+        """Step 2: Computing statistics."""
+        self.logger.info("Step 2: Computing statistics")
+        self.statistics = self.stats_engine.analyze(self.result_data)
+        
+        self.logger.metric(
+            "Best Feature",
+            self.statistics.best_feature
+        )
+        self.logger.metric(
+            "Worst Feature",
+            self.statistics.worst_feature
+        )
+        self.logger.success("Statistics computed")
+        
+        return self.stats_engine.summary_dict(self.statistics)
+    
+    def _validate(self) -> Dict[str, Any]:
+        """Step 3: Validation."""
+        self.logger.info("Step 3: Validation")
+        passed = run_validation(self.result_data, self.statistics)
+        self.logger.success("Validation complete")
+        return {"software_validation_passed": passed}
+    
+    def _export_results(self) -> Dict[str, Any]:
+        """Step 4: Export."""
+        self.logger.info("Step 4: Export")
+        
+        # Register DataFrames as artifacts
+        self.result.artifacts["predictive_table"] = self.result_data.predictive_table
+        
+        # Store feature lists as DataFrames
+        passed_df = pd.DataFrame({'feature': self.result_data.passed_features})
+        warning_df = pd.DataFrame({'feature': self.result_data.warning_features})
+        failed_df = pd.DataFrame({'feature': self.result_data.failed_features})
+        
+        self.result.artifacts["passed_features"] = passed_df
+        self.result.artifacts["warning_features"] = warning_df
+        self.result.artifacts["failed_features"] = failed_df
+        
+        # Store summary
+        summary_df = pd.DataFrame([self.result_data.summary_statistics])
+        self.result.artifacts["predictive_summary"] = summary_df
+        
+        # Generate and register reports
+        main_report = FeaturePredictivePowerReport.generate(
+            self.statistics,
+            metadata=self.METADATA,
+            dataset_name=self.result.dataset_identifier,
+        )
+        self.result.artifacts["feature_predictive_power_report"] = main_report
+        self.result.artifacts["predictive_report"] = self.predictive_report
+        
+        # Export to files
+        if self._output_dir is not None:
+            export_dir = self._output_dir / "exports"
+            export_dir.mkdir(parents=True, exist_ok=True)
+            
+            FeaturePredictivePowerExporter.export_predictive_table(
+                self.result_data.predictive_table,
+                export_dir / "predictive_table.csv"
+            )
+            
+            FeaturePredictivePowerExporter.export_passed_features(
+                self.result_data.passed_features,
+                export_dir / "passed_features.csv"
+            )
+            
+            FeaturePredictivePowerExporter.export_warning_features(
+                self.result_data.warning_features,
+                export_dir / "warning_features.csv"
+            )
+            
+            FeaturePredictivePowerExporter.export_failed_features(
+                self.result_data.failed_features,
+                export_dir / "failed_features.csv"
+            )
+            
+            FeaturePredictivePowerExporter.export_summary(
+                self.result_data.summary_statistics,
+                export_dir / "predictive_summary.csv"
+            )
+        
+        self.logger.metric("Artifacts", str(len(self.result.artifacts)))
+        self.logger.success("Export complete")
+        
+        return {
+            "export_status": "complete",
+            "artifact_count": len(self.result.artifacts),
+            "passed_count": len(self.result_data.passed_features),
+            "warning_count": len(self.result_data.warning_features),
+            "failed_count": len(self.result_data.failed_features)
+        }
+    
+    def compute(self) -> Dict[str, Any]:
+        """Run the full computation pipeline."""
+        self.logger.section("Feature Predictive Power Pipeline")
+        results = self.execute_pipeline()
+        self.result.status = "completed"
+        self.logger.success("Module 122 complete")
+        return results
+    
+    def run(self, filepath: str, output_dir=None):
+        """Run module on file."""
+        self._output_dir = Path(output_dir) if output_dir else None
+        return super().run(filepath, output_dir)
+    
+    def run_dataframe(self, df, dataset_id="in_memory", output_dir=None):
+        """Run module on DataFrame."""
+        self._output_dir = Path(output_dir) if output_dir else None
+        return super().run_dataframe(df, dataset_id, output_dir)
