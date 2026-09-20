@@ -1,0 +1,71 @@
+# atlas/modules/module121_feature_redundancy/exporter.py
+"""
+Module 121 - Feature Redundancy Exporter
+"""
+
+import pandas as pd
+from pathlib import Path
+
+
+class FeatureRedundancyExporter:
+    """Exporter for feature redundancy results."""
+    
+    @staticmethod
+    def export_redundancy_table(df: pd.DataFrame, filepath: str):
+        """Export redundancy table to CSV."""
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(path, index=False)
+    
+    @staticmethod
+    def export_correlation_matrix(df: pd.DataFrame, filepath: str):
+        """Export correlation matrix to CSV."""
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(path)
+    
+    @staticmethod
+    def export_vif_table(df: pd.DataFrame, filepath: str):
+        """Export VIF table to CSV."""
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(path, index=False)
+    
+    @staticmethod
+    def export_clusters(df: pd.DataFrame, filepath: str):
+        """Export clusters to CSV."""
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(path, index=False)
+    
+    @staticmethod
+    def export_passed_pairs(pairs: list, filepath: str):
+        """Export passed pairs to CSV."""
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        df = pd.DataFrame(pairs, columns=['feature_a', 'feature_b'])
+        df.to_csv(path, index=False)
+    
+    @staticmethod
+    def export_warning_pairs(pairs: list, filepath: str):
+        """Export warning pairs to CSV."""
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        df = pd.DataFrame(pairs, columns=['feature_a', 'feature_b'])
+        df.to_csv(path, index=False)
+    
+    @staticmethod
+    def export_failed_pairs(pairs: list, filepath: str):
+        """Export failed pairs to CSV."""
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        df = pd.DataFrame(pairs, columns=['feature_a', 'feature_b'])
+        df.to_csv(path, index=False)
+    
+    @staticmethod
+    def export_summary(summary: dict, filepath: str):
+        """Export summary to CSV."""
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        df = pd.DataFrame([summary])
+        df.to_csv(path, index=False)

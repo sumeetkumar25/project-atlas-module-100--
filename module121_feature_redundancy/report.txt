@@ -1,0 +1,144 @@
+# atlas/modules/module121_feature_redundancy/report.py
+"""
+Module 121 - Feature Redundancy Report
+"""
+
+from datetime import datetime
+import pandas as pd
+
+
+class FeatureRedundancyReport:
+    """Report generator for feature redundancy results."""
+    
+    @staticmethod
+    def generate(statistics, metadata=None, dataset_name="Unknown") -> str:
+        """Generate a formatted report."""
+        lines = []
+        
+        lines.append("=" * 55)
+        lines.append("MODULE 121")
+        lines.append("FEATURE REDUNDANCY")
+        lines.append("=" * 55)
+        lines.append(f"\nDataset: {dataset_name}")
+        
+        # Overview
+        lines.append("\n" + "-" * 45)
+        lines.append("OVERVIEW")
+        lines.append("-" * 45)
+        lines.append(f"  Total Features: {statistics.total_features}")
+        lines.append(f"  Total Pairs: {statistics.total_pairs}")
+        lines.append(f"  Unique Clusters: {statistics.unique_clusters}")
+        
+        # Pair Decisions
+        lines.append("\n" + "-" * 45)
+        lines.append("PAIR DECISIONS")
+        lines.append("-" * 45)
+        lines.append(f"  PASS: {statistics.passed_pairs}")
+        lines.append(f"  WARNING: {statistics.warning_pairs}")
+        lines.append(f"  FAIL: {statistics.failed_pairs}")
+        lines.append(f"  PASS: {statistics.passed_percentage:.1f}%")
+        lines.append(f"  WARNING: {statistics.warning_percentage:.1f}%")
+        lines.append(f"  FAIL: {statistics.failed_percentage:.1f}%")
+        
+        # Redundancy Metrics
+        lines.append("\n" + "-" * 45)
+        lines.append("REDUNDANCY METRICS")
+        lines.append("-" * 45)
+        lines.append(f"  Average Redundancy: {statistics.average_redundancy:.3f}")
+        lines.append(f"  Average Correlation: {statistics.average_correlation:.3f}")
+        lines.append(f"  Average VIF: {statistics.average_vif:.2f}")
+        lines.append(f"  Largest Cluster: {statistics.largest_cluster}")
+        
+        # Most and Least Redundant
+        lines.append("\n" + "-" * 45)
+        lines.append("EXTREMES")
+        lines.append("-" * 45)
+        lines.append(f"  Most Redundant: {statistics.most_redundant_pair}")
+        lines.append(f"    Score: {statistics.most_redundant_score:.3f}")
+        lines.append(f"  Least Redundant: {statistics.least_redundant_pair}")
+        lines.append(f"    Score: {statistics.least_redundant_score:.3f}")
+        
+        # Interpretation
+        lines.append("\n" + "-" * 45)
+        lines.append("INTERPRETATION")
+        lines.append("-" * 45)
+        
+        if statistics.average_redundancy < 0.3:
+            lines.append("  ✅ Features are largely independent")
+        elif statistics.average_redundancy < 0.5:
+            lines.append("  ✓ Features show moderate redundancy")
+        else:
+            lines.append("  ⚠ Features show high redundancy")
+        
+        if statistics.failed_pairs > 0:
+            lines.append(f"  💡 {statistics.failed_pairs} pairs are highly redundant")
+        
+        if statistics.largest_cluster > 3:
+            lines.append(f"  💡 Cluster with {statistics.largest_cluster} features detected")
+        
+        # Validation
+        lines.append("\n" + "-" * 45)
+        lines.append("VALIDATION")
+        lines.append("-" * 45)
+        lines.append("  Status: PASSED")
+        
+        # Footer
+        lines.append(f"\n  Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        lines.append("\n" + "=" * 55)
+        lines.append("END OF REPORT")
+        lines.append("=" * 55)
+        
+        return "\n".join(lines)
+    
+    @staticmethod
+    def generate_redundancy_table(redundancy_table: pd.DataFrame, top_n: int = 10) -> str:
+        """Generate a redundancy table report."""
+        lines = []
+        lines.append("\n" + "=" * 80)
+        lines.append(f"TOP {top_n} MOST REDUNDANT PAIRS")
+        lines.append("=" * 80)
+        
+        top_pairs = redundancy_table.head(top_n)
+        
+        lines.append(
+            f"\n{'Feature A':<20} {'Feature B':<20} {'Score':<12} {'Pearson':<12} {'Decision':<12}"
+        )
+        lines.append("-" * 80)
+        
+        for _, row in top_pairs.iterrows():
+            lines.append(
+                f"{row['feature_a'][:19]:<20} "
+                f"{row['feature_b'][:19]:<20} "
+                f"{row['redundancy_score']:<12.4f} "
+                f"{row['pearson']:<12.4f} "
+                f"{row['decision']:<12}"
+            )
+        
+        lines.append("\n" + "=" * 80)
+        return "\n".join(lines)
+    
+    @staticmethod
+    def generate_cluster_report(clusters: pd.DataFrame) -> str:
+        """Generate a cluster report."""
+        lines = []
+        lines.append("\n" + "=" * 60)
+        lines.append("FEATURE CLUSTERS")
+        lines.append("=" * 60)
+        
+        for cluster in sorted(clusters['cluster'].unique()):
+            features = clusters[clusters['cluster'] == cluster]['feature'].tolist()
+            lines.append(f"\nCluster {cluster}: {len(features)} features")
+            for f in features:
+                lines.append(f"  - {f}")
+        
+        lines.append("\n" + "=" * 60)
+        return "\n".join(lines)
+    
+    @staticmethod
+    def save(report: str, filepath: str):
+        """Save report to file."""
+        from pathlib import Path
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(report)

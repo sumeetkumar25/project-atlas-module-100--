@@ -1,0 +1,267 @@
+# atlas/modules/module121_feature_redundancy/module.py
+"""
+Module 121
+Feature Redundancy
+
+Determines whether two or more features contain essentially the same information.
+
+Pipeline: detect features → generate pairs → compute redundancy metrics →
+          redundancy score → decisions → clustering → statistics →
+          validation → report → export
+"""
+
+from typing import Optional, Dict, Any
+import pandas as pd
+from pathlib import Path
+
+from atlas.core.base_research_module import BaseResearchModule
+from atlas.framework.registry import AtlasRegistry
+
+from .engine import FeatureRedundancyEngine
+from .statistics import FeatureRedundancyStatisticsEngine
+from .validator import run_validation
+from .report import FeatureRedundancyReport
+from .exporter import FeatureRedundancyExporter
+
+
+class FeatureRedundancyResearch(BaseResearchModule):
+    """Main research module for feature redundancy analysis."""
+    
+    MODULE_OUTPUT = "module121"
+    METADATA = FeatureRedundancyStatisticsEngine.METADATA
+    
+    def __init__(
+        self,
+        registry: Optional[AtlasRegistry] = None,
+        pass_threshold: float = 0.30,
+        warning_threshold: float = 0.60,
+        cluster_threshold: float = 0.40,
+        random_state: int = 42
+    ):
+        """
+        Initialize the feature redundancy module.
+        
+        Args:
+            registry: Optional Atlas registry
+            pass_threshold: Score below this threshold = PASS (unique)
+            warning_threshold: Score below this threshold = WARNING (similar)
+            cluster_threshold: Distance threshold for clustering (0-1)
+            random_state: Random seed for reproducibility
+        """
+        super().__init__(
+            module_name="Feature Redundancy",
+            module_version=self.METADATA["version"],
+        )
+        
+        self.registry = registry or AtlasRegistry()
+        self.engine = FeatureRedundancyEngine(
+            pass_threshold=pass_threshold,
+            warning_threshold=warning_threshold,
+            cluster_threshold=cluster_threshold,
+            random_state=random_state
+        )
+        self.stats_engine = FeatureRedundancyStatisticsEngine()
+        self.result_data = None
+        self.statistics = None
+        self.redundancy_report = None
+        self.cluster_report = None
+        self._output_dir = None
+
+    def _register_pipeline_steps(self):
+        """Register pipeline steps."""
+        self.pipeline_steps = [
+            ("feature_redundancy", self._compute_redundancy),
+            ("statistics", self._compute_statistics),
+            ("validate", self._validate),
+            ("export", self._export_results),
+        ]
+    
+    def _prepare_data(self) -> Dict[str, Any]:
+        """Prepare data from DataFrame."""
+        return {"df": self.df}
+    
+    def _compute_redundancy(self) -> Dict[str, Any]:
+        """Step 1: Compute feature redundancy."""
+        self.logger.info("Step 1: Computing feature redundancy")
+        
+        prepared = self._prepare_data()
+        
+        self.result_data = self.engine.compute(
+            df=prepared["df"]
+        )
+        
+        self.logger.metric(
+            "Total Features",
+            str(self.result_data.summary_statistics["total_features"])
+        )
+        self.logger.metric(
+            "Total Pairs",
+            str(self.result_data.summary_statistics["total_pairs"])
+        )
+        self.logger.metric(
+            "PASS",
+            f"{self.result_data.summary_statistics['passed_pairs']} pairs"
+        )
+        self.logger.metric(
+            "FAIL",
+            f"{self.result_data.summary_statistics['failed_pairs']} pairs"
+        )
+        self.logger.metric(
+            "Avg Redundancy",
+            f"{self.result_data.summary_statistics['average_redundancy']:.3f}"
+        )
+        self.logger.metric(
+            "Unique Clusters",
+            str(self.result_data.summary_statistics["unique_clusters"])
+        )
+        self.logger.success("Feature redundancy computed")
+        
+        # Generate reports
+        self.redundancy_report = FeatureRedundancyReport.generate_redundancy_table(
+            self.result_data.redundancy_table,
+            top_n=10
+        )
+        
+        self.cluster_report = FeatureRedundancyReport.generate_cluster_report(
+            self.result_data.clusters
+        )
+        
+        return {
+            "total_features": self.result_data.summary_statistics["total_features"],
+            "total_pairs": self.result_data.summary_statistics["total_pairs"],
+            "passed_pairs": self.result_data.summary_statistics["passed_pairs"],
+            "failed_pairs": self.result_data.summary_statistics["failed_pairs"],
+            "average_redundancy": self.result_data.summary_statistics["average_redundancy"],
+            "unique_clusters": self.result_data.summary_statistics["unique_clusters"]
+        }
+    
+    def _compute_statistics(self) -> Dict[str, Any]:
+        """Step 2: Computing statistics."""
+        self.logger.info("Step 2: Computing statistics")
+        self.statistics = self.stats_engine.analyze(self.result_data)
+        
+        self.logger.metric(
+            "Most Redundant",
+            self.statistics.most_redundant_pair
+        )
+        self.logger.metric(
+            "Largest Cluster",
+            str(self.statistics.largest_cluster)
+        )
+        self.logger.success("Statistics computed")
+        
+        return self.stats_engine.summary_dict(self.statistics)
+    
+    def _validate(self) -> Dict[str, Any]:
+        """Step 3: Validation."""
+        self.logger.info("Step 3: Validation")
+        passed = run_validation(self.result_data, self.statistics)
+        self.logger.success("Validation complete")
+        return {"software_validation_passed": passed}
+    
+    def _export_results(self) -> Dict[str, Any]:
+        """Step 4: Export."""
+        self.logger.info("Step 4: Export")
+        
+        # Register DataFrames as artifacts
+        self.result.artifacts["redundancy_table"] = self.result_data.redundancy_table
+        self.result.artifacts["correlation_matrix"] = self.result_data.correlation_matrix
+        self.result.artifacts["vif_table"] = self.result_data.vif_table
+        self.result.artifacts["clusters"] = self.result_data.clusters
+        
+        # Store pair lists as DataFrames
+        passed_df = pd.DataFrame(self.result_data.passed_pairs, columns=['feature_a', 'feature_b'])
+        warning_df = pd.DataFrame(self.result_data.warning_pairs, columns=['feature_a', 'feature_b'])
+        failed_df = pd.DataFrame(self.result_data.failed_pairs, columns=['feature_a', 'feature_b'])
+        
+        self.result.artifacts["passed_pairs"] = passed_df
+        self.result.artifacts["warning_pairs"] = warning_df
+        self.result.artifacts["failed_pairs"] = failed_df
+        
+        # Store summary
+        summary_df = pd.DataFrame([self.result_data.summary_statistics])
+        self.result.artifacts["redundancy_summary"] = summary_df
+        
+        # Generate and register reports
+        main_report = FeatureRedundancyReport.generate(
+            self.statistics,
+            metadata=self.METADATA,
+            dataset_name=self.result.dataset_identifier,
+        )
+        self.result.artifacts["feature_redundancy_report"] = main_report
+        self.result.artifacts["redundancy_report"] = self.redundancy_report
+        self.result.artifacts["cluster_report"] = self.cluster_report
+        
+        # Export to files
+        if self._output_dir is not None:
+            export_dir = self._output_dir / "exports"
+            export_dir.mkdir(parents=True, exist_ok=True)
+            
+            FeatureRedundancyExporter.export_redundancy_table(
+                self.result_data.redundancy_table,
+                export_dir / "redundancy_table.csv"
+            )
+            
+            FeatureRedundancyExporter.export_correlation_matrix(
+                self.result_data.correlation_matrix,
+                export_dir / "correlation_matrix.csv"
+            )
+            
+            FeatureRedundancyExporter.export_vif_table(
+                self.result_data.vif_table,
+                export_dir / "vif_table.csv"
+            )
+            
+            FeatureRedundancyExporter.export_clusters(
+                self.result_data.clusters,
+                export_dir / "clusters.csv"
+            )
+            
+            FeatureRedundancyExporter.export_passed_pairs(
+                self.result_data.passed_pairs,
+                export_dir / "passed_pairs.csv"
+            )
+            
+            FeatureRedundancyExporter.export_warning_pairs(
+                self.result_data.warning_pairs,
+                export_dir / "warning_pairs.csv"
+            )
+            
+            FeatureRedundancyExporter.export_failed_pairs(
+                self.result_data.failed_pairs,
+                export_dir / "failed_pairs.csv"
+            )
+            
+            FeatureRedundancyExporter.export_summary(
+                self.result_data.summary_statistics,
+                export_dir / "redundancy_summary.csv"
+            )
+        
+        self.logger.metric("Artifacts", str(len(self.result.artifacts)))
+        self.logger.success("Export complete")
+        
+        return {
+            "export_status": "complete",
+            "artifact_count": len(self.result.artifacts),
+            "passed_pairs": self.result_data.summary_statistics["passed_pairs"],
+            "failed_pairs": self.result_data.summary_statistics["failed_pairs"],
+            "unique_clusters": self.result_data.summary_statistics["unique_clusters"]
+        }
+    
+    def compute(self) -> Dict[str, Any]:
+        """Run the full computation pipeline."""
+        self.logger.section("Feature Redundancy Pipeline")
+        results = self.execute_pipeline()
+        self.result.status = "completed"
+        self.logger.success("Module 121 complete")
+        return results
+    
+    def run(self, filepath: str, output_dir=None):
+        """Run module on file."""
+        self._output_dir = Path(output_dir) if output_dir else None
+        return super().run(filepath, output_dir)
+    
+    def run_dataframe(self, df, dataset_id="in_memory", output_dir=None):
+        """Run module on DataFrame."""
+        self._output_dir = Path(output_dir) if output_dir else None
+        return super().run_dataframe(df, dataset_id, output_dir)

@@ -1,0 +1,73 @@
+# atlas/modules/module121_feature_redundancy/statistics.py
+"""
+Module 121 - Feature Redundancy Statistics
+"""
+
+from dataclasses import dataclass, asdict
+import pandas as pd
+from .engine import FeatureRedundancyResult
+
+
+@dataclass
+class FeatureRedundancyStatistics:
+    """High-level statistics from feature redundancy analysis."""
+    total_features: int
+    total_pairs: int
+    passed_pairs: int
+    warning_pairs: int
+    failed_pairs: int
+    passed_percentage: float
+    warning_percentage: float
+    failed_percentage: float
+    average_correlation: float
+    average_mutual_information: float
+    average_vif: float
+    average_redundancy: float
+    largest_cluster: int
+    most_redundant_pair: str
+    most_redundant_score: float
+    least_redundant_pair: str
+    least_redundant_score: float
+    unique_clusters: int
+
+
+class FeatureRedundancyStatisticsEngine:
+    """Engine for generating high-level statistics."""
+    
+    METADATA = {
+        "module": 121,
+        "name": "Feature Redundancy",
+        "version": "1.0.0",
+        "description": "Determines whether features contain essentially the same information"
+    }
+    
+    def analyze(self, result: FeatureRedundancyResult) -> FeatureRedundancyStatistics:
+        """Analyze results and generate high-level statistics."""
+        return FeatureRedundancyStatistics(
+            total_features=result.summary_statistics['total_features'],
+            total_pairs=result.summary_statistics['total_pairs'],
+            passed_pairs=result.summary_statistics['passed_pairs'],
+            warning_pairs=result.summary_statistics['warning_pairs'],
+            failed_pairs=result.summary_statistics['failed_pairs'],
+            passed_percentage=result.summary_statistics['passed_percentage'],
+            warning_percentage=result.summary_statistics['warning_percentage'],
+            failed_percentage=result.summary_statistics['failed_percentage'],
+            average_correlation=result.summary_statistics['average_correlation'],
+            average_mutual_information=result.summary_statistics['average_mutual_information'],
+            average_vif=result.summary_statistics['average_vif'],
+            average_redundancy=result.summary_statistics['average_redundancy'],
+            largest_cluster=result.summary_statistics['largest_cluster'],
+            most_redundant_pair=result.summary_statistics['most_redundant_pair'],
+            most_redundant_score=result.summary_statistics['most_redundant_score'],
+            least_redundant_pair=result.summary_statistics['least_redundant_pair'],
+            least_redundant_score=result.summary_statistics['least_redundant_score'],
+            unique_clusters=result.summary_statistics['unique_clusters']
+        )
+    
+    def summary_dataframe(self, stats: FeatureRedundancyStatistics) -> pd.DataFrame:
+        """Convert statistics to DataFrame."""
+        return pd.DataFrame([asdict(stats)])
+    
+    def summary_dict(self, stats: FeatureRedundancyStatistics) -> dict:
+        """Convert statistics to dictionary."""
+        return asdict(stats)

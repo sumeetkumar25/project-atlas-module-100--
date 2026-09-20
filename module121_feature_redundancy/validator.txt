@@ -1,0 +1,153 @@
+# atlas/modules/module121_feature_redundancy/validator.py
+"""
+Module 121 - Feature Redundancy Validator
+"""
+
+import numpy as np
+import pandas as pd
+from .engine import FeatureRedundancyResult
+from .statistics import FeatureRedundancyStatistics
+
+
+class FeatureRedundancyValidator:
+    """Validator for feature redundancy results."""
+    
+    def validate(
+        self,
+        result: FeatureRedundancyResult,
+        statistics: FeatureRedundancyStatistics
+    ) -> bool:
+        """Validate results and statistics."""
+        issues = []
+        warnings = []
+        
+        # Check redundancy table
+        if result.redundancy_table.empty:
+            issues.append("Redundancy table is empty")
+        else:
+            required_cols = ['feature_a', 'feature_b', 'redundancy_score', 'decision']
+            missing = set(required_cols) - set(result.redundancy_table.columns)
+            if missing:
+                issues.append(f"Missing columns in redundancy table: {missing}")
+            
+            # Check no duplicate pairs
+            pairs = set(zip(result.redundancy_table['feature_a'], 
+                          result.redundancy_table['feature_b']))
+            if len(pairs) != len(result.redundancy_table):
+                issues.append("Duplicate feature pairs found")
+            
+            # Check redundancy scores are in [0, 1]
+            if 'redundancy_score' in result.redundancy_table.columns:
+                if not np.all((0 <= result.redundancy_table['redundancy_score']) & 
+                            (result.redundancy_table['redundancy_score'] <= 1)):
+                    issues.append("Redundancy scores outside [0, 1] range")
+            
+            # Check decisions are valid
+            if 'decision' in result.redundancy_table.columns:
+                valid_decisions = {'PASS', 'WARNING', 'FAIL'}
+                invalid = set(result.redundancy_table['decision'].unique()) - valid_decisions
+                if invalid:
+                    issues.append(f"Invalid decisions found: {invalid}")
+        
+        # Check correlation matrix
+        if result.correlation_matrix.empty:
+            issues.append("Correlation matrix is empty")
+        else:
+            # Check symmetry
+            if not np.allclose(result.correlation_matrix.values, 
+                              result.correlation_matrix.values.T, atol=1e-10):
+                issues.append("Correlation matrix is not symmetric")
+            
+            # Check diagonal is 1
+            if not np.allclose(np.diag(result.correlation_matrix.values), 1, atol=1e-10):
+                issues.append("Correlation matrix diagonal is not 1")
+            
+            # Check values are in [-1, 1]
+            values = result.correlation_matrix.values.flatten()
+            values = values[~np.isnan(values)]
+            if len(values) > 0:
+                if not np.all((-1 <= values) & (values <= 1)):
+                    issues.append("Correlation values outside [-1, 1] range")
+        
+        # Check VIF table
+        if result.vif_table.empty:
+            issues.append("VIF table is empty")
+        else:
+            if 'vif' in result.vif_table.columns:
+                if not np.all(result.vif_table['vif'] >= 1):
+                    issues.append("VIF values must be >= 1")
+        
+        # Check clusters
+        if result.clusters.empty:
+            issues.append("Clusters DataFrame is empty")
+        else:
+            # Check every feature belongs to exactly one cluster
+            n_features = len(result.clusters)
+            n_unique_clusters = result.clusters['cluster'].nunique()
+            if n_features != len(result.clusters):
+                issues.append("Duplicate features in clusters")
+        
+        # Check pair counts match
+        total_pairs = len(result.passed_pairs) + len(result.warning_pairs) + len(result.failed_pairs)
+        if total_pairs != len(result.redundancy_table):
+            issues.append(
+                f"Pair count mismatch: {total_pairs} vs {len(result.redundancy_table)}"
+            )
+        
+        # Check statistics match result
+        if statistics.total_features != result.summary_statistics['total_features']:
+            issues.append(
+                f"Total features mismatch: stats={statistics.total_features}, "
+                f"result={result.summary_statistics['total_features']}"
+            )
+        
+        if statistics.total_pairs != len(result.redundancy_table):
+            issues.append(
+                f"Total pairs mismatch: stats={statistics.total_pairs}, "
+                f"result={len(result.redundancy_table)}"
+            )
+        
+        if statistics.unique_clusters != result.clusters['cluster'].nunique():
+            issues.append(
+                f"Unique clusters mismatch: stats={statistics.unique_clusters}, "
+                f"result={result.clusters['cluster'].nunique()}"
+            )
+        
+        # Warnings (non-fatal)
+        if statistics.average_redundancy > 0.5:
+            warnings.append(f"High average redundancy: {statistics.average_redundancy:.3f}")
+        
+        if statistics.largest_cluster > 3:
+            warnings.append(f"Large cluster detected: {statistics.largest_cluster} features")
+        
+        if warnings:
+            print("\n  WARNINGS:")
+            for warning in warnings:
+                print(f"    ⚠ {warning}")
+        
+        if issues:
+            raise ValueError(
+                f"Feature Redundancy validation failed with {len(issues)} issue(s):\n" +
+                "\n".join(f"  - {issue}" for issue in issues)
+            )
+        
+        return True
+
+
+def run_validation(result, statistics):
+    """Run validation with user-friendly output."""
+    validator = FeatureRedundancyValidator()
+    
+    print("\n" + "=" * 60)
+    print("FEATURE REDUNDANCY VALIDATION")
+    print("=" * 60)
+    
+    try:
+        validator.validate(result, statistics)
+        print("\n  ✓ All validation checks passed")
+        print("=" * 60)
+        return True
+    except ValueError as e:
+        print(e)
+        print("=" * 60)
+        return False
