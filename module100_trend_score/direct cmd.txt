@@ -1,0 +1,1 @@
+python -m atlas.modules.module100_trend_score.test_module

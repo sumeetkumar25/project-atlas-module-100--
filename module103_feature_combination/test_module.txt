@@ -1,0 +1,247 @@
+# atlas/modules/module103_feature_combination/test_module.py
+"""
+Module 103 - Integration Test
+
+Tests feature combination engine, statistics, validator, report, and pipeline.
+"""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+
+import numpy as np
+import pandas as pd
+
+from atlas.modules.module103_feature_combination.engine import FeatureCombinationEngine
+from atlas.modules.module103_feature_combination.statistics import FeatureCombinationStatisticsEngine
+from atlas.modules.module103_feature_combination.validator import run_validation
+from atlas.modules.module103_feature_combination.module import FeatureCombinationResearch
+
+
+def create_test_data(n=1000, seed=42):
+    """Create synthetic test data."""
+    np.random.seed(seed)
+    
+    # Create features with some signal
+    trend_score = np.random.uniform(0, 100, n)
+    compression_score = np.random.uniform(0, 100, n)
+    hurst_exponent = np.random.uniform(0.3, 0.7, n)
+    dfa_alpha = np.random.uniform(0.2, 0.8, n)
+    normalized_entropy = np.random.uniform(0.1, 0.9, n)
+    mutual_information = np.random.uniform(0, 1, n)
+    
+    # Create close price with some trend
+    close = 100 + np.cumsum(np.random.randn(n) * 0.5)
+    
+    df = pd.DataFrame({
+        "trend_score": trend_score,
+        "compression_score": compression_score,
+        "hurst_exponent": hurst_exponent,
+        "dfa_alpha": dfa_alpha,
+        "normalized_entropy": normalized_entropy,
+        "mutual_information": mutual_information,
+        "close": close
+    })
+    
+    return df
+
+
+def test_engine_normalization():
+    """Test 1: Normalization works correctly."""
+    print("\n" + "=" * 60)
+    print("TEST 1: Normalization")
+    print("=" * 60)
+    
+    engine = FeatureCombinationEngine()
+    
+    # Test with uniform data
+    x = np.ones(100)
+    normalized = engine.normalize(x)
+    assert np.all(normalized == 0), "Constant series should normalize to 0"
+    
+    # Test with normal data
+    x = np.random.randn(1000) * 10 + 50
+    normalized = engine.normalize(x)
+    assert np.all((0 <= normalized) & (normalized <= 1)), "Values should be in [0,1]"
+    
+    print("  ✓ Normalization test passed")
+    return True
+
+
+def test_engine_state_creation():
+    """Test 2: State creation produces valid states."""
+    print("\n" + "=" * 60)
+    print("TEST 2: State Creation")
+    print("=" * 60)
+    
+    engine = FeatureCombinationEngine()
+    
+    # Create test features - corrected hurst for row 3
+    df = pd.DataFrame({
+        "trend_score": [70, 50, 90, 30],
+        "compression_score": [70, 30, 80, 20],
+        "normalized_entropy": [0.25, 0.50, 0.20, 0.80],
+        "hurst_exponent": [0.60, 0.40, 0.50, 0.30],  # Changed from 0.70 to 0.50
+        "dfa_alpha": [0.5, 0.5, 0.5, 0.5],
+        "mutual_information": [0.5, 0.5, 0.5, 0.5]
+    })
+    
+    state = engine.create_state(df)
+    
+    # Check states are in range
+    assert np.all((0 <= state) & (state <= 15)), "States should be in [0,15]"
+    
+    # Check first row should have all conditions true: 8+4+2+1 = 15
+    assert state[0] == 15, f"Expected state 15, got {state[0]}"
+    
+    # Check third row: trend=1, compression=1, entropy_low=1, hurst=0 → 8+4+2 = 14
+    assert state[2] == 14, f"Expected state 14, got {state[2]}"
+    
+    print("  ✓ State creation test passed")
+    return True
+
+
+def test_engine_full():
+    """Test 3: Full engine computation."""
+    print("\n" + "=" * 60)
+    print("TEST 3: Full Engine Computation")
+    print("=" * 60)
+    
+    df = create_test_data(n=500)
+    engine = FeatureCombinationEngine(future_horizon=5, min_count=20)
+    
+    features = df[engine.feature_columns]
+    close = df["close"]
+    
+    result = engine.compute(features, close)
+    
+    # Check results
+    assert result.total_states > 0, "Should have some states"
+    assert result.sample_size > 0, "Should have samples"
+    assert result.best_state >= 0, "Should have a best state"
+    assert result.information_coefficient != 0, "IC should be calculated"
+    
+    # Check state statistics
+    assert not result.state_statistics.empty, "State statistics should not be empty"
+    
+    print(f"  Total States: {result.total_states}")
+    print(f"  Significant States: {result.significant_states}")
+    print(f"  Best State: {result.best_state}")
+    print(f"  IC: {result.information_coefficient:.4f}")
+    print("  ✓ Full engine test passed")
+    return True
+
+
+def test_statistics():
+    """Test 4: Statistics engine."""
+    print("\n" + "=" * 60)
+    print("TEST 4: Statistics Engine")
+    print("=" * 60)
+    
+    df = create_test_data(n=500)
+    engine = FeatureCombinationEngine(future_horizon=5, min_count=20)
+    stats_engine = FeatureCombinationStatisticsEngine()
+    
+    result = engine.compute(
+        df[engine.feature_columns],
+        df["close"]
+    )
+    
+    stats = stats_engine.analyze(result)
+    
+    # Check statistics
+    assert stats.total_states == result.total_states
+    assert stats.significant_states == result.significant_states
+    assert stats.best_state == result.best_state
+    assert stats.predictive_power in ["Strong", "Moderate", "Weak", "None"]
+    
+    print(f"  Predictive Power: {stats.predictive_power}")
+    print(f"  Total States: {stats.total_states}")
+    print("  ✓ Statistics test passed")
+    return True
+
+
+def test_validator():
+    """Test 5: Validator."""
+    print("\n" + "=" * 60)
+    print("TEST 5: Validator")
+    print("=" * 60)
+    
+    df = create_test_data(n=500)
+    engine = FeatureCombinationEngine(future_horizon=5, min_count=20)
+    stats_engine = FeatureCombinationStatisticsEngine()
+    
+    result = engine.compute(
+        df[engine.feature_columns],
+        df["close"]
+    )
+    stats = stats_engine.analyze(result)
+    
+    passed = run_validation(result, stats)
+    assert passed
+    
+    print("  ✓ Validator test passed")
+    return True
+
+
+def test_pipeline():
+    """Test 6: Full pipeline."""
+    print("\n" + "=" * 60)
+    print("TEST 6: Full Pipeline")
+    print("=" * 60)
+    
+    df = create_test_data(n=300)
+    research = FeatureCombinationResearch(future_horizon=5, min_count=20)
+    result = research.run_dataframe(df, dataset_id="pipeline_test")
+    
+    assert result.status == "completed"
+    assert "state_statistics" in result.artifacts
+    assert "feature_combination_report" in result.artifacts
+    assert "state_report" in result.artifacts
+    assert result.statistics.get("validation_passed") == True
+    
+    print(f"  Total States: {result.statistics.get('total_states')}")
+    print(f"  Predictive Power: {result.statistics.get('predictive_power')}")
+    print("  ✓ Full pipeline test passed")
+    return True
+
+
+def main():
+    """Run all tests."""
+    print("\n" + "=" * 70)
+    print("PROJECT ATLAS - MODULE 103 INTEGRATION TEST")
+    print("Feature Combination Engine")
+    print("=" * 70)
+    
+    results = {}
+    
+    results["normalization"] = test_engine_normalization()
+    results["state_creation"] = test_engine_state_creation()
+    results["full_engine"] = test_engine_full()
+    results["statistics"] = test_statistics()
+    results["validator"] = test_validator()
+    results["pipeline"] = test_pipeline()
+    
+    print("\n" + "=" * 70)
+    print("RESULTS")
+    print("=" * 70)
+    
+    for name, ok in results.items():
+        print(f"  {'✓' if ok else '✗'} {name}")
+    
+    passed = sum(results.values())
+    total = len(results)
+    
+    print(f"\n  {passed}/{total} tests passed")
+    
+    if passed == total:
+        print("\n✓ Module 103 VALIDATED")
+        return 0
+    else:
+        print("\n⚠ Some tests failed")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

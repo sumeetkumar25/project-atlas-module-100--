@@ -1,0 +1,263 @@
+"""
+Module 102
+Composite Compression Score
+
+Accepts validated metrics from other Atlas modules and computes
+a single composite compression score for each row.
+
+Pipeline: compute metrics → row-wise compression score → statistics → validation → report → export
+"""
+
+from typing import Optional, Dict, Any
+
+import pandas as pd
+import numpy as np
+
+from atlas.core.base_research_module import BaseResearchModule
+from atlas.framework.registry import AtlasRegistry
+
+from .engine import CompressionScoreEngine, CompressionScoreResult
+from .statistics import CompressionScoreStatistics, CompressionScoreStatisticsEngine
+from .validator import run_validation
+from .report import CompressionScoreReport
+
+
+class CompressionScoreResearch(BaseResearchModule):
+
+    MODULE_OUTPUT = "module102"
+    METADATA = CompressionScoreStatisticsEngine.METADATA
+
+    def __init__(self, registry: Optional[AtlasRegistry] = None):
+
+        super().__init__(
+            module_name="Composite Compression Score",
+            module_version=self.METADATA["version"],
+        )
+
+        self.registry = registry or AtlasRegistry()
+        self.engine = CompressionScoreEngine(
+            atr_weight=0.25,
+            std_weight=0.25,
+            entropy_weight=0.25,
+            range_weight=0.25,
+        )
+        self.stats_engine = CompressionScoreStatisticsEngine()
+        self.result_score = None
+        self.statistics = None
+        self.compression_scores = None
+
+    def _register_pipeline_steps(self):
+        self.pipeline_steps = [
+            ("compression_score", self._compute_score),
+            ("statistics", self._compute_statistics),
+            ("validate", self._validate),
+            ("export", self._export_results),
+        ]
+
+    def _compute_metrics(self) -> Dict[str, pd.Series]:
+        """
+        Compute all required metrics from OHLCV data.
+        
+        Returns:
+            dict: Series for each metric
+        """
+        # Check if required columns are already available via dependency injection
+        required_cols = ["atr_percentile", "std_percentile", "normalized_entropy", "range_ratio"]
+        available_cols = [c for c in required_cols if c in self.df.columns]
+        
+        # If all columns are available, use them
+        if len(available_cols) == len(required_cols):
+            self.logger.info("Using pre-computed metrics from dependency injection")
+            return {
+                "atr_percentile": self.df["atr_percentile"],
+                "std_percentile": self.df["std_percentile"],
+                "normalized_entropy": self.df["normalized_entropy"],
+                "range_ratio": self.df["range_ratio"],
+            }
+        
+        # Otherwise compute them from OHLCV
+        self.logger.info("Computing metrics from OHLCV data")
+        
+        # 1. ATR Percentile (using rolling ATR)
+        high = self.df["high"]
+        low = self.df["low"]
+        close = self.df["close"]
+        
+        # True Range
+        tr1 = high - low
+        tr2 = abs(high - close.shift())
+        tr3 = abs(low - close.shift())
+        true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        
+        # ATR (14-period)
+        window = 14
+        atr = true_range.rolling(window).mean()
+        
+        # ATR Percentile (rank-based)
+        atr_percentile = atr.rank(pct=True)
+        
+        # 2. Standard Deviation Percentile (20-period)
+        std = close.rolling(20).std()
+        std_percentile = std.rank(pct=True)
+        
+        # 3. Normalized Entropy (requires Module 037 output if available, otherwise compute)
+        if "normalized_entropy" in self.df.columns:
+            normalized_entropy = self.df["normalized_entropy"]
+        else:
+            # Compute approximate normalized entropy from returns
+            returns = np.log(close / close.shift())
+            
+            # Simple bin-based entropy
+            bins = 20
+            hist, _ = np.histogram(returns.dropna(), bins=bins, density=True)
+            prob = hist / hist.sum()
+            entropy = -np.sum(prob * np.log(prob + 1e-12))
+            max_entropy = np.log(bins)
+            normalized_entropy_series = pd.Series(
+                np.full(len(close), entropy / max_entropy),
+                index=close.index
+            )
+            normalized_entropy = normalized_entropy_series
+        
+        # 4. Range Ratio (High-Low range relative to close)
+        range_ratio = (high - low) / close
+        
+        return {
+            "atr_percentile": atr_percentile,
+            "std_percentile": std_percentile,
+            "normalized_entropy": normalized_entropy,
+            "range_ratio": range_ratio,
+        }
+
+    def _compute_score(self) -> Dict[str, Any]:
+        self.logger.info("Step 1: Computing composite compression score for each row")
+
+        # Get metrics
+        metrics = self._compute_metrics()
+        
+        # Align lengths
+        atr_pct = metrics["atr_percentile"].fillna(0.5)
+        std_pct = metrics["std_percentile"].fillna(0.5)
+        entropy = metrics["normalized_entropy"].fillna(0.5)
+        range_ratio = metrics["range_ratio"].fillna(0.5)
+
+        # Row-wise computation
+        compression_scores = []
+        atr_values = []
+        std_values = []
+        entropy_values = []
+        range_values = []
+        
+        for idx in range(len(self.df)):
+            atr_val = float(atr_pct.iloc[idx])
+            std_val = float(std_pct.iloc[idx])
+            entropy_val = float(entropy.iloc[idx])
+            range_val = float(range_ratio.iloc[idx])
+            
+            result = self.engine.compute(
+                atr_percentile=atr_val,
+                std_percentile=std_val,
+                normalized_entropy=entropy_val,
+                range_ratio=range_val,
+                sample_size=len(self.df),
+            )
+            compression_scores.append(result.compression_score)
+            atr_values.append(result.atr_percentile)
+            std_values.append(result.std_percentile)
+            entropy_values.append(result.normalized_entropy)
+            range_values.append(result.range_ratio)
+        
+        self.compression_scores = np.asarray(compression_scores, dtype=float)
+        
+        # Create summary result object for validator
+        self.result_score = CompressionScoreResult(
+            compression_score=float(self.compression_scores.mean()),
+            atr_percentile=float(np.mean(atr_values)),
+            std_percentile=float(np.mean(std_values)),
+            normalized_entropy=float(np.mean(entropy_values)),
+            range_ratio=float(np.mean(range_values)),
+            sample_size=len(self.compression_scores),
+            weights=self.engine.weights.copy(),
+        )
+        
+        mean_score = self.result_score.compression_score
+        
+        self.logger.metric(
+            "Mean Compression Score",
+            f"{mean_score:.2f}/100"
+        )
+        self.logger.metric("Weights", str(self.engine.weights))
+        self.logger.success("Compression scores computed")
+
+        return {
+            "compression_score": mean_score,
+            "weights": self.engine.weights,
+        }
+
+    def _compute_statistics(self) -> CompressionScoreStatistics:
+        self.logger.info("Step 2: Computing statistics")
+
+        self.statistics = self.stats_engine.analyze(self.result_score)
+
+        self.logger.metric(
+            "Mean",
+            f"{self.statistics.compression_score:.2f}"
+        )
+        self.logger.metric(
+            "Median",
+            f"{float(np.median(self.compression_scores)):.2f}"
+        )
+        self.logger.success("Statistics computed")
+
+        return self.statistics
+
+    def _validate(self) -> Dict[str, Any]:
+        self.logger.info("Step 3: Validation")
+        passed = run_validation(self.result_score, self.statistics)
+        self.logger.success("Validation complete")
+        return {"validation_passed": passed}
+
+    def _export_results(self) -> Dict[str, Any]:
+        self.logger.info("Step 4: Export")
+
+        # Create statistics DataFrame from dataclass
+        stats_df = self.stats_engine.summary_dataframe(self.statistics)
+        self.result.artifacts["compression_score_statistics"] = stats_df
+
+        # Export feature DataFrame for downstream modules
+        if self.compression_scores is not None and len(self.compression_scores) > 0:
+            feature_df = pd.DataFrame(
+                {
+                    "compression_score": self.compression_scores,
+                },
+                index=self.df.index,
+            )
+            self.result.artifacts["features"] = feature_df
+            self.logger.info(f"Exported compression_score features ({len(feature_df)} rows)")
+
+        report = CompressionScoreReport.generate(
+            self.statistics,
+            metadata=self.METADATA,
+            dataset_name=self.result.dataset_identifier,
+        )
+        self.result.artifacts["compression_score_report"] = report
+
+        self.logger.metric("Artifacts", str(len(self.result.artifacts)))
+        self.logger.success("Export complete")
+        return {
+            "export_status": "complete",
+            "artifact_count": len(self.result.artifacts),
+        }
+
+    def compute(self) -> Dict[str, Any]:
+        self.logger.section("Compression Score Pipeline")
+        results = self.execute_pipeline()
+        self.result.status = "completed"
+        self.logger.success("Module 102 complete")
+        return results
+
+    def run(self, filepath: str, output_dir=None):
+        return super().run(filepath, output_dir)
+
+    def run_dataframe(self, df, dataset_id="in_memory", output_dir=None):
+        return super().run_dataframe(df, dataset_id, output_dir)

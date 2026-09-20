@@ -1,0 +1,354 @@
+"""
+Module 103
+Feature Combination Engine
+
+Combines multiple validated features into market states and evaluates
+predictive power for future returns.
+
+Pipeline: load features → compute states → evaluate returns → statistics → validation → report → export
+"""
+
+from typing import Optional, Dict, Any
+import pandas as pd
+import numpy as np
+
+from atlas.core.base_research_module import BaseResearchModule
+from atlas.framework.registry import AtlasRegistry
+
+from .engine import FeatureCombinationEngine
+from .statistics import FeatureCombinationStatisticsEngine
+from .validator import run_validation
+from .report import FeatureCombinationReport
+
+
+class FeatureCombinationResearch(BaseResearchModule):
+    """Main research module for feature combination."""
+    
+    MODULE_OUTPUT = "module103"
+    METADATA = FeatureCombinationStatisticsEngine.METADATA
+    
+    def __init__(
+        self,
+        registry: Optional[AtlasRegistry] = None,
+        future_horizon: int = 10,
+        min_count: int = 50
+    ):
+        """
+        Initialize the feature combination module.
+        
+        Args:
+            registry: Optional Atlas registry
+            future_horizon: Number of bars ahead for returns
+            min_count: Minimum samples per state
+        """
+        super().__init__(
+            module_name="Feature Combination Engine",
+            module_version=self.METADATA["version"],
+        )
+        
+        self.registry = registry or AtlasRegistry()
+        self.engine = FeatureCombinationEngine(
+            future_horizon=future_horizon,
+            min_count=min_count
+        )
+        self.stats_engine = FeatureCombinationStatisticsEngine()
+        self.result_data = None
+        self.statistics = None
+        self.state_report = None
+    
+    def _register_pipeline_steps(self):
+        """Register pipeline steps."""
+        self.pipeline_steps = [
+            ("feature_combination", self._compute_features),
+            ("statistics", self._compute_statistics),
+            ("validate", self._validate),
+            ("export", self._export_results),
+        ]
+    
+    def _prepare_features(self) -> Dict[str, Any]:
+        """Prepare features from DataFrame."""
+        print("\n" + "="*70)
+        print("MODULE 103 INPUT INSPECTION")
+        print("="*70)
+        
+        if self.market_df is not None:
+            print(f"\nmarket_df columns ({len(self.market_df.columns)}):")
+            print(list(self.market_df.columns))
+        else:
+            print("\nmarket_df = None")
+        
+        if self.feature_df is not None:
+            print(f"\nfeature_df columns ({len(self.feature_df.columns)}):")
+            print(list(self.feature_df.columns))
+        else:
+            print("\nfeature_df = None")
+        
+        if self.df is not None:
+            print(f"\ndf columns ({len(self.df.columns)}):")
+            print(list(self.df.columns))
+        else:
+            print("\ndf = None")
+        
+        print("="*70)
+        
+        # Extract required columns
+        feature_cols = self.engine.feature_columns
+        
+        # Check if we have all required columns - NO FALLBACK VALUES
+        missing_cols = set(feature_cols) - set(self.df.columns)
+        if missing_cols:
+            raise RuntimeError(
+                f"Dependency injection failed.\n"
+                f"Missing feature columns: {sorted(missing_cols)}\n"
+                f"Available columns: {list(self.df.columns)}\n"
+                f"Expected features: {feature_cols}\n"
+                "Please ensure dependencies (100, 102, 035, 036, 037, 038) have been run first."
+            )
+        
+        # Ensure we have close column
+        if "close" not in self.df.columns:
+            raise ValueError("DataFrame must contain 'close' column")
+        
+        return {
+            "features": self.df[feature_cols],
+            "close": self.df["close"]
+        }
+    
+    def _compute_features(self) -> Dict[str, Any]:
+        """Step 1: Compute feature combination."""
+        self.logger.info("Step 1: Computing feature combination")
+        
+        prepared = self._prepare_features()
+        
+        self.result_data = self.engine.compute(
+            features=prepared["features"],
+            close=prepared["close"]
+        )
+        
+        # ========== ENGINE OUTPUT INSPECTION ==========
+        print("\n========== ENGINE OUTPUT ==========")
+        
+        print(f"type(result_data): {type(self.result_data)}")
+        
+        if hasattr(self.result_data, '__dict__'):
+            print(f"attributes: {list(self.result_data.__dict__.keys())}")
+        elif hasattr(self.result_data, '_fields'):
+            print(f"fields: {list(self.result_data._fields)}")
+        else:
+            print("dir(result_data):", [a for a in dir(self.result_data) if not a.startswith('_')])
+        
+        if hasattr(self.result_data, "state_series"):
+            print("state_series exists")
+            print(f"state_series length: {len(self.result_data.state_series)}")
+            print(self.result_data.state_series.head())
+        
+        if hasattr(self.result_data, "state_assignments"):
+            print("state_assignments exists")
+            print(f"state_assignments length: {len(self.result_data.state_assignments)}")
+            print(self.result_data.state_assignments[:10])
+        
+        if hasattr(self.result_data, "state"):
+            print("state exists")
+            if hasattr(self.result_data.state, 'head'):
+                print(self.result_data.state.head())
+            else:
+                print(f"state: {self.result_data.state}")
+        
+        if hasattr(self.result_data, "states"):
+            print("states exists")
+            print(f"type(states): {type(self.result_data.states)}")
+            if isinstance(self.result_data.states, dict):
+                print(f"states keys: {list(self.result_data.states.keys())}")
+                first_key = list(self.result_data.states.keys())[0] if self.result_data.states else None
+                if first_key:
+                    print(f"first state: {self.result_data.states[first_key]}")
+            elif hasattr(self.result_data.states, 'head'):
+                print(self.result_data.states.head())
+        
+        if hasattr(self.result_data, "feature_df"):
+            print("feature_df exists")
+            print(self.result_data.feature_df.head())
+        
+        if hasattr(self.result_data, "features"):
+            print("features exists")
+            if hasattr(self.result_data.features, 'head'):
+                print(self.result_data.features.head())
+            else:
+                print(f"features: {self.result_data.features}")
+        
+        print("==================================")
+        
+        self.logger.metric(
+            "Total States",
+            f"{self.result_data.total_states}/16"
+        )
+        self.logger.metric(
+            "Significant States",
+            str(self.result_data.significant_states)
+        )
+        self.logger.metric(
+            "Information Coefficient",
+            f"{self.result_data.information_coefficient:.4f}"
+        )
+        self.logger.success("Feature combination computed")
+        
+        # Generate state report
+        self.state_report = FeatureCombinationReport.generate_state_report(
+            self.result_data.state_statistics
+        )
+        
+        return {
+            "total_states": self.result_data.total_states,
+            "significant_states": self.result_data.significant_states,
+            "best_state": self.result_data.best_state,
+            "information_coefficient": self.result_data.information_coefficient,
+        }
+    
+    def _compute_statistics(self) -> Dict[str, Any]:
+        """Step 2: Compute statistics."""
+        self.logger.info("Step 2: Computing statistics")
+        self.statistics = self.stats_engine.analyze(self.result_data)
+        
+        self.logger.metric("Predictive Power", self.statistics.predictive_power)
+        self.logger.success("Statistics computed")
+        
+        return self.stats_engine.summary_dict(self.statistics)
+    
+    def _validate(self) -> Dict[str, Any]:
+        """Step 3: Validation."""
+        self.logger.info("Step 3: Validation")
+        passed = run_validation(self.result_data, self.statistics)
+        self.logger.success("Validation complete")
+        return {"validation_passed": passed}
+    
+    def _export_results(self) -> Dict[str, Any]:
+        """Step 4: Export."""
+        self.logger.info("Step 4: Export")
+        
+        # ----------------------------------------------------
+        # Create feature artifact explicitly for downstream modules
+        # Only export what downstream modules need
+        # ----------------------------------------------------
+        if self.market_df is not None and hasattr(self.result_data, 'state_series'):
+            # Export only timestamp and state for downstream modules
+            features = pd.DataFrame({
+                "timestamp": self.market_df["timestamp"].values,
+                "state": self.result_data.state_series.values
+            })
+            
+            self.result.artifacts["features"] = features
+            self.logger.info(f"Created feature artifact with timestamp and state ({len(features)} rows)")
+        elif hasattr(self.result_data, 'state_series'):
+            # If market_df is None, create from state_series only
+            features = pd.DataFrame({
+                "state": self.result_data.state_series.values
+            })
+            self.result.artifacts["features"] = features
+            self.logger.info("Created feature artifact from state_series only")
+        
+        # Store state statistics
+        self.result.artifacts["state_statistics"] = self.result_data.state_statistics
+        
+        # Store statistics DataFrame (required artifact)
+        stats_df = pd.DataFrame([self.statistics.__dict__]) if hasattr(self.statistics, '__dict__') else pd.DataFrame()
+        self.result.artifacts["statistics"] = stats_df
+        
+        # Store main report
+        main_report = FeatureCombinationReport.generate(
+            self.statistics,
+            metadata=self.METADATA,
+            dataset_name=self.result.dataset_identifier,
+        )
+        self.result.artifacts["report"] = main_report
+        self.result.artifacts["feature_combination_report"] = main_report
+        
+        # Store validation result (required artifact)
+        self.result.artifacts["validation"] = True
+        
+        # Store state report
+        self.result.artifacts["state_report"] = self.state_report
+        
+        # Store metadata
+        self.result.artifacts["metadata"] = {
+            "module": self.MODULE_OUTPUT,
+            "version": self.METADATA.get("version", "1.0.0"),
+            "dataset": self.result.dataset_identifier,
+            "future_horizon": self.engine.future_horizon,
+            "min_count": self.engine.min_count,
+            "total_states": self.result_data.total_states,
+            "significant_states": self.result_data.significant_states,
+            "information_coefficient": self.result_data.information_coefficient
+        }
+        
+        # Store detailed results as dict
+        self.result.artifacts["detailed_results"] = {
+            "states": {
+                str(s): {
+                    "count": r.count,
+                    "mean": r.mean,
+                    "median": r.median,
+                    "std": r.std,
+                    "win_rate": r.win_rate,
+                    "sharpe": r.sharpe,
+                    "p_value": r.p_value,
+                    "is_significant": r.is_significant
+                }
+                for s, r in self.result_data.states.items()
+            },
+            "information_coefficient": self.result_data.information_coefficient,
+            "ic_p_value": self.result_data.ic_p_value,
+            "best_state": self.result_data.best_state,
+            "total_states": self.result_data.total_states,
+            "significant_states": self.result_data.significant_states
+        }
+        
+        # ----------------------------------------------------
+        # ARTIFACT INSPECTION
+        # ----------------------------------------------------
+        print("\n" + "="*70)
+        print("MODULE 103 ARTIFACT INSPECTION")
+        print("="*70)
+        
+        print("Artifacts keys:")
+        print(list(self.result.artifacts.keys()))
+        
+        if "features" in self.result.artifacts:
+            df = self.result.artifacts["features"]
+            print(f"\nFeature artifact: {len(df)} rows, {len(df.columns)} columns")
+            print(f"Columns: {list(df.columns)}")
+        else:
+            print("\nNO 'features' ARTIFACT CREATED")
+        
+        # Also check for required artifacts
+        required = ["features", "statistics", "report", "validation"]
+        missing = [k for k in required if k not in self.result.artifacts]
+        if missing:
+            print(f"\n⚠ Missing required artifacts: {missing}")
+        else:
+            print("\n✓ All required artifacts present")
+        
+        print("="*70)
+        
+        self.logger.metric("Artifacts", str(len(self.result.artifacts)))
+        self.logger.success("Export complete")
+        
+        return {
+            "export_status": "complete",
+            "artifact_count": len(self.result.artifacts),
+        }
+    
+    def compute(self) -> Dict[str, Any]:
+        """Run the full computation pipeline."""
+        self.logger.section("Feature Combination Pipeline")
+        results = self.execute_pipeline()
+        self.result.status = "completed"
+        self.logger.success("Module 103 complete")
+        return results
+    
+    def run(self, filepath: str, output_dir=None):
+        """Run module on file."""
+        return super().run(filepath, output_dir)
+    
+    def run_dataframe(self, df, dataset_id="in_memory", output_dir=None):
+        """Run module on DataFrame."""
+        return super().run_dataframe(df, dataset_id, output_dir)

@@ -1,0 +1,76 @@
+"""
+Module 102 - Compression Score Validator
+"""
+
+import numpy as np
+
+from .engine import CompressionScoreResult
+from .statistics import CompressionScoreStatistics
+
+
+class CompressionScoreValidator:
+
+    def validate(
+        self,
+        result: CompressionScoreResult,
+        statistics: CompressionScoreStatistics,
+    ) -> bool:
+
+        issues = []
+
+        if not (0.0 <= result.compression_score <= 100.0):
+            issues.append(f"Compression score out of [0, 100]: {result.compression_score:.2f}")
+
+        if not np.isfinite(result.compression_score):
+            issues.append(f"Compression score is not finite: {result.compression_score}")
+
+        if result.sample_size <= 0:
+            issues.append(f"Invalid sample size: {result.sample_size}")
+
+        if not (0.0 <= result.atr_percentile <= 1.0 + 1e-10):
+            issues.append(f"ATR percentile out of [0, 1]: {result.atr_percentile}")
+
+        if not (0.0 <= result.std_percentile <= 1.0 + 1e-10):
+            issues.append(f"STD percentile out of [0, 1]: {result.std_percentile}")
+
+        if not (0.0 <= result.normalized_entropy <= 1.0 + 1e-10):
+            issues.append(f"Normalized entropy out of [0, 1]: {result.normalized_entropy}")
+
+        if not np.isfinite(result.range_ratio):
+            issues.append(f"Range ratio is not finite: {result.range_ratio}")
+
+        if result.weights is None or len(result.weights) == 0:
+            issues.append("Weights not specified")
+
+        # Use attribute access for dataclass
+        if not np.isclose(statistics.compression_score, result.compression_score, atol=1e-8):
+            issues.append(
+                f"Compression score mismatch between result ({result.compression_score:.4f}) "
+                f"and statistics ({statistics.compression_score:.4f})"
+            )
+
+        if issues:
+            raise ValueError(
+                f"Compression Score validation failed with {len(issues)} issue(s):\n" +
+                "\n".join(f"  - {issue}" for issue in issues)
+            )
+
+        return True
+
+
+def run_validation(result, statistics):
+    validator = CompressionScoreValidator()
+
+    print("\n" + "=" * 60)
+    print("COMPRESSION SCORE VALIDATION")
+    print("=" * 60)
+
+    try:
+        validator.validate(result, statistics)
+        print("\n  ✓ All validation checks passed")
+        print("=" * 60)
+        return True
+    except ValueError as e:
+        print(e)
+        print("=" * 60)
+        return False

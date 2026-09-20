@@ -1,0 +1,226 @@
+# atlas/modules/module101_feature_validation/test_module.py
+"""
+Module 101 - Integration Test
+
+Tests feature validation engine, statistics, validator, report, and pipeline.
+"""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+
+import numpy as np
+import pandas as pd
+
+from atlas.modules.module101_feature_validation.engine import FeatureValidationEngine
+from atlas.modules.module101_feature_validation.statistics import FeatureValidationStatisticsEngine
+from atlas.modules.module101_feature_validation.validator import run_validation
+from atlas.modules.module101_feature_validation.report import FeatureValidationReport
+from atlas.modules.module101_feature_validation.module import FeatureValidationResearch
+
+
+def test_random_feature():
+    """Test 1: Random feature → IC ≈ 0."""
+    print("\n" + "=" * 60)
+    print("TEST 1: Random Feature (No Predictive Power)")
+    print("=" * 60)
+
+    engine = FeatureValidationEngine(horizon=10, buckets=10)
+    stats_engine = FeatureValidationStatisticsEngine()
+
+    np.random.seed(42)
+    n = 5000
+    close = 100 + np.cumsum(np.random.normal(0, 1, n))
+    feature = np.random.normal(0, 1, n)
+
+    result = engine.compute(close, feature, series_type="random")
+    stats = stats_engine.analyze(result)
+
+    assert abs(result.information_coefficient) < 0.05, (
+        f"Random feature IC should be near 0, got {result.information_coefficient:.6f}"
+    )
+
+    print(f"  IC: {result.information_coefficient:.6f}")
+    print(f"  Regime: {stats.regime}")
+    print("  ✓ Random feature test passed")
+    return True
+
+
+def test_perfect_predictor():
+    """Test 2: Perfect predictor → IC ≈ 1."""
+    print("\n" + "=" * 60)
+    print("TEST 2: Perfect Predictor")
+    print("=" * 60)
+
+    engine = FeatureValidationEngine(horizon=10, buckets=10)
+    stats_engine = FeatureValidationStatisticsEngine()
+
+    np.random.seed(42)
+    n = 5000
+    close = 100 + np.cumsum(np.random.normal(0, 1, n))
+    future_returns = close[10:] / close[:-10] - 1.0
+    feature = np.concatenate([future_returns, np.zeros(10)])
+
+    result = engine.compute(close, feature, series_type="perfect")
+    stats = stats_engine.analyze(result)
+
+    assert result.information_coefficient > 0.90, (
+        f"Perfect predictor IC should be near 1, got {result.information_coefficient:.6f}"
+    )
+
+    print(f"  IC: {result.information_coefficient:.6f}")
+    print(f"  Regime: {stats.regime}")
+    print("  ✓ Perfect predictor test passed")
+    return True
+
+
+def test_inverse_predictor():
+    """Test 3: Inverse predictor → IC ≈ -1."""
+    print("\n" + "=" * 60)
+    print("TEST 3: Inverse Predictor")
+    print("=" * 60)
+
+    engine = FeatureValidationEngine(horizon=10, buckets=10)
+    stats_engine = FeatureValidationStatisticsEngine()
+
+    np.random.seed(42)
+    n = 5000
+    close = 100 + np.cumsum(np.random.normal(0, 1, n))
+    future_returns = close[10:] / close[:-10] - 1.0
+    feature = np.concatenate([-future_returns, np.zeros(10)])
+
+    result = engine.compute(close, feature, series_type="inverse")
+    stats = stats_engine.analyze(result)
+
+    assert result.information_coefficient < -0.90, (
+        f"Inverse predictor IC should be near -1, got {result.information_coefficient:.6f}"
+    )
+
+    print(f"  IC: {result.information_coefficient:.6f}")
+    print(f"  Regime: {stats.regime}")
+    print("  ✓ Inverse predictor test passed")
+    return True
+
+
+def test_validator():
+    """Test 4: Validator."""
+    print("\n" + "=" * 60)
+    print("TEST 4: Validator")
+    print("=" * 60)
+
+    engine = FeatureValidationEngine(horizon=10, buckets=10)
+    stats_engine = FeatureValidationStatisticsEngine()
+
+    np.random.seed(42)
+    n = 500
+    close = 100 + np.cumsum(np.random.normal(0, 1, n))
+    feature = np.random.normal(0, 1, n)
+
+    result = engine.compute(close, feature, series_type="test")
+    stats = stats_engine.analyze(result)
+
+    passed = run_validation(result, stats)
+    assert passed
+    print("  ✓ Validator test passed")
+    return True
+
+
+def test_report():
+    """Test 5: Report generation."""
+    print("\n" + "=" * 60)
+    print("TEST 5: Report Generation")
+    print("=" * 60)
+
+    engine = FeatureValidationEngine(horizon=10, buckets=10)
+    stats_engine = FeatureValidationStatisticsEngine()
+
+    np.random.seed(42)
+    n = 500
+    close = 100 + np.cumsum(np.random.normal(0, 1, n))
+    feature = np.random.normal(0, 1, n)
+
+    result = engine.compute(close, feature, series_type="test")
+    stats = stats_engine.analyze(result)
+
+    report = FeatureValidationReport.generate(stats, dataset_name="Test")
+    assert "FEATURE VALIDATION" in report
+    assert "PREDICTIVE POWER" in report
+
+    report_path = Path("temp/module101_test_report.txt")
+    FeatureValidationReport.save(report, str(report_path))
+    assert report_path.exists()
+
+    print("  ✓ Report test passed")
+    return True
+
+
+def test_pipeline():
+    """Test 6: Full pipeline."""
+    print("\n" + "=" * 60)
+    print("TEST 6: Full Pipeline")
+    print("=" * 60)
+
+    n = 500
+    np.random.seed(42)
+    df = pd.DataFrame({
+        "close": 100 + np.cumsum(np.random.normal(0, 1, n)),
+        "feature": np.random.normal(0, 1, n),
+        "timestamp": pd.date_range("2020-01-01", periods=n, freq="15min"),
+        "open": np.zeros(n),
+        "high": np.zeros(n),
+        "low": np.zeros(n),
+        "volume": np.ones(n),
+    })
+
+    research = FeatureValidationResearch(horizon=10)
+    result = research.run_dataframe(df, dataset_id="pipeline_test")
+
+    assert result.status == "completed"
+    assert "feature_validation_statistics" in result.artifacts
+    assert "bucket_statistics" in result.artifacts
+    assert "feature_validation_report" in result.artifacts
+    assert result.statistics.get("validation_passed") == True
+
+    print(f"  IC: {result.statistics.get('information_coefficient'):.6f}")
+    print("  ✓ Full pipeline test passed")
+    return True
+
+
+def main():
+    print("\n" + "=" * 70)
+    print("PROJECT ATLAS - MODULE 101 INTEGRATION TEST")
+    print("Feature Validation Engine")
+    print("=" * 70)
+
+    results = {}
+
+    results["random"] = test_random_feature()
+    results["perfect"] = test_perfect_predictor()
+    results["inverse"] = test_inverse_predictor()
+    results["validator"] = test_validator()
+    results["report"] = test_report()
+    results["pipeline"] = test_pipeline()
+
+    print("\n" + "=" * 70)
+    print("RESULTS")
+    print("=" * 70)
+
+    for name, ok in results.items():
+        print(f"  {'✓' if ok else '✗'} {name}")
+
+    passed = sum(results.values())
+    total = len(results)
+
+    print(f"\n  {passed}/{total} tests passed")
+
+    if passed == total:
+        print("\n✓ Module 101 VALIDATED")
+        return 0
+    else:
+        print("\n⚠ Some tests failed")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

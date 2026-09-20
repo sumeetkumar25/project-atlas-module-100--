@@ -1,0 +1,1 @@
+python -m atlas.modules.module102_compression_score.test_module

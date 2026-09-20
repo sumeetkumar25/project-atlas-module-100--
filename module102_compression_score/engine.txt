@@ -1,0 +1,122 @@
+"""
+Module 102 - Compression Score Engine
+
+Combines multiple low-volatility metrics into a single composite compression score.
+
+Inputs (all pre-computed by other Atlas modules):
+  - ATR Percentile (Module 013)
+  - Rolling Std Percentile (Module 010/013)
+  - Normalized Entropy (Module 037)
+  - Range Ratio: short-term / long-term average range
+
+Output: Composite compression score (0-100)
+  0-20:  Fully Expanded
+  20-40: Normal
+  40-60: Mild Compression
+  60-80: Strong Compression
+  80-100: Extreme Compression
+"""
+
+from dataclasses import dataclass
+from typing import Optional, Dict
+
+
+def clamp(x, lo=0.0, hi=1.0):
+    """Clamp value to [lo, hi]."""
+    return max(lo, min(hi, x))
+
+
+@dataclass
+class CompressionScoreResult:
+    compression_score: float
+    atr_percentile: float
+    std_percentile: float
+    normalized_entropy: float
+    range_ratio: float
+    sample_size: int
+    weights: Optional[Dict] = None
+
+    def __post_init__(self):
+        if self.weights is None:
+            self.weights = {
+                "atr": 0.25,
+                "std": 0.25,
+                "entropy": 0.25,
+                "range": 0.25,
+            }
+
+
+class CompressionScoreEngine:
+
+    def __init__(
+        self,
+        atr_weight: float = 0.25,
+        std_weight: float = 0.25,
+        entropy_weight: float = 0.25,
+        range_weight: float = 0.25,
+    ):
+        """
+        Initialize compression score engine with configurable weights.
+        
+        All weights should sum to approximately 1.0 for an interpretable 0-100 score.
+        """
+        total = atr_weight + std_weight + entropy_weight + range_weight
+        if total <= 0:
+            raise ValueError("Total weight must be positive")
+
+        self.weights = {
+            "atr": atr_weight / total,
+            "std": std_weight / total,
+            "entropy": entropy_weight / total,
+            "range": range_weight / total,
+        }
+
+    def compute(
+        self,
+        atr_percentile: float,
+        std_percentile: float,
+        normalized_entropy: float,
+        range_ratio: float,
+        sample_size: int = 0,
+    ) -> CompressionScoreResult:
+        """
+        Compute composite compression score from validated inputs.
+        
+        All inputs should be pre-computed and validated by their
+        respective modules before being passed here.
+        
+        Compression logic:
+          - Low ATR percentile → high compression
+          - Low std percentile → high compression
+          - Low entropy → high structure → high compression
+          - Low range ratio → high compression
+        """
+        # ATR: low percentile → high compression
+        atr_score = clamp(1.0 - atr_percentile, 0.0, 1.0)
+
+        # Rolling std: low percentile → high compression
+        std_score = clamp(1.0 - std_percentile, 0.0, 1.0)
+
+        # Entropy: lower entropy → more structure → higher compression
+        entropy_score = clamp(1.0 - normalized_entropy, 0.0, 1.0)
+
+        # Range ratio: smaller short-term range → higher compression
+        range_score = clamp(1.0 - range_ratio, 0.0, 1.0)
+
+        # Weighted combination
+        score = (
+            self.weights["atr"] * atr_score
+            + self.weights["std"] * std_score
+            + self.weights["entropy"] * entropy_score
+            + self.weights["range"] * range_score
+        )
+
+        return CompressionScoreResult(
+            compression_score=clamp(100.0 * score, 0.0, 100.0),
+            atr_percentile=atr_percentile,
+            std_percentile=std_percentile,
+            normalized_entropy=normalized_entropy,
+            range_ratio=range_ratio,
+            sample_size=sample_size,
+            weights=self.weights.copy(),
+        )

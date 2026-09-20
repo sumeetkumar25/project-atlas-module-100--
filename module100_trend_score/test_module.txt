@@ -1,0 +1,212 @@
+# atlas/modules/module100_trend_score/test_module.py
+"""
+Module 100 - Integration Test
+
+Tests trend score engine, statistics, validator, report, and pipeline.
+"""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+
+import pandas as pd
+
+from atlas.modules.module100_trend_score.engine import TrendScoreEngine
+from atlas.modules.module100_trend_score.statistics import TrendScoreStatisticsEngine
+from atlas.modules.module100_trend_score.validator import run_validation
+from atlas.modules.module100_trend_score.report import TrendScoreReport
+from atlas.modules.module100_trend_score.module import TrendScoreResearch
+
+
+def test_strong_trend():
+    """Test 1: Strong trend inputs → high trend score."""
+    print("\n" + "=" * 60)
+    print("TEST 1: Strong Trend")
+    print("=" * 60)
+
+    engine = TrendScoreEngine(trend_weight=0.25, hurst_weight=0.25, dfa_weight=0.25, entropy_weight=0.25)
+    stats_engine = TrendScoreStatisticsEngine()
+
+    result = engine.compute(
+        trend_persistence=0.90,
+        hurst=0.65,
+        dfa_alpha=0.66,
+        normalized_entropy=0.72,
+        sample_size=10000,
+    )
+    stats = stats_engine.analyze(result)
+
+    assert result.trend_score > 70, f"Strong trend should score > 70, got {result.trend_score:.2f}"
+    assert stats.regime in ["Trending", "Strong Trend"]
+
+    print(f"  Trend Score: {result.trend_score:.2f}/100")
+    print(f"  Regime: {stats.regime}")
+    print("  ✓ Strong trend test passed")
+    return True
+
+
+def test_random_market():
+    """Test 2: Random market inputs → neutral score."""
+    print("\n" + "=" * 60)
+    print("TEST 2: Random Market")
+    print("=" * 60)
+
+    engine = TrendScoreEngine(trend_weight=0.25, hurst_weight=0.25, dfa_weight=0.25, entropy_weight=0.25)
+    stats_engine = TrendScoreStatisticsEngine()
+
+    result = engine.compute(
+        trend_persistence=0.50,
+        hurst=0.50,
+        dfa_alpha=0.50,
+        normalized_entropy=0.95,
+        sample_size=10000,
+    )
+    stats = stats_engine.analyze(result)
+
+    assert 30 < result.trend_score < 70, f"Random market should score 30-70, got {result.trend_score:.2f}"
+    assert stats.regime in ["Weak Trend", "Neutral"]
+
+    print(f"  Trend Score: {result.trend_score:.2f}/100")
+    print(f"  Regime: {stats.regime}")
+    print("  ✓ Random market test passed")
+    return True
+
+
+def test_mean_reverting():
+    """Test 3: Mean-reverting inputs → low trend score."""
+    print("\n" + "=" * 60)
+    print("TEST 3: Mean Reversion")
+    print("=" * 60)
+
+    engine = TrendScoreEngine(trend_weight=0.25, hurst_weight=0.25, dfa_weight=0.25, entropy_weight=0.25)
+    stats_engine = TrendScoreStatisticsEngine()
+
+    result = engine.compute(
+        trend_persistence=0.20,
+        hurst=0.40,
+        dfa_alpha=0.40,
+        normalized_entropy=0.98,
+        sample_size=10000,
+    )
+    stats = stats_engine.analyze(result)
+
+    assert result.trend_score < 30, f"Mean-reverting should score < 30, got {result.trend_score:.2f}"
+    assert stats.regime in ["Strong Mean Reversion", "Weak Trend"]
+
+    print(f"  Trend Score: {result.trend_score:.2f}/100")
+    print(f"  Regime: {stats.regime}")
+    print("  ✓ Mean-reverting test passed")
+    return True
+
+
+def test_custom_weights():
+    """Test 4: Custom weights change the score."""
+    print("\n" + "=" * 60)
+    print("TEST 4: Custom Weights")
+    print("=" * 60)
+
+    engine_default = TrendScoreEngine(trend_weight=0.25, hurst_weight=0.25, dfa_weight=0.25, entropy_weight=0.25)
+    engine_trend_heavy = TrendScoreEngine(trend_weight=0.70, hurst_weight=0.10, dfa_weight=0.10, entropy_weight=0.10)
+
+    result_default = engine_default.compute(
+        trend_persistence=0.90, hurst=0.50, dfa_alpha=0.50, normalized_entropy=0.95, sample_size=10000,
+    )
+    result_trend_heavy = engine_trend_heavy.compute(
+        trend_persistence=0.90, hurst=0.50, dfa_alpha=0.50, normalized_entropy=0.95, sample_size=10000,
+    )
+
+    assert result_trend_heavy.trend_score > result_default.trend_score, (
+        "Trend-heavy weights should produce higher score for strong persistence"
+    )
+
+    print(f"  Default weights score: {result_default.trend_score:.2f}")
+    print(f"  Trend-heavy score:     {result_trend_heavy.trend_score:.2f}")
+    print("  ✓ Custom weights test passed")
+    return True
+
+
+def test_validator():
+    """Test 5: Validator."""
+    print("\n" + "=" * 60)
+    print("TEST 5: Validator")
+    print("=" * 60)
+
+    engine = TrendScoreEngine()
+    stats_engine = TrendScoreStatisticsEngine()
+
+    result = engine.compute(
+        trend_persistence=0.50, hurst=0.50, dfa_alpha=0.50, normalized_entropy=0.90, sample_size=5000,
+    )
+    stats = stats_engine.analyze(result)
+
+    passed = run_validation(result, stats)
+    assert passed
+    print("  ✓ Validator test passed")
+    return True
+
+
+def test_pipeline():
+    """Test 6: Full pipeline."""
+    print("\n" + "=" * 60)
+    print("TEST 6: Full Pipeline")
+    print("=" * 60)
+
+    df = pd.DataFrame([{
+        "trend_persistence": 0.65,
+        "hurst_exponent": 0.58,
+        "dfa_alpha": 0.57,
+        "normalized_entropy": 0.85,
+        "sample_size": 10000,
+    }])
+
+    research = TrendScoreResearch()
+    result = research.run_dataframe(df, dataset_id="pipeline_test")
+
+    assert result.status == "completed"
+    assert "trend_score_statistics" in result.artifacts
+    assert "trend_score_report" in result.artifacts
+    assert result.statistics.get("validation_passed") == True
+
+    print(f"  Trend Score: {result.statistics.get('trend_score'):.2f}/100")
+    print("  ✓ Full pipeline test passed")
+    return True
+
+
+def main():
+    print("\n" + "=" * 70)
+    print("PROJECT ATLAS - MODULE 100 INTEGRATION TEST")
+    print("Composite Trend Score")
+    print("=" * 70)
+
+    results = {}
+
+    results["strong_trend"] = test_strong_trend()
+    results["random_market"] = test_random_market()
+    results["mean_reverting"] = test_mean_reverting()
+    results["custom_weights"] = test_custom_weights()
+    results["validator"] = test_validator()
+    results["pipeline"] = test_pipeline()
+
+    print("\n" + "=" * 70)
+    print("RESULTS")
+    print("=" * 70)
+
+    for name, ok in results.items():
+        print(f"  {'✓' if ok else '✗'} {name}")
+
+    passed = sum(results.values())
+    total = len(results)
+
+    print(f"\n  {passed}/{total} tests passed")
+
+    if passed == total:
+        print("\n✓ Module 100 VALIDATED")
+        return 0
+    else:
+        print("\n⚠ Some tests failed")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

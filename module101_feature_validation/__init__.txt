@@ -1,0 +1,9 @@
+# atlas/modules/module101_feature_validation/__init__.py
+"""
+Module 101
+Feature Validation Engine
+"""
+
+from .module import FeatureValidationResearch
+
+__all__ = ["FeatureValidationResearch"]

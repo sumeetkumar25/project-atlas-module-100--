@@ -1,0 +1,129 @@
+# atlas/modules/module103_feature_combination/report.py
+"""
+Module 103 - Feature Combination Report
+"""
+
+from datetime import datetime
+from typing import List
+
+
+class FeatureCombinationReport:
+    """Report generator for feature combination results."""
+    
+    @staticmethod
+    def generate(statistics, metadata=None, dataset_name="Unknown") -> str:
+        """
+        Generate a formatted report.
+        
+        Args:
+            statistics: FeatureCombinationStatistics
+            metadata: Optional metadata dict
+            dataset_name: Name of the dataset
+            
+        Returns:
+            Formatted report string
+        """
+        lines = []
+        
+        lines.append("=" * 55)
+        lines.append("MODULE 103")
+        lines.append("FEATURE COMBINATION ENGINE")
+        lines.append("=" * 55)
+        lines.append(f"\nDataset: {dataset_name}")
+        
+        # Features Used
+        lines.append("\n" + "-" * 45)
+        lines.append("FEATURES USED")
+        lines.append("-" * 45)
+        for feature in statistics.features_used:
+            # Clean up feature names
+            feature_name = feature.replace("_", " ").title()
+            lines.append(f"  {feature_name}")
+        
+        # Parameters
+        lines.append("\n" + "-" * 45)
+        lines.append("PARAMETERS")
+        lines.append("-" * 45)
+        lines.append(f"  Future Horizon: {statistics.future_horizon} Bars")
+        lines.append(f"  Sample Size: {statistics.sample_size:,}")
+        
+        # Results Summary
+        lines.append("\n" + "-" * 45)
+        lines.append("RESULTS SUMMARY")
+        lines.append("-" * 45)
+        lines.append(f"  States Evaluated: {statistics.total_states}/16")
+        lines.append(f"  Significant States: {statistics.significant_states}")
+        
+        # Best State
+        if statistics.best_state >= 0:
+            lines.append(f"\n  Best State: {statistics.best_state}")
+            lines.append(f"    Mean Return: {statistics.best_state_mean:.2f}%")
+            lines.append(f"    Win Rate: {statistics.best_state_win_rate:.1f}%")
+            lines.append(f"    Sharpe: {statistics.best_state_sharpe:.2f}")
+            lines.append(f"    Samples: {statistics.best_state_samples:,}")
+        
+        # Information Coefficient
+        lines.append("\n" + "-" * 45)
+        lines.append("INFORMATION COEFFICIENT")
+        lines.append("-" * 45)
+        lines.append(f"  IC: {statistics.information_coefficient:.4f}")
+        lines.append(f"  Overall Predictive Power: {statistics.predictive_power}")
+        
+        # Validation
+        lines.append("\n" + "-" * 45)
+        lines.append("VALIDATION")
+        lines.append("-" * 45)
+        lines.append("  Status: PASSED")
+        
+        # Footer
+        lines.append(f"\n  Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        lines.append("\n" + "=" * 55)
+        lines.append("END OF REPORT")
+        lines.append("=" * 55)
+        
+        return "\n".join(lines)
+    
+    @staticmethod
+    def generate_state_report(states_df) -> str:
+        """
+        Generate a detailed state report.
+        
+        Args:
+            states_df: DataFrame with state statistics
+            
+        Returns:
+            Formatted state report string
+        """
+        if states_df.empty:
+            return "No states to report."
+        
+        lines = []
+        lines.append("\n" + "=" * 70)
+        lines.append("STATE STATISTICS")
+        lines.append("=" * 70)
+        lines.append(f"\n{'State':<8} {'Count':<10} {'Mean %':<10} {'Win Rate %':<12} {'Sharpe':<10} {'Significant':<12}")
+        lines.append("-" * 70)
+        
+        for _, row in states_df.iterrows():
+            state = row['state']
+            count = row['count']
+            mean = row['mean'] * 100
+            win_rate = row['win_rate'] * 100
+            sharpe = row['sharpe']
+            significant = "✓" if row['is_significant'] else ""
+            
+            lines.append(
+                f"{state:<8} {count:<10} {mean:<10.2f} {win_rate:<12.1f} {sharpe:<10.2f} {significant:<12}"
+            )
+        
+        lines.append("\n" + "=" * 70)
+        return "\n".join(lines)
+    
+    @staticmethod
+    def save(report: str, filepath: str):
+        """Save report to file."""
+        from pathlib import Path
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(report)

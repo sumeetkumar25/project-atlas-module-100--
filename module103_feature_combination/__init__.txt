@@ -1,0 +1,9 @@
+# atlas/modules/module103_feature_combination/__init__.py
+"""
+Module 103
+Feature Combination Engine
+"""
+
+from .module import FeatureCombinationResearch
+
+__all__ = ["FeatureCombinationResearch"]

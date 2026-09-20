@@ -1,0 +1,93 @@
+# atlas/modules/module101_feature_validation/validator.py
+"""
+Module 101 - Feature Validation Validator
+
+FIXED: Validates p-value range.
+"""
+
+import numpy as np
+
+from .engine import FeatureValidationResult
+from .statistics import FeatureValidationStatistics
+
+
+class FeatureValidationValidator:
+
+    def validate(
+        self,
+        result: FeatureValidationResult,
+        statistics: FeatureValidationStatistics,
+    ) -> bool:
+
+        issues = []
+
+        if result.sample_size < 100:
+            issues.append(f"Sample size too small: {result.sample_size}")
+
+        if not np.isfinite(result.information_coefficient):
+            issues.append(f"IC is not finite: {result.information_coefficient}")
+
+        if not np.isfinite(result.pearson_correlation):
+            issues.append(f"Pearson is not finite: {result.pearson_correlation}")
+
+        if not np.isfinite(result.spearman_correlation):
+            issues.append(f"Spearman is not finite: {result.spearman_correlation}")
+
+        if not np.isfinite(result.spearman_pvalue):
+            issues.append(f"Spearman p-value is not finite: {result.spearman_pvalue}")
+
+        if not (0.0 <= result.spearman_pvalue <= 1.0 + 1e-10):
+            issues.append(f"p-value out of [0, 1]: {result.spearman_pvalue:.6f}")
+
+        if not (-1.0 <= result.information_coefficient <= 1.0 + 1e-10):
+            issues.append(f"IC out of [-1, 1]: {result.information_coefficient:.6f}")
+
+        if len(result.feature_values) != result.sample_size:
+            issues.append("Feature length mismatch")
+
+        if len(result.future_returns) != result.sample_size:
+            issues.append("Future returns length mismatch")
+
+        if np.isnan(result.feature_values).any():
+            issues.append("Feature contains NaN")
+
+        if np.isnan(result.future_returns).any():
+            issues.append("Future returns contain NaN")
+
+        if len(result.bucket_statistics) < 2:
+            issues.append(f"Too few buckets: {len(result.bucket_statistics)}")
+
+        if not np.isclose(statistics.information_coefficient, result.information_coefficient, atol=1e-10):
+            issues.append("IC mismatch")
+
+        if not np.isclose(statistics.spearman_pvalue, result.spearman_pvalue, atol=1e-10):
+            issues.append("p-value mismatch")
+
+        if statistics.is_significant != (result.spearman_pvalue < 0.05):
+            issues.append("Significance flag mismatch")
+
+        if issues:
+            raise ValueError(
+                f"Feature validation failed with {len(issues)} issue(s):\n" +
+                "\n".join(f"  - {issue}" for issue in issues)
+            )
+
+        return True
+
+
+def run_validation(result, statistics):
+    validator = FeatureValidationValidator()
+
+    print("\n" + "=" * 60)
+    print("FEATURE VALIDATION")
+    print("=" * 60)
+
+    try:
+        validator.validate(result, statistics)
+        print("\n  ✓ All validation checks passed")
+        print("=" * 60)
+        return True
+    except ValueError as e:
+        print(e)
+        print("=" * 60)
+        return False

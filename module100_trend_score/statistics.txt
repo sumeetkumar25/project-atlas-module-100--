@@ -1,0 +1,83 @@
+# atlas/modules/module100_trend_score/statistics.py
+"""
+Module 100 - Trend Score Statistics
+
+Classifies composite trend scores into interpretable market regimes.
+"""
+
+from dataclasses import dataclass, asdict
+
+import pandas as pd
+
+from .engine import TrendScoreResult
+
+
+@dataclass
+class TrendScoreStatistics:
+    trend_score: float
+    regime: str
+    regime_detail: str
+    sample_size: int
+    weights: dict = None
+
+    def __post_init__(self):
+        if self.weights is None:
+            self.weights = {}
+
+
+class TrendScoreStatisticsEngine:
+
+    METADATA = {
+        "module": 100,
+        "name": "Composite Trend Score",
+        "version": "1.0.0",
+        "components": ["Trend Persistence", "Hurst", "DFA", "Entropy"],
+        "default_weights": {"trend": 0.25, "hurst": 0.25, "dfa": 0.25, "entropy": 0.25},
+    }
+
+    def analyze(self, result: TrendScoreResult) -> TrendScoreStatistics:
+
+        score = result.trend_score
+
+        if score < 20:
+            regime = "Strong Mean Reversion"
+            regime_detail = "Multiple indicators suggest mean-reverting behavior"
+        elif score < 40:
+            regime = "Weak Trend"
+            regime_detail = "Slight directional bias; mostly neutral conditions"
+        elif score < 60:
+            regime = "Neutral"
+            regime_detail = "No strong directional bias detected"
+        elif score < 80:
+            regime = "Trending"
+            regime_detail = "Multiple indicators suggest persistent directional movement"
+        else:
+            regime = "Strong Trend"
+            regime_detail = "Strong directional bias across all indicators"
+
+        return TrendScoreStatistics(
+            trend_score=score,
+            regime=regime,
+            regime_detail=regime_detail,
+            sample_size=result.sample_size,
+            weights=result.weights.copy() if result.weights else {},
+        )
+
+    def summary_dataframe(self, stats: TrendScoreStatistics) -> pd.DataFrame:
+        return pd.DataFrame([asdict(stats)])
+
+    def summary_dict(self, stats: TrendScoreStatistics) -> dict:
+        return asdict(stats)
+
+    @staticmethod
+    def cross_dataset_metrics(all_stats: list) -> pd.DataFrame:
+        """Generate cross-dataset comparison metrics."""
+        rows = []
+        for name, stats in all_stats:
+            rows.append({
+                "dataset": name,
+                "trend_score": round(stats.trend_score, 2),
+                "regime": stats.regime,
+                "sample_size": stats.sample_size,
+            })
+        return pd.DataFrame(rows)

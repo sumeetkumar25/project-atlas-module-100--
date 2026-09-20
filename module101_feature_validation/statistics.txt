@@ -1,0 +1,161 @@
+"""
+Module 101 - Feature Validation Statistics
+
+Classifies predictive power using both IC magnitude and statistical significance.
+
+FIXED: Added p-value assessment. IC alone is not sufficient.
+"""
+
+from dataclasses import dataclass, asdict
+
+import numpy as np
+import pandas as pd
+
+from .engine import FeatureValidationResult
+
+
+@dataclass
+class FeatureValidationStatistics:
+    sample_size: int
+    horizon: int
+    information_coefficient: float
+    spearman_correlation: float
+    spearman_pvalue: float
+    pearson_correlation: float
+
+    is_significant: bool = False
+
+    regime: str = "Unknown"
+    regime_detail: str = ""
+
+    bucket_monotonicity: float = 0.0
+    monotonicity_regime: str = "Unknown"
+
+    best_bucket: int = -1
+    worst_bucket: int = -1
+    best_bucket_return: float = 0.0
+    worst_bucket_return: float = 0.0
+
+
+class FeatureValidationStatisticsEngine:
+
+    METADATA = {
+        "module": 101,
+        "name": "Feature Validation",
+        "version": "1.1.0",
+        "method": "Spearman IC + p-value + Quantile Buckets",
+        "depends_on": ["100"],
+    }
+
+    def analyze(self, result: FeatureValidationResult) -> FeatureValidationStatistics:
+
+        ic = result.information_coefficient
+        pvalue = result.spearman_pvalue
+        is_significant = pvalue < 0.05
+
+        abs_ic = abs(ic)
+
+        # Combined classification: magnitude + significance
+        if not is_significant:
+            regime = "Not Significant"
+            regime_detail = (
+                f"IC = {ic:.4f} but p = {pvalue:.4f} > 0.05. "
+                "Observed relationship may be due to sampling noise."
+            )
+        elif abs_ic < 0.02:
+            regime = "Significant but Weak"
+            regime_detail = (
+                f"Statistically significant (p = {pvalue:.4f}) but IC magnitude "
+                f"({ic:.4f}) is very small. Limited practical value."
+            )
+        elif abs_ic < 0.05:
+            regime = "Weak"
+            regime_detail = (
+                f"Statistically significant (p = {pvalue:.4f}) with marginal "
+                f"predictive signal (IC = {ic:.4f})."
+            )
+        elif abs_ic < 0.10:
+            regime = "Moderate"
+            regime_detail = (
+                f"Statistically significant (p = {pvalue:.4f}) with meaningful "
+                f"predictive power (IC = {ic:.4f})."
+            )
+        else:
+            regime = "Strong"
+            regime_detail = (
+                f"Statistically significant (p = {pvalue:.4f}) with substantial "
+                f"predictive relationship (IC = {ic:.4f})."
+            )
+
+        # Bucket monotonicity
+        bucket_means = []
+        best_bucket = -1
+        worst_bucket = -1
+        best_return = -np.inf
+        worst_return = np.inf
+
+        for i in sorted(result.bucket_statistics.keys()):
+            stats = result.bucket_statistics[i]
+            mean_ret = stats.get("mean_return", np.nan)
+            if not np.isnan(mean_ret):
+                bucket_means.append(mean_ret)
+                if mean_ret > best_return:
+                    best_return = mean_ret
+                    best_bucket = i
+                if mean_ret < worst_return:
+                    worst_return = mean_ret
+                    worst_bucket = i
+
+        if len(bucket_means) >= 2:
+            diffs = np.diff(bucket_means)
+            positive_pct = float((diffs > 0).mean())
+        else:
+            positive_pct = 0.0
+
+        if positive_pct > 0.80:
+            monotonicity_regime = "Excellent Monotonicity"
+        elif positive_pct > 0.60:
+            monotonicity_regime = "Good Monotonicity"
+        elif positive_pct > 0.40:
+            monotonicity_regime = "Moderate Monotonicity"
+        else:
+            monotonicity_regime = "Poor Monotonicity"
+
+        return FeatureValidationStatistics(
+            sample_size=result.sample_size,
+            horizon=result.horizon,
+            information_coefficient=result.information_coefficient,
+            spearman_correlation=result.spearman_correlation,
+            spearman_pvalue=result.spearman_pvalue,
+            pearson_correlation=result.pearson_correlation,
+            is_significant=is_significant,
+            regime=regime,
+            regime_detail=regime_detail,
+            bucket_monotonicity=round(positive_pct * 100, 1),
+            monotonicity_regime=monotonicity_regime,
+            best_bucket=best_bucket,
+            worst_bucket=worst_bucket,
+            best_bucket_return=round(best_return, 6),
+            worst_bucket_return=round(worst_return, 6),
+        )
+
+    def summary_dataframe(self, stats: FeatureValidationStatistics) -> pd.DataFrame:
+        return pd.DataFrame([asdict(stats)])
+
+    def summary_dict(self, stats: FeatureValidationStatistics) -> dict:
+        return asdict(stats)
+
+    @staticmethod
+    def cross_dataset_metrics(all_stats: list) -> pd.DataFrame:
+        rows = []
+        for name, stats in all_stats:
+            rows.append({
+                "dataset": name,
+                "horizon": stats.horizon,
+                "ic": round(stats.information_coefficient, 6),
+                "pvalue": round(stats.spearman_pvalue, 6),
+                "significant": stats.is_significant,
+                "regime": stats.regime,
+                "monotonicity": stats.bucket_monotonicity,
+            })
+        return pd.DataFrame(rows)

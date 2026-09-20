@@ -1,0 +1,354 @@
+"""
+Module 103 - Feature Combination Engine
+
+Combines multiple validated features into market states and evaluates
+their predictive power for future returns.
+
+Pipeline:
+  1. Accept multiple validated features
+  2. Normalize each feature to 0-1
+  3. Convert to binary conditions
+  4. Create market states (0-15)
+  5. Evaluate future returns per state
+  6. Calculate information coefficient
+  7. Rank states by performance
+"""
+
+import numpy as np
+import pandas as pd
+from scipy.stats import spearmanr, ttest_1samp
+from dataclasses import dataclass, field
+from typing import List, Dict, Optional, Any
+
+
+@dataclass
+class StateResult:
+    """Results for a single market state."""
+    state: int
+    count: int
+    mean: float
+    median: float
+    std: float
+    win_rate: float
+    sharpe: float
+    p_value: float
+    is_significant: bool
+
+
+@dataclass
+class FeatureCombinationResult:
+    """Complete results from feature combination analysis."""
+    states: Dict[int, StateResult]
+    state_statistics: pd.DataFrame
+    information_coefficient: float
+    ic_p_value: float
+    best_state: int
+    significant_states: int
+    total_states: int
+    sample_size: int
+    future_horizon: int
+    features_used: List[str]
+    state_series: pd.Series = field(default_factory=lambda: pd.Series(dtype='int64'))
+    state_assignments: np.ndarray = field(default_factory=lambda: np.array([]))
+
+
+class FeatureCombinationEngine:
+    """Core engine for feature combination and state evaluation."""
+
+    def __init__(self, future_horizon: int = 10, min_count: int = 50):
+        """
+        Initialize the feature combination engine.
+        
+        Args:
+            future_horizon: Number of bars ahead to calculate returns
+            min_count: Minimum samples required per state
+        """
+        self.future_horizon = future_horizon
+        self.min_count = min_count
+        # Only these four features are used in state creation
+        self.feature_columns = [
+            "trend_score",
+            "compression_score",
+            "hurst_exponent",
+            "normalized_entropy",
+        ]
+
+    def normalize(self, series: np.ndarray) -> np.ndarray:
+        """
+        Normalize a series to 0-1 using 1st and 99th percentiles.
+        
+        Args:
+            series: Input array
+            
+        Returns:
+            Normalized array in [0, 1] range
+        """
+        x = np.asarray(series, dtype=float)
+        
+        # Handle all-nan or constant series
+        if np.all(np.isnan(x)):
+            return np.zeros_like(x)
+        
+        lo = np.nanpercentile(x, 1)
+        hi = np.nanpercentile(x, 99)
+        
+        if hi == lo:
+            return np.zeros_like(x)
+        
+        return np.clip((x - lo) / (hi - lo), 0, 1)
+
+    def create_state(self, features: pd.DataFrame) -> np.ndarray:
+        """
+        Create market states from binary conditions.
+        
+        State encoding (4 bits):
+          bit 3 (8): trend_high (trend_score >= 60)
+          bit 2 (4): compression_high (compression_score >= 60)
+          bit 1 (2): entropy_low (normalized_entropy <= 0.30)
+          bit 0 (1): hurst_high (hurst_exponent >= 0.55)
+        
+        Returns:
+            Array of state values (0-15)
+        """
+        # ========== DEBUG: Feature statistics ==========
+        print("\n" + "=" * 60)
+        print("FEATURE STATISTICS FOR STATE CREATION")
+        print("=" * 60)
+        
+        feature_cols = ["trend_score", "compression_score", "hurst_exponent", "normalized_entropy"]
+        print(features[feature_cols].describe())
+        print("=" * 60)
+        
+        # Binary conditions
+        trend_high = (features["trend_score"] >= 60).astype(int)
+        compression_high = (features["compression_score"] >= 60).astype(int)
+        entropy_low = (features["normalized_entropy"] <= 0.30).astype(int)
+        hurst_high = (features["hurst_exponent"] >= 0.55).astype(int)
+        
+        # Print binary condition statistics
+        print("\nBINARY CONDITION STATISTICS:")
+        print(f"  trend_high >= 60: {trend_high.sum():,} ({trend_high.mean():.1%})")
+        print(f"  compression_high >= 60: {compression_high.sum():,} ({compression_high.mean():.1%})")
+        print(f"  entropy_low <= 0.30: {entropy_low.sum():,} ({entropy_low.mean():.1%})")
+        print(f"  hurst_high >= 0.55: {hurst_high.sum():,} ({hurst_high.mean():.1%})")
+        
+        # Combine into state
+        state = (
+            trend_high * 8 +
+            compression_high * 4 +
+            entropy_low * 2 +
+            hurst_high
+        )
+        
+        return state.values
+
+    def compute_future_returns(self, close: pd.Series) -> np.ndarray:
+        """
+        Compute future returns over the specified horizon.
+        
+        Args:
+            close: Close price series
+            
+        Returns:
+            Array of future returns
+        """
+        future_return = close.shift(-self.future_horizon) / close - 1
+        return future_return.values
+
+    def evaluate_state(
+        self,
+        returns: np.ndarray,
+        mask: np.ndarray
+    ) -> Optional[StateResult]:
+        """
+        Evaluate a single market state.
+        
+        Args:
+            returns: Array of future returns
+            mask: Boolean mask for this state
+            
+        Returns:
+            StateResult or None if insufficient samples
+        """
+        r = returns[mask]
+        
+        # Remove NaN values
+        r = r[~np.isnan(r)]
+        
+        if len(r) < self.min_count:
+            return None
+        
+        mean_return = np.mean(r)
+        std_return = np.std(r)
+        
+        # T-test for significance
+        t_stat, p_value = ttest_1samp(r, 0)
+        
+        return StateResult(
+            state=0,  # Will be set by caller
+            count=len(r),
+            mean=mean_return,
+            median=np.median(r),
+            std=std_return,
+            win_rate=np.mean(r > 0),
+            sharpe=mean_return / (std_return + 1e-12),
+            p_value=p_value,
+            is_significant=p_value < 0.05
+        )
+
+    def compute(
+        self,
+        features: pd.DataFrame,
+        close: pd.Series
+    ) -> FeatureCombinationResult:
+        """
+        Main computation method.
+        
+        Args:
+            features: DataFrame with feature columns
+            close: Close price series
+            
+        Returns:
+            FeatureCombinationResult with all computed statistics
+        """
+        # Validate inputs
+        if features.empty:
+            raise ValueError("Features DataFrame is empty")
+        
+        # Ensure all required columns exist
+        missing_cols = set(self.feature_columns) - set(features.columns)
+        if missing_cols:
+            raise ValueError(f"Missing feature columns: {missing_cols}")
+        
+        # Align lengths
+        min_length = min(len(features), len(close))
+        features = features.iloc[:min_length]
+        close = close.iloc[:min_length]
+        
+        # Normalize features (for reference, not used in state creation)
+        normalized_features = pd.DataFrame()
+        for col in self.feature_columns:
+            normalized_features[f"{col}_normalized"] = self.normalize(
+                features[col].values
+            )
+        
+        # Create market states
+        state = self.create_state(features)
+        
+        # ========== DEBUG: State distribution ==========
+        print("\n" + "=" * 60)
+        print("STATE DISTRIBUTION")
+        print("=" * 60)
+        
+        unique_states = np.unique(state)
+        print(f"Unique states: {unique_states}")
+        print(f"Number of unique states: {len(unique_states)}")
+        
+        counts = pd.Series(state).value_counts().sort_index()
+        print("\nState counts:")
+        print(counts)
+        
+        if len(unique_states) <= 1:
+            raise RuntimeError(
+                f"Only {len(unique_states)} market state was generated. "
+                "Thresholds or feature scaling are incorrect.\n"
+                f"State values: {unique_states}\n"
+                f"Feature statistics:\n{features[['trend_score', 'compression_score', 'hurst_exponent', 'normalized_entropy']].describe()}"
+            )
+        
+        print("=" * 60)
+        
+        # Preserve state_series for export
+        state_series = pd.Series(
+            state,
+            index=features.index,
+            name="state"
+        )
+        
+        # Compute future returns
+        future_returns = self.compute_future_returns(close)
+        
+        # Align state and returns
+        valid_mask = ~np.isnan(future_returns)
+        state = state[valid_mask]
+        future_returns = future_returns[valid_mask]
+        
+        # Evaluate each state
+        states_dict = {}
+        state_results = []
+        
+        for s in range(16):  # States 0-15
+            mask = state == s
+            result = self.evaluate_state(future_returns, mask)
+            
+            if result is not None:
+                result.state = s
+                states_dict[s] = result
+                state_results.append(result)
+        
+        # Create state statistics DataFrame
+        if state_results:
+            df = pd.DataFrame([
+                {
+                    "state": r.state,
+                    "count": r.count,
+                    "mean": r.mean,
+                    "median": r.median,
+                    "std": r.std,
+                    "win_rate": r.win_rate,
+                    "sharpe": r.sharpe,
+                    "p_value": r.p_value,
+                    "is_significant": r.is_significant
+                }
+                for r in state_results
+            ])
+            
+            # Rank states by significance and performance
+            df = df.sort_values(
+                ["is_significant", "sharpe", "mean"],
+                ascending=[False, False, False]
+            ).reset_index(drop=True)
+            
+            # Find best state
+            best_state = df.iloc[0]["state"] if not df.empty else -1
+            
+            # Calculate information coefficient
+            # Rank states by mean return
+            state_means = {r.state: r.mean for r in state_results}
+            state_ranks = np.array([state_means.get(s, 0) for s in range(16)])
+            
+            # IC: correlation between state (as integer) and future returns
+            ic, ic_p = spearmanr(state, future_returns)
+            
+            result = FeatureCombinationResult(
+                states=states_dict,
+                state_statistics=df,
+                information_coefficient=ic if not np.isnan(ic) else 0,
+                ic_p_value=ic_p if not np.isnan(ic_p) else 1.0,
+                best_state=best_state,
+                significant_states=df["is_significant"].sum() if not df.empty else 0,
+                total_states=len(state_results),
+                sample_size=len(future_returns),
+                future_horizon=self.future_horizon,
+                features_used=self.feature_columns.copy(),
+                state_series=state_series,
+                state_assignments=state
+            )
+        else:
+            # No valid states found
+            result = FeatureCombinationResult(
+                states={},
+                state_statistics=pd.DataFrame(),
+                information_coefficient=0,
+                ic_p_value=1.0,
+                best_state=-1,
+                significant_states=0,
+                total_states=0,
+                sample_size=0,
+                future_horizon=self.future_horizon,
+                features_used=self.feature_columns.copy(),
+                state_series=state_series,
+                state_assignments=state
+            )
+        
+        return result

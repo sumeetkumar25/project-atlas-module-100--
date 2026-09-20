@@ -1,0 +1,302 @@
+"""
+Module 100 - Trend Score
+
+Combines multiple persistence and complexity metrics into a unified trend score.
+DEPENDENCIES: 005 (Trend Persistence), 035 (Hurst Exponent), 
+              036 (DFA Alpha), 037 (Normalized Entropy)
+"""
+
+from typing import Optional, Dict, Any
+import pandas as pd
+import numpy as np
+
+from atlas.core.base_research_module import BaseResearchModule
+from atlas.framework.registry import AtlasRegistry
+
+from .engine import TrendScoreEngine, TrendScoreResult
+from .statistics import TrendScoreStatisticsEngine
+from .validator import run_validation
+from .report import TrendScoreReport
+
+
+class TrendScoreResearch(BaseResearchModule):
+    """Main research module for trend score computation."""
+    
+    MODULE_OUTPUT = "module100"
+    METADATA = {
+        "module": "100",
+        "name": "Trend Score",
+        "version": "1.0.0",
+        "description": "Combines persistence and complexity metrics into unified trend score",
+        "depends_on": ["005", "035", "036", "037"]
+    }
+    
+    def __init__(
+        self,
+        registry: Optional[AtlasRegistry] = None,
+        random_state: int = 42,
+        trend_weight: float = 0.25,
+        hurst_weight: float = 0.25,
+        dfa_weight: float = 0.25,
+        entropy_weight: float = 0.25
+    ):
+        """
+        Initialize the trend score module.
+        
+        Args:
+            registry: Optional Atlas registry
+            random_state: Random seed for reproducibility
+            trend_weight: Weight for trend persistence
+            hurst_weight: Weight for Hurst exponent
+            dfa_weight: Weight for DFA alpha
+            entropy_weight: Weight for normalized entropy
+        """
+        super().__init__(
+            module_name="Trend Score",
+            module_version=self.METADATA["version"],
+        )
+        
+        self.registry = registry or AtlasRegistry()
+        self.engine = TrendScoreEngine(
+            trend_weight=trend_weight,
+            hurst_weight=hurst_weight,
+            dfa_weight=dfa_weight,
+            entropy_weight=entropy_weight,
+        )
+        self.stats_engine = TrendScoreStatisticsEngine()
+        self.result_data = None
+        self.statistics = None
+        self.feature_df = None
+    
+    def _register_pipeline_steps(self):
+        """Register pipeline steps."""
+        self.pipeline_steps = [
+            ("compute_trend_score", self._compute_score),
+            ("statistics", self._compute_statistics),
+            ("validate", self._validate),
+            ("export", self._export_results),
+        ]
+    
+    def _prepare_data(self) -> pd.DataFrame:
+        """
+        Prepare data with validation for required dependency columns.
+        
+        Returns:
+            DataFrame: Full DataFrame with required columns
+        
+        Raises:
+            RuntimeError: If required columns are missing
+        """
+        required_columns = [
+            "trend_persistence",
+            "hurst_exponent",
+            "dfa_alpha",
+            "normalized_entropy"
+        ]
+        
+        missing = [c for c in required_columns if c not in self.df.columns]
+        
+        if missing:
+            raise RuntimeError(
+                f"Module100 requires dependency outputs. Missing columns: {missing}\n"
+                f"Available columns: {list(self.df.columns)}\n"
+                f"Please ensure modules 005, 035, 036, 037 have been run first."
+            )
+        
+        return self.df.copy()
+    
+    def _compute_score(self) -> Dict[str, Any]:
+        """
+        Step 1: Compute trend score for each candle.
+        
+        Returns:
+            dict: Statistics including mean trend score
+        """
+        self.logger.info("Step 1: Computing trend score for each candle")
+        
+        df = self._prepare_data()
+        
+        scores = []
+        
+        for _, row in df.iterrows():
+            result = self.engine.compute(
+                trend_persistence=float(row["trend_persistence"]),
+                hurst=float(row["hurst_exponent"]),
+                dfa_alpha=float(row["dfa_alpha"]),
+                normalized_entropy=float(row["normalized_entropy"]),
+                sample_size=len(df)
+            )
+            scores.append(result.trend_score)
+        
+        # Create feature DataFrame with timestamp and trend_score
+        self.feature_df = pd.DataFrame({
+            "timestamp": df["timestamp"],
+            "trend_score": scores
+        })
+        
+        self.result.feature_df = self.feature_df
+        
+        # Compute mean score
+        mean_score = self.feature_df["trend_score"].mean()
+        
+        # Create a representative TrendScoreResult for validation
+        # This represents the dataset-level result, not a single candle
+        self.result_data = TrendScoreResult(
+            trend_score=mean_score,
+            trend_persistence=float(df["trend_persistence"].mean()),
+            hurst=float(df["hurst_exponent"].mean()),
+            dfa_alpha=float(df["dfa_alpha"].mean()),
+            entropy=np.nan,
+            normalized_entropy=float(df["normalized_entropy"].mean()),
+            sample_size=len(scores),
+            weights=self.engine.weights.copy(),
+        )
+        
+        self.logger.metric(
+            "Mean Trend Score",
+            f"{mean_score:.2f}"
+        )
+        self.logger.metric(
+            "Sample Size",
+            f"{len(scores):,}"
+        )
+        self.logger.success("Trend scores computed")
+        
+        return {
+            "trend_score": mean_score,
+            "sample_size": len(scores)
+        }
+    
+    def _compute_statistics(self) -> Dict[str, Any]:
+        """
+        Step 2: Compute statistics from trend scores.
+        
+        Returns:
+            dict: Statistics dictionary
+        """
+        self.logger.info("Step 2: Computing statistics")
+        
+        score = self.feature_df["trend_score"]
+        
+        statistics = {
+            "trend_score": score.mean(),
+            "trend_persistence": self.result_data.trend_persistence,
+            "hurst": self.result_data.hurst,
+            "dfa_alpha": self.result_data.dfa_alpha,
+            "normalized_entropy": self.result_data.normalized_entropy,
+            "median_score": score.median(),
+            "std_score": score.std(),
+            "min_score": score.min(),
+            "max_score": score.max(),
+            "q25": score.quantile(0.25),
+            "q75": score.quantile(0.75),
+            "q90": score.quantile(0.90),
+            "sample_size": len(score),
+            "weights": self.engine.weights.copy()
+        }
+        
+        self.statistics = statistics
+        self.result.statistics = statistics
+        
+        self.logger.metric(
+            "Mean Score",
+            f"{statistics['trend_score']:.2f}"
+        )
+        self.logger.metric(
+            "Median Score",
+            f"{statistics['median_score']:.2f}"
+        )
+        self.logger.metric(
+            "Std Score",
+            f"{statistics['std_score']:.2f}"
+        )
+        self.logger.metric(
+            "Trend Persistence",
+            f"{statistics['trend_persistence']:.4f}"
+        )
+        self.logger.metric(
+            "Hurst",
+            f"{statistics['hurst']:.4f}"
+        )
+        self.logger.metric(
+            "DFA Alpha",
+            f"{statistics['dfa_alpha']:.4f}"
+        )
+        self.logger.metric(
+            "Normalized Entropy",
+            f"{statistics['normalized_entropy']:.4f}"
+        )
+        self.logger.success("Statistics computed")
+        
+        return statistics
+    
+    def _validate(self) -> Dict[str, Any]:
+        """Step 3: Validation."""
+        self.logger.info("Step 3: Validation")
+        passed = run_validation(self.result_data, self.statistics)
+        self.logger.success("Validation complete")
+        return {"validation_passed": passed}
+    
+    def _export_results(self) -> Dict[str, Any]:
+        """Step 4: Export."""
+        self.logger.info("Step 4: Export")
+        
+        # Create statistics DataFrame
+        stats_df = pd.DataFrame([self.statistics])
+        self.result.artifacts["trend_score_statistics"] = stats_df
+        
+        # Export feature DataFrame
+        self.result.artifacts["trend_score_features"] = self.feature_df
+        
+        # Generate report (updated to use dictionary)
+        try:
+            report = TrendScoreReport.generate(
+                self.statistics,
+                metadata=self.METADATA,
+                dataset_name=self.result.dataset_identifier,
+            )
+            self.result.artifacts["trend_score_report"] = report
+        except Exception as e:
+            # Fallback report using dict
+            self.logger.warning(f"Report generation failed, using fallback: {e}")
+            report = self._generate_fallback_report()
+            self.result.artifacts["trend_score_report"] = report
+        
+        self.logger.metric("Artifacts", str(len(self.result.artifacts)))
+        self.logger.success("Export complete")
+        
+        return {
+            "export_status": "complete",
+            "artifact_count": len(self.result.artifacts),
+        }
+    
+    def _generate_fallback_report(self) -> str:
+        """Generate fallback report when main report fails."""
+        lines = []
+        lines.append("=" * 60)
+        lines.append("MODULE 100 - TREND SCORE")
+        lines.append("=" * 60)
+        lines.append(f"\nDataset: {self.result.dataset_identifier}")
+        lines.append("\nStatistics:")
+        for key, value in self.statistics.items():
+            if isinstance(value, float):
+                lines.append(f"  {key}: {value:.4f}")
+            else:
+                lines.append(f"  {key}: {value}")
+        return "\n".join(lines)
+    
+    def compute(self) -> Dict[str, Any]:
+        """Run the full computation pipeline."""
+        self.logger.section("Trend Score Pipeline")
+        results = self.execute_pipeline()
+        self.result.status = "completed"
+        self.logger.success("Module 100 complete")
+        return results
+    
+    def run(self, filepath: str, output_dir=None):
+        """Run module on file."""
+        return super().run(filepath, output_dir)
+    
+    def run_dataframe(self, df, dataset_id="in_memory", output_dir=None):
+        """Run module on DataFrame."""
+        return super().run_dataframe(df, dataset_id, output_dir)

@@ -1,0 +1,103 @@
+"""
+Module 103 - Feature Combination Statistics
+
+Provides statistical analysis and classification of results.
+"""
+
+from dataclasses import dataclass, asdict
+import pandas as pd
+import numpy as np
+from .engine import FeatureCombinationResult
+
+
+@dataclass
+class FeatureCombinationStatistics:
+    """High-level statistics from feature combination analysis."""
+    total_states: int
+    significant_states: int
+    best_state: int
+    best_state_mean: float
+    best_state_win_rate: float
+    best_state_sharpe: float
+    best_state_samples: int
+    information_coefficient: float
+    predictive_power: str
+    sample_size: int
+    future_horizon: int
+    features_used: list
+
+
+class FeatureCombinationStatisticsEngine:
+    """Engine for generating high-level statistics."""
+    
+    METADATA = {
+        "module": 103,
+        "name": "Feature Combination Engine",
+        "version": "1.0.0",
+        "features": [
+            "Trend Score",
+            "Compression Score",
+            "Hurst Exponent",
+            "Normalized Entropy"
+        ],
+        # Module 100 already depends on 005, 035, 036, 037
+        # Module 103 only needs these four
+        "depends_on": ["100", "102", "035", "037"],
+    }
+    
+    def analyze(self, result: FeatureCombinationResult) -> FeatureCombinationStatistics:
+        """
+        Analyze results and generate high-level statistics.
+        
+        Args:
+            result: FeatureCombinationResult from engine
+            
+        Returns:
+            FeatureCombinationStatistics
+        """
+        # Determine predictive power based on IC
+        ic = result.information_coefficient
+        if abs(ic) >= 0.3:
+            predictive_power = "Strong"
+        elif abs(ic) >= 0.15:
+            predictive_power = "Moderate"
+        elif abs(ic) >= 0.05:
+            predictive_power = "Weak"
+        else:
+            predictive_power = "None"
+        
+        # Get best state details
+        best_state_mean = 0
+        best_state_win_rate = 0
+        best_state_sharpe = 0
+        best_state_samples = 0
+        
+        if result.best_state >= 0 and result.best_state in result.states:
+            best = result.states[result.best_state]
+            best_state_mean = best.mean * 100  # Convert to percentage
+            best_state_win_rate = best.win_rate * 100
+            best_state_sharpe = best.sharpe
+            best_state_samples = best.count
+        
+        return FeatureCombinationStatistics(
+            total_states=result.total_states,
+            significant_states=result.significant_states,
+            best_state=result.best_state,
+            best_state_mean=best_state_mean,
+            best_state_win_rate=best_state_win_rate,
+            best_state_sharpe=best_state_sharpe,
+            best_state_samples=best_state_samples,
+            information_coefficient=ic,
+            predictive_power=predictive_power,
+            sample_size=result.sample_size,
+            future_horizon=result.future_horizon,
+            features_used=result.features_used
+        )
+    
+    def summary_dataframe(self, stats: FeatureCombinationStatistics) -> pd.DataFrame:
+        """Convert statistics to DataFrame."""
+        return pd.DataFrame([asdict(stats)])
+    
+    def summary_dict(self, stats: FeatureCombinationStatistics) -> dict:
+        """Convert statistics to dictionary."""
+        return asdict(stats)

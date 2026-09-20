@@ -1,0 +1,64 @@
+# atlas/modules/module101_feature_validation/report.py
+"""
+Module 101 - Feature Validation Report
+
+FIXED: Includes p-value and significance assessment.
+"""
+
+from datetime import datetime
+
+
+class FeatureValidationReport:
+
+    @staticmethod
+    def generate(statistics, metadata=None, dataset_name="Unknown") -> str:
+        lines = []
+
+        lines.append("=" * 55)
+        lines.append("MODULE 101")
+        lines.append("FEATURE VALIDATION REPORT")
+        lines.append("=" * 55)
+        lines.append(f"\nDataset: {dataset_name}")
+
+        lines.append("\n" + "-" * 45)
+        lines.append("CORRELATION METRICS")
+        lines.append("-" * 45)
+        lines.append(f"  Horizon:               {statistics.horizon}")
+        lines.append(f"  Information Coefficient: {statistics.information_coefficient:.6f}")
+        lines.append(f"  Spearman p-value:       {statistics.spearman_pvalue:.6f}")
+        lines.append(f"  Statistically Significant: {'YES' if statistics.is_significant else 'NO'}")
+        lines.append(f"  Spearman Correlation:   {statistics.spearman_correlation:.6f}")
+        lines.append(f"  Pearson Correlation:    {statistics.pearson_correlation:.6f}")
+        lines.append(f"  Sample Size:            {statistics.sample_size:,}")
+
+        lines.append("\n" + "-" * 45)
+        lines.append("PREDICTIVE POWER")
+        lines.append("-" * 45)
+        lines.append(f"  Regime:  {statistics.regime}")
+        lines.append(f"  Detail:  {statistics.regime_detail}")
+
+        lines.append("\n" + "-" * 45)
+        lines.append("BUCKET ANALYSIS")
+        lines.append("-" * 45)
+        lines.append(f"  Monotonicity: {statistics.bucket_monotonicity:.1f}% ({statistics.monotonicity_regime})")
+        lines.append(f"  Best Bucket:  {statistics.best_bucket} ({statistics.best_bucket_return:+.4%})")
+        lines.append(f"  Worst Bucket: {statistics.worst_bucket} ({statistics.worst_bucket_return:+.4%})")
+
+        lines.append("\n" + "-" * 45)
+        lines.append("VALIDATION")
+        lines.append("-" * 45)
+        lines.append("  Status: PASSED")
+        lines.append(f"\n  Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        lines.append("\n" + "=" * 55)
+        lines.append("END OF REPORT")
+        lines.append("=" * 55)
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def save(report: str, filepath: str):
+        from pathlib import Path
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(report)

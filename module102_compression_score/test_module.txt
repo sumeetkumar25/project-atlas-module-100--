@@ -1,0 +1,246 @@
+# atlas/modules/module102_compression_score/test_module.py
+"""
+Module 102 - Integration Test
+
+Tests compression score engine, statistics, validator, report, and pipeline.
+"""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+
+import pandas as pd
+
+from atlas.modules.module102_compression_score.engine import CompressionScoreEngine
+from atlas.modules.module102_compression_score.statistics import CompressionScoreStatisticsEngine
+from atlas.modules.module102_compression_score.validator import run_validation
+from atlas.modules.module102_compression_score.report import CompressionScoreReport
+from atlas.modules.module102_compression_score.module import CompressionScoreResearch
+
+
+def test_highly_compressed():
+    """Test 1: Highly compressed market → Strong Compression regime."""
+    print("\n" + "=" * 60)
+    print("TEST 1: Highly Compressed Market")
+    print("=" * 60)
+
+    engine = CompressionScoreEngine(
+        atr_weight=0.25, std_weight=0.25, entropy_weight=0.25, range_weight=0.25
+    )
+    stats_engine = CompressionScoreStatisticsEngine()
+
+    result = engine.compute(
+        atr_percentile=0.10,
+        std_percentile=0.08,
+        normalized_entropy=0.72,
+        range_ratio=0.40,
+        sample_size=10000,
+    )
+    stats = stats_engine.analyze(result)
+
+    # With equal weights: (0.90 + 0.92 + 0.28 + 0.60) / 4 * 100 = 67.5
+    # This should be in Strong Compression range (60-80)
+    assert result.compression_score >= 60, (
+        f"Highly compressed should score >= 60, got {result.compression_score:.2f}"
+    )
+    assert result.compression_score < 80, (
+        f"Score should be < 80 for Strong Compression, got {result.compression_score:.2f}"
+    )
+    assert stats.regime == "Strong Compression", (
+        f"Expected 'Strong Compression', got '{stats.regime}'"
+    )
+
+    print(f"  Compression Score: {result.compression_score:.2f}/100")
+    print(f"  Regime: {stats.regime}")
+    print("  ✓ Highly compressed test passed")
+    return True
+
+
+def test_normal_market():
+    """Test 2: Normal market → Normal regime."""
+    print("\n" + "=" * 60)
+    print("TEST 2: Normal Market")
+    print("=" * 60)
+
+    engine = CompressionScoreEngine(
+        atr_weight=0.25, std_weight=0.25, entropy_weight=0.25, range_weight=0.25
+    )
+    stats_engine = CompressionScoreStatisticsEngine()
+
+    result = engine.compute(
+        atr_percentile=0.50,
+        std_percentile=0.50,
+        normalized_entropy=0.90,
+        range_ratio=1.0,
+        sample_size=10000,
+    )
+    stats = stats_engine.analyze(result)
+
+    # With equal weights: (0.50 + 0.50 + 0.10 + 0.00) / 4 * 100 = 27.5
+    # This should be in Normal range (20-40)
+    assert 20 <= result.compression_score < 40, (
+        f"Normal market should score 20-40, got {result.compression_score:.2f}"
+    )
+    assert stats.regime == "Normal", (
+        f"Expected 'Normal', got '{stats.regime}'"
+    )
+
+    print(f"  Compression Score: {result.compression_score:.2f}/100")
+    print(f"  Regime: {stats.regime}")
+    print("  ✓ Normal market test passed")
+    return True
+
+
+def test_fully_expanded():
+    """Test 3: Fully expanded market → Fully Expanded regime."""
+    print("\n" + "=" * 60)
+    print("TEST 3: Fully Expanded Market")
+    print("=" * 60)
+
+    engine = CompressionScoreEngine(
+        atr_weight=0.25, std_weight=0.25, entropy_weight=0.25, range_weight=0.25
+    )
+    stats_engine = CompressionScoreStatisticsEngine()
+
+    result = engine.compute(
+        atr_percentile=0.90,
+        std_percentile=0.92,
+        normalized_entropy=0.98,
+        range_ratio=2.0,
+        sample_size=10000,
+    )
+    stats = stats_engine.analyze(result)
+
+    # With equal weights: (0.10 + 0.08 + 0.02 + 0.00) / 4 * 100 = 5.0
+    # This should be in Fully Expanded range (0-20)
+    assert result.compression_score < 20, (
+        f"Fully expanded should score < 20, got {result.compression_score:.2f}"
+    )
+    assert stats.regime == "Fully Expanded", (
+        f"Expected 'Fully Expanded', got '{stats.regime}'"
+    )
+
+    print(f"  Compression Score: {result.compression_score:.2f}/100")
+    print(f"  Regime: {stats.regime}")
+    print("  ✓ Fully expanded test passed")
+    return True
+
+
+def test_custom_weights():
+    """Test 4: Custom weights change the score."""
+    print("\n" + "=" * 60)
+    print("TEST 4: Custom Weights")
+    print("=" * 60)
+
+    engine_default = CompressionScoreEngine(
+        atr_weight=0.25, std_weight=0.25, entropy_weight=0.25, range_weight=0.25
+    )
+    engine_range_heavy = CompressionScoreEngine(
+        atr_weight=0.10, std_weight=0.10, entropy_weight=0.10, range_weight=0.70
+    )
+
+    result_default = engine_default.compute(
+        atr_percentile=0.50, std_percentile=0.50,
+        normalized_entropy=0.90, range_ratio=0.30, sample_size=10000,
+    )
+    result_range_heavy = engine_range_heavy.compute(
+        atr_percentile=0.50, std_percentile=0.50,
+        normalized_entropy=0.90, range_ratio=0.30, sample_size=10000,
+    )
+
+    assert result_range_heavy.compression_score > result_default.compression_score, (
+        "Range-heavy weights should produce higher score for low range ratio"
+    )
+
+    print(f"  Default weights score:  {result_default.compression_score:.2f}")
+    print(f"  Range-heavy score:      {result_range_heavy.compression_score:.2f}")
+    print("  ✓ Custom weights test passed")
+    return True
+
+
+def test_validator():
+    """Test 5: Validator."""
+    print("\n" + "=" * 60)
+    print("TEST 5: Validator")
+    print("=" * 60)
+
+    engine = CompressionScoreEngine()
+    stats_engine = CompressionScoreStatisticsEngine()
+
+    result = engine.compute(
+        atr_percentile=0.50, std_percentile=0.50,
+        normalized_entropy=0.90, range_ratio=1.0, sample_size=5000,
+    )
+    stats = stats_engine.analyze(result)
+
+    passed = run_validation(result, stats)
+    assert passed
+    print("  ✓ Validator test passed")
+    return True
+
+
+def test_pipeline():
+    """Test 6: Full pipeline."""
+    print("\n" + "=" * 60)
+    print("TEST 6: Full Pipeline")
+    print("=" * 60)
+
+    df = pd.DataFrame([{
+        "atr_percentile": 0.15,
+        "std_percentile": 0.12,
+        "normalized_entropy": 0.75,
+        "range_ratio": 0.45,
+        "sample_size": 10000,
+    }])
+
+    research = CompressionScoreResearch()
+    result = research.run_dataframe(df, dataset_id="pipeline_test")
+
+    assert result.status == "completed"
+    assert "compression_score_statistics" in result.artifacts
+    assert "compression_score_report" in result.artifacts
+    assert result.statistics.get("validation_passed") == True
+
+    print(f"  Compression Score: {result.statistics.get('compression_score'):.2f}/100")
+    print("  ✓ Full pipeline test passed")
+    return True
+
+
+def main():
+    print("\n" + "=" * 70)
+    print("PROJECT ATLAS - MODULE 102 INTEGRATION TEST")
+    print("Composite Compression Score")
+    print("=" * 70)
+
+    results = {}
+
+    results["highly_compressed"] = test_highly_compressed()
+    results["normal_market"] = test_normal_market()
+    results["fully_expanded"] = test_fully_expanded()
+    results["custom_weights"] = test_custom_weights()
+    results["validator"] = test_validator()
+    results["pipeline"] = test_pipeline()
+
+    print("\n" + "=" * 70)
+    print("RESULTS")
+    print("=" * 70)
+
+    for name, ok in results.items():
+        print(f"  {'✓' if ok else '✗'} {name}")
+
+    passed = sum(results.values())
+    total = len(results)
+
+    print(f"\n  {passed}/{total} tests passed")
+
+    if passed == total:
+        print("\n✓ Module 102 VALIDATED")
+        return 0
+    else:
+        print("\n⚠ Some tests failed")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

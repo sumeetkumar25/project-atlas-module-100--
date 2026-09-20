@@ -1,0 +1,159 @@
+# atlas/modules/module101_feature_validation/engine.py
+"""
+Module 101 - Feature Validation Engine
+
+Evaluates whether a feature predicts future BTC returns.
+
+Metrics computed:
+  - Information Coefficient (IC) = Spearman rank correlation
+  - Spearman p-value (statistical significance)
+  - Pearson correlation
+  - Bucket analysis (quantile-based return profiles)
+
+FIXED: Added p-value for statistical significance assessment.
+"""
+
+from dataclasses import dataclass
+
+import numpy as np
+from scipy.stats import spearmanr
+
+
+# ----------------------------------------------------
+# Result Container
+# ----------------------------------------------------
+
+@dataclass
+class FeatureValidationResult:
+    sample_size: int
+    horizon: int
+    information_coefficient: float
+    spearman_correlation: float
+    spearman_pvalue: float
+    pearson_correlation: float
+    future_returns: np.ndarray
+    feature_values: np.ndarray
+    bucket_statistics: dict
+    series_type: str = "unknown"
+
+
+# ----------------------------------------------------
+# Feature Validation Engine
+# ----------------------------------------------------
+
+class FeatureValidationEngine:
+
+    def __init__(self, horizon: int = 10, buckets: int = 10):
+        """
+        Initialize feature validation engine.
+        
+        Args:
+            horizon: Forward-looking period for return calculation.
+            buckets: Number of quantile buckets for profile analysis.
+        """
+        self.horizon = horizon
+        self.buckets = buckets
+
+    def compute(
+        self,
+        close: np.ndarray,
+        feature: np.ndarray,
+        series_type: str = "unknown",
+    ) -> FeatureValidationResult:
+        """
+        Evaluate predictive power of a feature.
+        
+        Args:
+            close: Close price series
+            feature: Feature values aligned with close prices
+            series_type: Label describing the feature
+            
+        Returns:
+            FeatureValidationResult with IC, p-value, correlations, and bucket stats
+        """
+        # Clean inputs
+        close = np.asarray(close, dtype=float)
+        feature = np.asarray(feature, dtype=float)
+
+        # Compute future returns
+        future_returns = close[self.horizon:] / close[:-self.horizon] - 1.0
+        feature = feature[:-self.horizon]
+
+        # Remove any remaining NaN/Inf
+        mask = np.isfinite(feature) & np.isfinite(future_returns)
+        feature = feature[mask]
+        future_returns = future_returns[mask]
+
+        n = len(feature)
+
+        if n < 100:
+            raise ValueError(f"Need at least 100 valid observations, got {n}")
+
+        # Pearson correlation
+        pearson = float(np.corrcoef(feature, future_returns)[0, 1])
+
+        # Spearman with p-value
+        if np.all(feature == feature[0]) or np.all(future_returns == future_returns[0]):
+            spearman = 0.0
+            spearman_pvalue = 1.0
+        else:
+            spearman_result = spearmanr(feature, future_returns)
+            spearman = float(spearman_result.statistic)
+            spearman_pvalue = float(spearman_result.pvalue)
+
+        # Information Coefficient = Spearman
+        ic = spearman
+
+        # Bucket analysis
+        bucket_stats = self._compute_buckets(feature, future_returns)
+
+        return FeatureValidationResult(
+            sample_size=n,
+            horizon=self.horizon,
+            information_coefficient=ic,
+            spearman_correlation=spearman,
+            spearman_pvalue=spearman_pvalue,
+            pearson_correlation=pearson,
+            future_returns=future_returns,
+            feature_values=feature,
+            bucket_statistics=bucket_stats,
+            series_type=series_type,
+        )
+
+    def _compute_buckets(self, feature, future_returns):
+        """Compute quantile bucket statistics."""
+        edges = np.quantile(feature, np.linspace(0, 1, self.buckets + 1))
+        edges[0] = -np.inf
+        edges[-1] = np.inf
+
+        bucket_stats = {}
+
+        for i in range(self.buckets):
+            mask = (feature >= edges[i]) & (feature < edges[i + 1])
+            bucket_returns = future_returns[mask]
+            count = len(bucket_returns)
+
+            if count > 0:
+                bucket_stats[i] = {
+                    "bucket": i,
+                    "count": count,
+                    "mean_return": float(np.mean(bucket_returns)),
+                    "median_return": float(np.median(bucket_returns)),
+                    "std_return": float(np.std(bucket_returns, ddof=1)) if count > 1 else 0.0,
+                    "win_rate": float((bucket_returns > 0).mean()),
+                    "min_feature": float(feature[mask].min()),
+                    "max_feature": float(feature[mask].max()),
+                }
+            else:
+                bucket_stats[i] = {
+                    "bucket": i,
+                    "count": 0,
+                    "mean_return": np.nan,
+                    "median_return": np.nan,
+                    "std_return": np.nan,
+                    "win_rate": np.nan,
+                    "min_feature": np.nan,
+                    "max_feature": np.nan,
+                }
+
+        return bucket_stats

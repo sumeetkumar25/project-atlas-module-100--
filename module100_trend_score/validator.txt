@@ -1,0 +1,116 @@
+"""
+Module 100 - Trend Score Validator
+"""
+
+import numpy as np
+
+from .engine import TrendScoreResult
+from .statistics import TrendScoreStatistics
+
+
+class TrendScoreValidator:
+
+    def validate(
+        self,
+        result: TrendScoreResult,
+        statistics: dict,
+    ) -> bool:
+        """
+        Validate trend score results and statistics.
+        
+        Args:
+            result: TrendScoreResult from engine
+            statistics: Dictionary of statistics from module
+        
+        Returns:
+            bool: True if validation passes
+        
+        Raises:
+            ValueError: If validation fails
+        """
+        issues = []
+
+        # Validate result object
+        if not (0.0 <= result.trend_score <= 100.0):
+            issues.append(f"Trend score out of [0, 100]: {result.trend_score:.2f}")
+
+        if not np.isfinite(result.trend_score):
+            issues.append(f"Trend score is not finite: {result.trend_score}")
+
+        if result.sample_size <= 0:
+            issues.append(f"Invalid sample size: {result.sample_size}")
+
+        if not np.isfinite(result.trend_persistence):
+            issues.append("Trend persistence is not finite")
+
+        if not np.isfinite(result.hurst):
+            issues.append("Hurst is not finite")
+
+        if not np.isfinite(result.dfa_alpha):
+            issues.append("DFA alpha is not finite")
+
+        if not np.isfinite(result.normalized_entropy):
+            issues.append("Normalized entropy is not finite")
+
+        if result.weights is None or len(result.weights) == 0:
+            issues.append("Weights not specified")
+
+        # Validate statistics dictionary
+        if "trend_score" not in statistics:
+            issues.append("Missing 'trend_score' in statistics dictionary")
+        elif not np.isclose(statistics["trend_score"], result.trend_score, atol=1e-8):
+            issues.append(
+                f"Trend score mismatch between result ({result.trend_score:.4f}) "
+                f"and statistics ({statistics['trend_score']:.4f})"
+            )
+
+        if "sample_size" not in statistics:
+            issues.append("Missing 'sample_size' in statistics dictionary")
+        elif statistics["sample_size"] != result.sample_size:
+            issues.append(
+                f"Sample size mismatch between result ({result.sample_size}) "
+                f"and statistics ({statistics['sample_size']})"
+            )
+
+        # Validate other statistics
+        if "median_score" in statistics:
+            if not np.isfinite(statistics["median_score"]):
+                issues.append("Median score is not finite")
+
+        if "std_score" in statistics:
+            if statistics["std_score"] < 0:
+                issues.append(f"Invalid standard deviation: {statistics['std_score']:.4f}")
+
+        if "min_score" in statistics and "max_score" in statistics:
+            if statistics["min_score"] > statistics["max_score"]:
+                issues.append(
+                    f"Min score ({statistics['min_score']:.2f}) > "
+                    f"Max score ({statistics['max_score']:.2f})"
+                )
+
+        if issues:
+            raise ValueError(
+                f"Trend Score validation failed with {len(issues)} issue(s):\n" +
+                "\n".join(f"  - {issue}" for issue in issues)
+            )
+
+        return True
+
+
+def run_validation(result, statistics):
+    """Run validation and print results."""
+    validator = TrendScoreValidator()
+
+    print("\n" + "=" * 60)
+    print("TREND SCORE VALIDATION")
+    print("=" * 60)
+
+    try:
+        validator.validate(result, statistics)
+        print("\n  ✓ All validation checks passed")
+        print("=" * 60)
+        return True
+    except ValueError as e:
+        print(e)
+        print("=" * 60)
+        return False

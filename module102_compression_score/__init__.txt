@@ -1,0 +1,9 @@
+# atlas/modules/module102_compression_score/__init__.py
+"""
+Module 102
+Composite Compression Score
+"""
+
+from .module import CompressionScoreResearch
+
+__all__ = ["CompressionScoreResearch"]

@@ -1,0 +1,125 @@
+# atlas/modules/module100_trend_score/engine.py
+"""
+Module 100 - Trend Score Engine
+
+Combines multiple validated metrics into a single composite trend score.
+
+Inputs (all pre-computed by other Atlas modules):
+  - Trend Persistence (Module 005)
+  - Hurst Exponent (Module 035)
+  - DFA Alpha (Module 036)
+  - Normalized Entropy (Module 037)
+
+Output: Composite trend score (0-100)
+  0-20:  Strong Mean Reversion
+  20-40: Weak Trend
+  40-60: Neutral
+  60-80: Trending
+  80-100: Strong Trend
+"""
+
+from dataclasses import dataclass
+
+
+def clamp(x, lo=0.0, hi=1.0):
+    """Clamp value to [lo, hi]."""
+    return max(lo, min(hi, x))
+
+
+@dataclass
+class TrendScoreResult:
+    trend_score: float
+    trend_persistence: float
+    hurst: float
+    dfa_alpha: float
+    entropy: float
+    normalized_entropy: float
+    sample_size: int
+    series_type: str = "log_returns"
+    weights: dict = None
+
+    def __post_init__(self):
+        if self.weights is None:
+            self.weights = {
+                "trend": 0.25,
+                "hurst": 0.25,
+                "dfa": 0.25,
+                "entropy": 0.25,
+            }
+
+
+class TrendScoreEngine:
+
+    def __init__(
+        self,
+        trend_weight: float = 0.25,
+        hurst_weight: float = 0.25,
+        dfa_weight: float = 0.25,
+        entropy_weight: float = 0.25,
+    ):
+        """
+        Initialize trend score engine with configurable weights.
+        
+        All weights should sum to approximately 1.0 for an interpretable 0-100 score.
+        """
+        total = trend_weight + hurst_weight + dfa_weight + entropy_weight
+        if total <= 0:
+            raise ValueError("Total weight must be positive")
+
+        self.weights = {
+            "trend": trend_weight / total,
+            "hurst": hurst_weight / total,
+            "dfa": dfa_weight / total,
+            "entropy": entropy_weight / total,
+        }
+
+    def compute(
+        self,
+        trend_persistence: float,
+        hurst: float,
+        dfa_alpha: float,
+        normalized_entropy: float,
+        sample_size: int = 0,
+        series_type: str = "log_returns",
+    ) -> TrendScoreResult:
+        """
+        Compute composite trend score from validated inputs.
+        
+        All inputs should be pre-computed and validated by their
+        respective modules before being passed here.
+        """
+        # Trend persistence: already in [0, 1]
+        tp = clamp(trend_persistence, 0.0, 1.0)
+
+        # Hurst: map [0.40, 0.60] → [0, 1]
+        hurst_score = clamp((hurst - 0.40) / 0.20, 0.0, 1.0)
+
+        # DFA: map [0.40, 0.60] → [0, 1]
+        dfa_score = clamp((dfa_alpha - 0.40) / 0.20, 0.0, 1.0)
+
+        # Entropy: lower entropy → more structure (use complement)
+        entropy_score = clamp(1.0 - normalized_entropy, 0.0, 1.0)
+
+        # Weighted combination
+        score = (
+            self.weights["trend"] * tp
+            + self.weights["hurst"] * hurst_score
+            + self.weights["dfa"] * dfa_score
+            + self.weights["entropy"] * entropy_score
+        )
+
+        return TrendScoreResult(
+            trend_score=clamp(100.0 * score, 0.0, 100.0),
+            trend_persistence=trend_persistence,
+            hurst=hurst,
+            dfa_alpha=dfa_alpha,
+            entropy=-np.log2(normalized_entropy) if normalized_entropy > 0 else 0.0,
+            normalized_entropy=normalized_entropy,
+            sample_size=sample_size,
+            series_type=series_type,
+            weights=self.weights.copy(),
+        )
+
+
+# Import numpy for entropy calculation in result
+import numpy as np

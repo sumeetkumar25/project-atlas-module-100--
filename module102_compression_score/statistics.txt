@@ -1,0 +1,81 @@
+"""
+Module 102 - Compression Score Statistics
+
+Classifies composite compression scores into interpretable market regimes.
+"""
+
+from dataclasses import dataclass, asdict
+
+import pandas as pd
+
+from .engine import CompressionScoreResult
+
+
+@dataclass
+class CompressionScoreStatistics:
+    compression_score: float
+    regime: str
+    regime_detail: str
+    sample_size: int
+    weights: dict = None
+
+    def __post_init__(self):
+        if self.weights is None:
+            self.weights = {}
+
+
+class CompressionScoreStatisticsEngine:
+
+    METADATA = {
+        "module": 102,
+        "name": "Composite Compression Score",
+        "version": "1.0.0",
+        "components": ["ATR Percentile", "STD Percentile", "Entropy", "Range Ratio"],
+        "default_weights": {"atr": 0.25, "std": 0.25, "entropy": 0.25, "range": 0.25},
+    }
+
+    def analyze(self, result: CompressionScoreResult) -> CompressionScoreStatistics:
+
+        score = result.compression_score
+
+        if score < 20:
+            regime = "Fully Expanded"
+            regime_detail = "Market is in an expansion phase; volatility is elevated across all metrics"
+        elif score < 40:
+            regime = "Normal"
+            regime_detail = "Market is in a normal range; no significant compression or expansion"
+        elif score < 60:
+            regime = "Mild Compression"
+            regime_detail = "Early signs of compression; volatility beginning to contract"
+        elif score < 80:
+            regime = "Strong Compression"
+            regime_detail = "Significant compression detected; market is coiling"
+        else:
+            regime = "Extreme Compression"
+            regime_detail = "Market is extremely compressed; breakout potential is elevated"
+
+        return CompressionScoreStatistics(
+            compression_score=score,
+            regime=regime,
+            regime_detail=regime_detail,
+            sample_size=result.sample_size,
+            weights=result.weights.copy() if result.weights else {},
+        )
+
+    def summary_dataframe(self, stats: CompressionScoreStatistics) -> pd.DataFrame:
+        return pd.DataFrame([asdict(stats)])
+
+    def summary_dict(self, stats: CompressionScoreStatistics) -> dict:
+        return asdict(stats)
+
+    @staticmethod
+    def cross_dataset_metrics(all_stats: list) -> pd.DataFrame:
+        rows = []
+        for name, stats in all_stats:
+            rows.append({
+                "dataset": name,
+                "compression_score": round(stats.compression_score, 2),
+                "regime": stats.regime,
+                "sample_size": stats.sample_size,
+            })
+        return pd.DataFrame(rows)

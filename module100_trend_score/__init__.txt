@@ -1,0 +1,8 @@
+"""
+Module 100
+Composite Trend Score
+"""
+
+from .module import TrendScoreResearch
+
+__all__ = ["TrendScoreResearch"]

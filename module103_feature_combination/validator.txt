@@ -1,0 +1,133 @@
+# atlas/modules/module103_feature_combination/validator.py
+"""
+Module 103 - Feature Combination Validator
+"""
+
+import numpy as np
+import pandas as pd
+from .engine import FeatureCombinationResult
+from .statistics import FeatureCombinationStatistics
+
+
+class FeatureCombinationValidator:
+    """Validator for feature combination results."""
+    
+    def validate(
+        self,
+        result: FeatureCombinationResult,
+        statistics: FeatureCombinationStatistics
+    ) -> bool:
+        """
+        Validate results and statistics.
+        
+        Args:
+            result: FeatureCombinationResult from engine
+            statistics: FeatureCombinationStatistics from statistics engine
+            
+        Returns:
+            True if validation passes
+            
+        Raises:
+            ValueError: If validation fails
+        """
+        issues = []
+        
+        # Validate states
+        if result.total_states <= 0:
+            issues.append(f"No valid states found (total_states={result.total_states})")
+        
+        if result.total_states > 16:
+            issues.append(f"Too many states (max 16, got {result.total_states})")
+        
+        # Validate state values are in range
+        if result.states:
+            for state_id in result.states.keys():
+                if not (0 <= state_id <= 15):
+                    issues.append(f"State ID out of range [0,15]: {state_id}")
+        
+        # Validate sample size
+        if result.sample_size <= 0:
+            issues.append(f"Invalid sample size: {result.sample_size}")
+        
+        # Validate information coefficient
+        if not (-1 <= result.information_coefficient <= 1):
+            issues.append(
+                f"Information coefficient out of [-1, 1]: {result.information_coefficient}"
+            )
+        
+        if not np.isfinite(result.information_coefficient):
+            issues.append(
+                f"Information coefficient is not finite: {result.information_coefficient}"
+            )
+        
+        # Validate state statistics
+        if not result.state_statistics.empty:
+            df = result.state_statistics
+            
+            # Check mean returns are finite
+            if not np.all(np.isfinite(df["mean"])):
+                issues.append("Some mean returns are not finite")
+            
+            # Check win rates are in [0, 1]
+            if not np.all((0 <= df["win_rate"]) & (df["win_rate"] <= 1)):
+                issues.append("Some win rates outside [0, 1]")
+            
+            # Check p-values are in [0, 1]
+            if not np.all((0 <= df["p_value"]) & (df["p_value"] <= 1)):
+                issues.append("Some p-values outside [0, 1]")
+        
+        # Validate statistics match result
+        if statistics.total_states != result.total_states:
+            issues.append(
+                f"Total states mismatch: stats={statistics.total_states}, "
+                f"result={result.total_states}"
+            )
+        
+        if statistics.significant_states != result.significant_states:
+            issues.append(
+                f"Significant states mismatch: stats={statistics.significant_states}, "
+                f"result={result.significant_states}"
+            )
+        
+        if statistics.best_state != result.best_state:
+            issues.append(
+                f"Best state mismatch: stats={statistics.best_state}, "
+                f"result={result.best_state}"
+            )
+        
+        if not np.isclose(
+            statistics.information_coefficient,
+            result.information_coefficient,
+            atol=1e-8
+        ):
+            issues.append(
+                f"IC mismatch: stats={statistics.information_coefficient}, "
+                f"result={result.information_coefficient}"
+            )
+        
+        if issues:
+            raise ValueError(
+                f"Feature Combination validation failed with {len(issues)} issue(s):\n" +
+                "\n".join(f"  - {issue}" for issue in issues)
+            )
+        
+        return True
+
+
+def run_validation(result, statistics):
+    """Run validation with user-friendly output."""
+    validator = FeatureCombinationValidator()
+    
+    print("\n" + "=" * 60)
+    print("FEATURE COMBINATION VALIDATION")
+    print("=" * 60)
+    
+    try:
+        validator.validate(result, statistics)
+        print("\n  ✓ All validation checks passed")
+        print("=" * 60)
+        return True
+    except ValueError as e:
+        print(e)
+        print("=" * 60)
+        return False
