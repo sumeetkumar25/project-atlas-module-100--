@@ -30,7 +30,8 @@ class FeatureInteractionStatisticsEngine:
         "module": 116,
         "name": "Feature Interaction",
         "version": "1.0.0",
-        "description": "Measures synergy between feature pairs"
+        "description": "Measures synergy between feature pairs",
+        "required_targets": ["future_breakout"]
     }
     
     def analyze(self, result: FeatureInteractionResult) -> FeatureInteractionStatistics:
