@@ -29,7 +29,8 @@ class RegimeRobustnessStatisticsEngine:
         "name": "Regime Robustness",
         "version": "1.0.0",
         "description": "Validates feature performance across different market regimes",
-        "required_targets": ["future_breakout"]
+        "required_targets": ["future_breakout"],
+        "depends_on": ["103"],
     }
     
     def analyze(self, result: RegimeRobustnessResult) -> RegimeRobustnessStatistics:
