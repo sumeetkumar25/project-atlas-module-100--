@@ -30,7 +30,9 @@ class TemporalStabilityStatisticsEngine:
         "module": 114,
         "name": "Temporal Stability",
         "version": "1.0.0",
-        "description": "Measures whether feature predictive power remains stable over time"
+        "description": "Measures whether feature predictive power remains stable over time",
+        "depends_on": ["103"],
+        "required_targets": ["future_breakout"]
     }
     
     def analyze(self, result: TemporalStabilityResult) -> TemporalStabilityStatistics:
