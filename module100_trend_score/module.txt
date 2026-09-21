@@ -240,14 +240,18 @@ class TrendScoreResearch(BaseResearchModule):
     def _export_results(self) -> Dict[str, Any]:
         """Step 4: Export."""
         self.logger.info("Step 4: Export")
-        
+
         # Create statistics DataFrame
         stats_df = pd.DataFrame([self.statistics])
         self.result.artifacts["trend_score_statistics"] = stats_df
-        
+
         # Export feature DataFrame
+        # Standard framework artifact required for downstream dependency injection
+        self.result.artifacts["features"] = self.feature_df
+
+        # Preserve the module-specific artifact for backward compatibility
         self.result.artifacts["trend_score_features"] = self.feature_df
-        
+
         # Generate report (updated to use dictionary)
         try:
             report = TrendScoreReport.generate(
@@ -258,13 +262,18 @@ class TrendScoreResearch(BaseResearchModule):
             self.result.artifacts["trend_score_report"] = report
         except Exception as e:
             # Fallback report using dict
-            self.logger.warning(f"Report generation failed, using fallback: {e}")
+            self.logger.warning(
+                f"Report generation failed, using fallback: {e}"
+            )
             report = self._generate_fallback_report()
             self.result.artifacts["trend_score_report"] = report
-        
-        self.logger.metric("Artifacts", str(len(self.result.artifacts)))
+
+        self.logger.metric(
+            "Artifacts",
+            str(len(self.result.artifacts))
+        )
         self.logger.success("Export complete")
-        
+
         return {
             "export_status": "complete",
             "artifact_count": len(self.result.artifacts),
