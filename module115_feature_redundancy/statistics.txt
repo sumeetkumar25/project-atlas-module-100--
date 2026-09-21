@@ -27,7 +27,8 @@ class FeatureRedundancyStatisticsEngine:
         "module": 115,
         "name": "Feature Redundancy",
         "version": "1.0.0",
-        "description": "Analyzes redundancy between features using multiple similarity measures"
+        "description": "Analyzes redundancy between features using multiple similarity measures",
+        "depends_on": ["035", "037", "100", "102"]
     }
     
     def analyze(self, result: FeatureRedundancyResult) -> FeatureRedundancyStatistics:
