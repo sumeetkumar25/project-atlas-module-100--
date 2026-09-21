@@ -111,35 +111,53 @@ class FeatureRedundancyEngine:
         """
         Compute Mutual Information matrix.
         """
+
         n = len(features)
-        matrix = np.zeros((n, n))
-        
+
+        matrix = np.zeros(
+            (n, n),
+            dtype=float
+        )
+
         for i in range(n):
+
             x = df[[features[i]]]
-            for j in range(n):
-                if i == j:
-                    matrix[i, j] = 1.0
-                else:
-                    y = df[features[j]]
-                    try:
-                        mi = mutual_info_regression(
-                            x, y,
-                            random_state=self.random_state
-                        )[0]
-                        matrix[i, j] = max(0.0, mi)
-                    except:
-                        matrix[i, j] = 0.0
-        
-        # Normalize MI values within the dataset
+
+            for j in range(i + 1, n):
+
+                y = df[features[j]]
+
+                try:
+                    mi = mutual_info_regression(
+                        x,
+                        y,
+                        random_state=self.random_state
+                    )[0]
+
+                    matrix[i, j] = max(
+                        0.0,
+                        mi
+                    )
+
+                    matrix[j, i] = matrix[i, j]
+
+                except Exception:
+                    matrix[i, j] = 0.0
+                    matrix[j, i] = 0.0
+
+        # Normalize MI values
         max_mi = matrix.max()
+
         if max_mi > 0:
             matrix = matrix / max_mi
-        
-        # Symmetrize the matrix (MI should be symmetric)
-        matrix = (matrix + matrix.T) / 2
+
         np.fill_diagonal(matrix, 1.0)
-        
-        return pd.DataFrame(matrix, index=features, columns=features)
+
+        return pd.DataFrame(
+            matrix,
+            index=features,
+            columns=features
+        )
 
     def distance_correlation_matrix(
         self,
@@ -148,71 +166,114 @@ class FeatureRedundancyEngine:
     ) -> pd.DataFrame:
         """
         Compute Distance Correlation matrix.
-        
-        Implements distance correlation without external dependency.
+
+        Uses a deterministic, evenly-spaced sample when the dataset is large.
+        This preserves temporal coverage while preventing O(n^2) memory/time
+        explosion from the distance matrices.
+
+        Distance correlation is symmetric, so each feature pair is calculated
+        only once.
         """
-        def distance_correlation(x: np.ndarray, y: np.ndarray) -> float:
+
+        MAX_SAMPLES = 2000
+
+        def distance_correlation(
+            x: np.ndarray,
+            y: np.ndarray
+        ) -> float:
             """Compute distance correlation between two vectors."""
-            # Center the distance matrices
+
             def center_distance(d: np.ndarray) -> np.ndarray:
-                n = len(d)
                 row_mean = np.mean(d, axis=1, keepdims=True)
                 col_mean = np.mean(d, axis=0, keepdims=True)
                 total_mean = np.mean(d)
+
                 return d - row_mean - col_mean + total_mean
-            
-            # Compute distance matrices
+
             n = len(x)
-            dx = np.zeros((n, n))
-            dy = np.zeros((n, n))
-            
-            for i in range(n):
-                for j in range(n):
-                    dx[i, j] = abs(x[i] - x[j])
-                    dy[i, j] = abs(y[i] - y[j])
-            
-            # Center the distance matrices
+
+            # Pairwise distance matrices
+            dx = np.abs(x[:, None] - x[None, :])
+            dy = np.abs(y[:, None] - y[None, :])
+
+            # Center distance matrices
             A = center_distance(dx)
             B = center_distance(dy)
-            
-            # Compute distance covariance and variances
+
+            # Distance covariance and variances
             dcov2 = np.mean(A * B)
             dvarx2 = np.mean(A * A)
-            dvar_y2 = np.mean(B * B)
-            
-            # Handle numerical issues
-            dcov2 = max(dcov2, 0.0)
-            dvarx2 = max(dvarx2, 1e-12)
-            dvar_y2 = max(dvar_y2, 1e-12)
-            
-            denom = np.sqrt(dvarx2 * dvar_y2)
-            
+            dvary2 = np.mean(B * B)
+
+            dcov2 = max(float(dcov2), 0.0)
+            dvarx2 = max(float(dvarx2), 1e-12)
+            dvary2 = max(float(dvary2), 1e-12)
+
+            denom = np.sqrt(dvarx2 * dvary2)
+
             if denom < 1e-12:
                 return 0.0
-            
-            return np.sqrt(max(dcov2, 0.0) / denom)
-        
-        n = len(features)
-        matrix = np.zeros((n, n))
-        
-        for i in range(n):
-            x = df[features[i]].values
-            for j in range(n):
-                if i == j:
-                    matrix[i, j] = 1.0
-                else:
-                    y = df[features[j]].values
-                    try:
-                        dcorr = distance_correlation(x, y)
-                        matrix[i, j] = min(1.0, max(0.0, dcorr))
-                    except:
-                        matrix[i, j] = 0.0
-        
-        # Symmetrize the matrix
-        matrix = (matrix + matrix.T) / 2
-        np.fill_diagonal(matrix, 1.0)
-        
-        return pd.DataFrame(matrix, index=features, columns=features)
+
+            return float(
+                np.sqrt(max(dcov2, 0.0) / denom)
+            )
+
+        n_features = len(features)
+
+        matrix = np.eye(n_features, dtype=float)
+
+        # ---------------------------------------------------------
+        # Deterministic temporal sampling
+        # ---------------------------------------------------------
+        n_rows = len(df)
+
+        if n_rows > MAX_SAMPLES:
+            sample_idx = np.linspace(
+                0,
+                n_rows - 1,
+                MAX_SAMPLES,
+                dtype=int
+            )
+        else:
+            sample_idx = np.arange(n_rows)
+
+        # ---------------------------------------------------------
+        # Calculate each pair only once
+        # ---------------------------------------------------------
+        for i in range(n_features):
+
+            x = (
+                df[features[i]]
+                .to_numpy(dtype=float)[sample_idx]
+            )
+
+            for j in range(i + 1, n_features):
+
+                y = (
+                    df[features[j]]
+                    .to_numpy(dtype=float)[sample_idx]
+                )
+
+                try:
+                    dcorr = distance_correlation(x, y)
+
+                    dcorr = min(
+                        1.0,
+                        max(0.0, dcorr)
+                    )
+
+                except Exception:
+                    dcorr = 0.0
+
+                # Distance correlation is symmetric
+                matrix[i, j] = dcorr
+                matrix[j, i] = dcorr
+
+        return pd.DataFrame(
+            matrix,
+            index=features,
+            columns=features
+        )
 
     def compute_redundancy_score(
         self,
@@ -373,6 +434,8 @@ class FeatureRedundancyEngine:
         """
         Main computation method.
         """
+        import time
+
         print("\n  Computing Feature Redundancy...")
         
         # Get features
@@ -384,16 +447,24 @@ class FeatureRedundancyEngine:
         
         # Compute similarity matrices
         print("  Computing Pearson correlation...")
+        t = time.perf_counter()
         pearson = self.pearson_matrix(df, features)
+        print(f"  Pearson completed in {time.perf_counter() - t:.3f}s")
         
         print("  Computing Spearman correlation...")
+        t = time.perf_counter()
         spearman = self.spearman_matrix(df, features)
+        print(f"  Spearman completed in {time.perf_counter() - t:.3f}s")
         
         print("  Computing Mutual Information...")
+        t = time.perf_counter()
         mutual_info = self.mutual_information_matrix(df, features)
+        print(f"  Mutual Information completed in {time.perf_counter() - t:.3f}s")
         
         print("  Computing Distance Correlation...")
+        t = time.perf_counter()
         distance_corr = self.distance_correlation_matrix(df, features)
+        print(f"  Distance Correlation completed in {time.perf_counter() - t:.3f}s")
         
         # Compute redundancy score
         print("  Computing redundancy scores...")
