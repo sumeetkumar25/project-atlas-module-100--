@@ -4,7 +4,7 @@ Module 117
 Feature Selection
 
 Decision module that combines:
-  - Feature Importance (Module 113)
+  - Feature Importance (Module 109)
   - Feature Stability (Module 114)
   - Feature Redundancy (Module 115)
   - Feature Interaction (Module 116)
@@ -24,6 +24,8 @@ from .statistics import FeatureSelectionStatisticsEngine
 from .validator import run_validation
 from .report import FeatureSelectionReport
 from .exporter import FeatureSelectionExporter
+
+from .adapter import FeatureSelectionDependencyAdapter
 
 
 class FeatureSelectionResearch(BaseResearchModule):
@@ -74,6 +76,24 @@ class FeatureSelectionResearch(BaseResearchModule):
             ("validate", self._validate),
             ("export", self._export_results),
         ]
+    
+    def set_dependency_artifacts(self, module_artifacts: Dict[str, Dict[str, Any]]) -> None:
+        """
+        Set dependency artifacts from Modules 109, 114, 115, 116.
+        
+        Unlike Modules 110-116, Module 117 does not consume time-series
+        DataFrames. It consumes feature-level metadata tables and
+        aggregates them via the FeatureSelectionDependencyAdapter.
+        
+        Args:
+            module_artifacts: Dict mapping module_id -> artifact dict
+        """
+        self.df = FeatureSelectionDependencyAdapter.build(module_artifacts)
+        
+        self.logger.info(
+            f"Adapter built feature selection input: "
+            f"{len(self.df)} features × {len(self.df.columns)} columns"
+        )
     
     def _prepare_data(self) -> Dict[str, Any]:
         """Prepare data from DataFrame."""
