@@ -68,6 +68,11 @@ class FeatureSelectionResearch(BaseResearchModule):
         self.bottom_report = None
         self._output_dir = None
 
+        # Feature-level metadata produced by the Module 117 dependency adapter.
+        # This is intentionally separate from market_df / feature_df / df because
+        # it is not a row-aligned time-series DataFrame.
+        self.feature_selection_df = None
+
     def _register_pipeline_steps(self):
         """Register pipeline steps."""
         self.pipeline_steps = [
@@ -88,27 +93,44 @@ class FeatureSelectionResearch(BaseResearchModule):
         Args:
             module_artifacts: Dict mapping module_id -> artifact dict
         """
-        self.df = FeatureSelectionDependencyAdapter.build(module_artifacts)
-        
+        self.feature_selection_df = FeatureSelectionDependencyAdapter.build(
+            module_artifacts
+        )
+
         self.logger.info(
             f"Adapter built feature selection input: "
-            f"{len(self.df)} features × {len(self.df.columns)} columns"
+            f"{len(self.feature_selection_df)} features × "
+            f"{len(self.feature_selection_df.columns)} columns"
         )
     
     def _prepare_data(self) -> Dict[str, Any]:
         """Prepare data from DataFrame."""
-        # Expecting pre-computed scores from other modules
-        required_cols = ['feature', 'importance', 'stability', 'redundancy', 'interaction']
-        missing = set(required_cols) - set(self.df.columns)
+        if self.feature_selection_df is None:
+            raise RuntimeError(
+                "Module 117 dependency artifacts were not injected. "
+                "Expected artifacts from Modules 109, 114, 115, and 116."
+            )
+
+        df = self.feature_selection_df
+
+        required_cols = [
+            'feature',
+            'importance',
+            'stability',
+            'redundancy',
+            'interaction'
+        ]
+
+        missing = set(required_cols) - set(df.columns)
+
         if missing:
             raise ValueError(f"Missing required columns: {missing}")
-        
-        # Extract scores as Series
-        importance_scores = self.df.set_index('feature')['importance']
-        stability_scores = self.df.set_index('feature')['stability']
-        redundancy_scores = self.df.set_index('feature')['redundancy']
-        interaction_scores = self.df.set_index('feature')['interaction']
-        
+
+        importance_scores = df.set_index('feature')['importance']
+        stability_scores = df.set_index('feature')['stability']
+        redundancy_scores = df.set_index('feature')['redundancy']
+        interaction_scores = df.set_index('feature')['interaction']
+
         return {
             'importance': importance_scores,
             'stability': stability_scores,
