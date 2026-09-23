@@ -1,0 +1,156 @@
+from __future__ import annotations
+from typing import Any, Dict, Iterable
+import pandas as pd
+
+
+class FeatureSelectionDependencyAdapter:
+    REQUIRED_MODULES = ("109", "114", "115", "116")
+    REQUIRED_COLUMNS = (
+        "feature", "importance", "stability", "redundancy", "interaction"
+    )
+
+    @staticmethod
+    def _first_existing(mapping: Dict[str, Any], names: Iterable[str]):
+        for name in names:
+            if name in mapping and mapping[name] is not None:
+                return mapping[name]
+        return None
+
+    @staticmethod
+    def _feature_series(
+        df: pd.DataFrame,
+        value_columns: Iterable[str]
+    ) -> pd.Series:
+
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            raise ValueError("Expected a non-empty DataFrame.")
+
+        value_col = next(
+            (c for c in value_columns if c in df.columns),
+            None
+        )
+
+        if value_col is None:
+            raise ValueError(
+                f"Required value column not found. "
+                f"Available: {list(df.columns)}"
+            )
+
+        feature_col = next(
+            (c for c in ("feature", "feature_name") if c in df.columns),
+            None
+        )
+
+        if feature_col is not None:
+            features = df[feature_col].astype(str)
+        else:
+            features = pd.Series(
+                df.index.astype(str),
+                index=df.index,
+                name="feature"
+            )
+
+        values = pd.to_numeric(
+            df[value_col],
+            errors="coerce"
+        )
+
+        out = pd.DataFrame({
+            "feature": features,
+            value_col: values,
+        })
+
+        out = out.dropna(
+            subset=["feature", value_col]
+        )
+
+        return out.groupby("feature")[value_col].mean()
+
+    @classmethod
+    def _importance(cls, artifacts):
+        df = cls._first_existing(
+            artifacts, ("feature_ranking", "feature_importance", "features")
+        )
+        if isinstance(df, pd.Series):
+            return pd.to_numeric(df, errors="coerce").dropna()
+        return cls._feature_series(df, ("importance", "feature_importance"))
+
+    @classmethod
+    def _stability(cls, artifacts):
+        df = cls._first_existing(
+            artifacts, ("temporal_statistics", "statistics", "features")
+        )
+        if isinstance(df, pd.Series):
+            return pd.to_numeric(df, errors="coerce").dropna()
+        # Deliberately uses `stability`, not Module 114's temporal_score.
+        return cls._feature_series(df, ("stability",))
+
+    @staticmethod
+    def _pairwise_mean(df: pd.DataFrame, value_column: str) -> pd.Series:
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            raise ValueError("Expected a non-empty pairwise DataFrame.")
+
+        required = {"feature_a", "feature_b", value_column}
+        missing = required - set(df.columns)
+        if missing:
+            raise ValueError(
+                f"Pairwise artifact missing {sorted(missing)}. "
+                f"Available: {list(df.columns)}"
+            )
+
+        rows = df[["feature_a", "feature_b", value_column]].copy()
+        rows[value_column] = pd.to_numeric(rows[value_column], errors="coerce")
+        rows = rows.dropna(subset=[value_column])
+
+        a = rows[["feature_a", value_column]].rename(columns={"feature_a": "feature"})
+        b = rows[["feature_b", value_column]].rename(columns={"feature_b": "feature"})
+        long_df = pd.concat([a, b], ignore_index=True)
+        long_df["feature"] = long_df["feature"].astype(str)
+
+        return long_df.groupby("feature")[value_column].mean()
+
+    @classmethod
+    def _redundancy(cls, artifacts):
+        df = cls._first_existing(artifacts, ("redundancy_table", "features"))
+        return cls._pairwise_mean(df, "redundancy_score")
+
+    @classmethod
+    def _interaction(cls, artifacts):
+        df = cls._first_existing(artifacts, ("interaction_table", "features"))
+        return cls._pairwise_mean(df, "synergy_score")
+
+    @classmethod
+    def build(cls, module_artifacts: Dict[str, Dict[str, Any]]) -> pd.DataFrame:
+        missing = [m for m in cls.REQUIRED_MODULES if m not in module_artifacts]
+        if missing:
+            raise ValueError(f"Module 117 adapter is missing dependencies: {missing}")
+
+        importance = cls._importance(module_artifacts["109"])
+        stability = cls._stability(module_artifacts["114"])
+        redundancy = cls._redundancy(module_artifacts["115"])
+        interaction = cls._interaction(module_artifacts["116"])
+
+        common = (
+            set(importance.index)
+            & set(stability.index)
+            & set(redundancy.index)
+            & set(interaction.index)
+        )
+        if not common:
+            raise ValueError(
+                "Module 117 adapter produced no common features across "
+                "Modules 109, 114, 115, and 116."
+            )
+
+        features = sorted(map(str, common))
+        result = pd.DataFrame({
+            "feature": features,
+            "importance": [importance.get(f) for f in features],
+            "stability": [stability.get(f) for f in features],
+            "redundancy": [redundancy.get(f) for f in features],
+            "interaction": [interaction.get(f) for f in features],
+        })
+
+        if result[list(cls.REQUIRED_COLUMNS)].isna().any().any():
+            raise ValueError("Module 117 adapter produced NaN values.")
+        return result
