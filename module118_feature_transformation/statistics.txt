@@ -34,7 +34,7 @@ class FeatureTransformationStatisticsEngine:
         "name": "Feature Transformation",
         "version": "1.0.0",
         "description": "Converts selected features into standardized, model-ready variables",
-        "depends_on": ["117"]
+        "depends_on": ["117", "109"]
     }
     
     def analyze(self, result: FeatureTransformationResult) -> FeatureTransformationStatistics:
