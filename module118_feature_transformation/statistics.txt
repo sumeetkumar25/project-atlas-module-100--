@@ -33,7 +33,8 @@ class FeatureTransformationStatisticsEngine:
         "module": 118,
         "name": "Feature Transformation",
         "version": "1.0.0",
-        "description": "Converts selected features into standardized, model-ready variables"
+        "description": "Converts selected features into standardized, model-ready variables",
+        "depends_on": ["117"]
     }
     
     def analyze(self, result: FeatureTransformationResult) -> FeatureTransformationStatistics:
