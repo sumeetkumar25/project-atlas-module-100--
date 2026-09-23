@@ -445,7 +445,11 @@ class FeatureTransformationEngine:
             best_feature = "None"
         
         # Count transformations by type
-        transform_counts = transformation_table['transform'].value_counts().to_dict()
+        transform_counts = (
+            transformation_table['transform'].value_counts().to_dict()
+            if not transformation_table.empty
+            else {}
+        )
         
         stats = {
             'total_features': len(features),
