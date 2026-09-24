@@ -38,7 +38,8 @@ class FeatureQualityStatisticsEngine:
         "module": 119,
         "name": "Feature Quality",
         "version": "1.0.0",
-        "description": "Analyzes every feature and computes a quality score"
+        "description": "Analyzes every feature and computes a quality score",
+        "depends_on": ["100", "102", "035", "037"],
     }
     
     def analyze(self, result: FeatureQualityResult) -> FeatureQualityStatistics:
