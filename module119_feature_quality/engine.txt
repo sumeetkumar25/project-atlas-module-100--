@@ -68,16 +68,18 @@ class FeatureQualityEngine:
         self.warning_threshold = warning_threshold
         self.outlier_threshold = outlier_threshold
 
-    def get_feature_columns(self, df: pd.DataFrame) -> List[str]:
-        """
-        Identify feature columns (exclude metadata and target).
-        """
-        features = [
-            c for c in df.columns
-            if c not in self.IGNORE_COLS
-            and pd.api.types.is_numeric_dtype(df[c])
-            and df[c].nunique() > 1
-        ]
+    def get_feature_columns(self, df):
+        features = []
+
+        for c in df.columns:
+            if c in self.IGNORE_COLS:
+                continue
+
+            is_numeric = pd.api.types.is_numeric_dtype(df[c])
+
+            if is_numeric:
+                features.append(c)
+
         return features
 
     def compute_missing_percentage(self, series: pd.Series) -> float:
