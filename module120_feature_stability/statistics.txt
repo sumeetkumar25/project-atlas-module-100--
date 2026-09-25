@@ -38,7 +38,8 @@ class FeatureStabilityStatisticsEngine:
         "module": 120,
         "name": "Feature Stability",
         "version": "1.0.0",
-        "description": "Analyzes temporal stability of features using rolling windows"
+        "description": "Analyzes temporal stability of features using rolling windows",
+        "depends_on": ["100", "102", "035", "037"],
     }
     
     def analyze(self, result: FeatureStabilityResult) -> FeatureStabilityStatistics:
