@@ -124,13 +124,24 @@ class FeatureRedundancyReport:
         lines.append("\n" + "=" * 60)
         lines.append("FEATURE CLUSTERS")
         lines.append("=" * 60)
-        
-        for cluster in sorted(clusters['cluster'].unique()):
-            features = clusters[clusters['cluster'] == cluster]['feature'].tolist()
-            lines.append(f"\nCluster {cluster}: {len(features)} features")
-            for f in features:
-                lines.append(f"  - {f}")
-        
+
+        if clusters.empty or "cluster" not in clusters.columns:
+            lines.append("\nNo feature clusters available.")
+            lines.append("\n" + "=" * 60)
+            return "\n".join(lines)
+
+        for cluster in sorted(clusters["cluster"].unique()):
+            features = clusters[
+                clusters["cluster"] == cluster
+            ]["feature"].tolist()
+
+            lines.append(
+                f"\nCluster {cluster}: {len(features)} features"
+            )
+
+            for feature in features:
+                lines.append(f"  - {feature}")
+
         lines.append("\n" + "=" * 60)
         return "\n".join(lines)
     
