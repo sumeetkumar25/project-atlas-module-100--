@@ -38,7 +38,8 @@ class FeatureRedundancyStatisticsEngine:
         "module": 121,
         "name": "Feature Redundancy",
         "version": "1.0.0",
-        "description": "Determines whether features contain essentially the same information"
+        "description": "Determines whether features contain essentially the same information",
+        "depends_on": ["100", "102", "035", "037"],
     }
     
     def analyze(self, result: FeatureRedundancyResult) -> FeatureRedundancyStatistics:
