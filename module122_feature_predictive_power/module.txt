@@ -30,7 +30,7 @@ class FeaturePredictivePowerResearch(BaseResearchModule):
 
     METADATA = {
         **FeaturePredictivePowerStatisticsEngine.METADATA,
-        "depends_on": ["102"],
+        "depends_on": ["100"],
     }
 
     REQUIRED_TARGETS = ["future_breakout"]
