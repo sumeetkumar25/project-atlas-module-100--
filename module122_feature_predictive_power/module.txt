@@ -28,6 +28,7 @@ class FeaturePredictivePowerResearch(BaseResearchModule):
     
     MODULE_OUTPUT = "module122"
     METADATA = FeaturePredictivePowerStatisticsEngine.METADATA
+    REQUIRED_TARGETS = ["future_breakout"]
     
     def __init__(
         self,
