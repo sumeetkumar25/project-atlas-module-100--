@@ -101,133 +101,294 @@ class FeaturePredictivePowerEngine:
         """Compute Pearson correlation."""
         try:
             corr, _ = stats.pearsonr(X, y)
-            return float(corr) if not np.isnan(corr) else 0.0
-        except:
+
+            if np.isnan(corr):
+                print("      Pearson: NaN returned")
+                return 0.0
+
+            return float(corr)
+
+        except Exception as e:
+            print(
+                f"      Pearson FAILED: "
+                f"{type(e).__name__}: {e}"
+            )
             return 0.0
 
     def compute_spearman(self, X: np.ndarray, y: np.ndarray) -> float:
         """Compute Spearman correlation."""
         try:
             corr, _ = stats.spearmanr(X, y)
-            return float(corr) if not np.isnan(corr) else 0.0
-        except:
+
+            if np.isnan(corr):
+                print("      Spearman: NaN returned")
+                return 0.0
+
+            return float(corr)
+
+        except Exception as e:
+            print(
+                f"      Spearman FAILED: "
+                f"{type(e).__name__}: {e}"
+            )
             return 0.0
 
     def compute_kendall(self, X: np.ndarray, y: np.ndarray) -> float:
         """Compute Kendall Tau."""
         try:
             corr, _ = stats.kendalltau(X, y)
-            return float(corr) if not np.isnan(corr) else 0.0
-        except:
+
+            if np.isnan(corr):
+                print("      Kendall: NaN returned")
+                return 0.0
+
+            return float(corr)
+
+        except Exception as e:
+            print(
+                f"      Kendall FAILED: "
+                f"{type(e).__name__}: {e}"
+            )
             return 0.0
 
-    def compute_mutual_information(self, X: np.ndarray, y: np.ndarray) -> float:
+    def compute_mutual_information(
+        self,
+        X: np.ndarray,
+        y: np.ndarray
+    ) -> float:
         """Compute Mutual Information between feature and target."""
         try:
             X_reshaped = X.reshape(-1, 1)
-            mi = mutual_info_classif(X_reshaped, y, random_state=42)[0]
+
+            mi = mutual_info_classif(
+                X_reshaped,
+                y,
+                random_state=42
+            )[0]
+
+            if np.isnan(mi):
+                print("      Mutual Information: NaN returned")
+                return 0.0
+
             return float(max(0.0, min(1.0, mi)))
-        except:
+
+        except Exception as e:
+            print(
+                f"      Mutual Information FAILED: "
+                f"{type(e).__name__}: {e}"
+            )
             return 0.0
 
-    def compute_information_gain(self, X: np.ndarray, y: np.ndarray) -> float:
+    def compute_information_gain(
+        self,
+        X: np.ndarray,
+        y: np.ndarray
+    ) -> float:
         """
         Compute Information Gain (entropy reduction) for binary target.
         """
         try:
             # Discretize feature for entropy calculation
             n_bins = min(10, len(np.unique(X)))
+
             if n_bins < 2:
+                print("      Information Gain: fewer than 2 unique bins")
                 return 0.0
-            
-            X_disc = pd.qcut(X, q=n_bins, labels=False, duplicates='drop')
+
+            X_disc = pd.qcut(
+                X,
+                q=n_bins,
+                labels=False,
+                duplicates='drop'
+            )
+
             if len(np.unique(X_disc)) < 2:
+                print("      Information Gain: discretization produced <2 bins")
                 return 0.0
-            
+
             # Compute entropy of target
             _, counts = np.unique(y, return_counts=True)
             p = counts / len(y)
-            entropy_target = -np.sum(p * np.log2(p + 1e-12))
-            
+
+            entropy_target = -np.sum(
+                p * np.log2(p + 1e-12)
+            )
+
             # Compute conditional entropy
             cond_entropy = 0
+
             for val in np.unique(X_disc):
                 mask = X_disc == val
+
                 if np.sum(mask) == 0:
                     continue
+
                 y_subset = y[mask]
-                _, counts_sub = np.unique(y_subset, return_counts=True)
+
+                _, counts_sub = np.unique(
+                    y_subset,
+                    return_counts=True
+                )
+
                 p_sub = counts_sub / len(y_subset)
-                entropy_sub = -np.sum(p_sub * np.log2(p_sub + 1e-12))
-                cond_entropy += (np.sum(mask) / len(y)) * entropy_sub
-            
+
+                entropy_sub = -np.sum(
+                    p_sub * np.log2(p_sub + 1e-12)
+                )
+
+                cond_entropy += (
+                    np.sum(mask) / len(y)
+                ) * entropy_sub
+
             ig = entropy_target - cond_entropy
+
             return float(max(0.0, min(1.0, ig)))
-        except:
+
+        except Exception as e:
+            print(
+                f"      Information Gain FAILED: "
+                f"{type(e).__name__}: {e}"
+            )
             return 0.0
 
-    def compute_anova(self, X: np.ndarray, y: np.ndarray) -> float:
+    def compute_anova(
+        self,
+        X: np.ndarray,
+        y: np.ndarray
+    ) -> float:
         """Compute ANOVA F-score."""
         try:
             X_reshaped = X.reshape(-1, 1)
-            f_stat, _ = f_classif(X_reshaped, y)
-            # Normalize F-statistic to [0, 1]
+
+            f_stat, _ = f_classif(
+                X_reshaped,
+                y
+            )
+
             f_stat = f_stat[0]
-            return float(min(1.0, f_stat / (f_stat + 10.0)))  # Sigmoid-like normalization
-        except:
+
+            if np.isnan(f_stat):
+                print("      ANOVA: NaN returned")
+                return 0.0
+
+            return float(
+                min(1.0, f_stat / (f_stat + 10.0))
+            )
+
+        except Exception as e:
+            print(
+                f"      ANOVA FAILED: "
+                f"{type(e).__name__}: {e}"
+            )
             return 0.0
 
-    def compute_roc_auc(self, X: np.ndarray, y: np.ndarray) -> float:
+    def compute_roc_auc(
+        self,
+        X: np.ndarray,
+        y: np.ndarray
+    ) -> float:
         """
         Compute ROC AUC with inverse predictor handling.
-        
-        Treats inverse predictors (AUC < 0.5) as equally informative
-        by taking max(AUC, 1 - AUC).
+
+        Treats inverse predictors (AUC < 0.5)
+        as equally informative by taking max(AUC, 1-AUC).
         """
         try:
-            if len(np.unique(y)) < 2:
+            unique_y = np.unique(y)
+
+            if len(unique_y) < 2:
+                print(
+                    f"      ROC AUC: target has only "
+                    f"{len(unique_y)} unique class"
+                )
                 return 0.0
+
             auc = roc_auc_score(y, X)
-            
+
+            if np.isnan(auc):
+                print("      ROC AUC: NaN returned")
+                return 0.0
+
             # Treat inverse predictors as equally informative
             auc = max(auc, 1.0 - auc)
-            
+
             return float(np.clip(auc, 0.5, 1.0))
-        except:
+
+        except Exception as e:
+            print(
+                f"      ROC AUC FAILED: "
+                f"{type(e).__name__}: {e}"
+            )
             return 0.0
 
-    def compute_point_biserial(self, X: np.ndarray, y: np.ndarray) -> float:
-        """Compute Point-Biserial Correlation (continuous vs binary)."""
+    def compute_point_biserial(
+        self,
+        X: np.ndarray,
+        y: np.ndarray
+    ) -> float:
+        """Compute Point-Biserial Correlation."""
         try:
-            # Point-biserial is equivalent to Pearson with binary target
             corr, _ = stats.pearsonr(X, y)
-            return float(abs(corr)) if not np.isnan(corr) else 0.0
-        except:
+
+            if np.isnan(corr):
+                print("      Point-Biserial: NaN returned")
+                return 0.0
+
+            return float(abs(corr))
+
+        except Exception as e:
+            print(
+                f"      Point-Biserial FAILED: "
+                f"{type(e).__name__}: {e}"
+            )
             return 0.0
 
-    def compute_cohens_d(self, X: np.ndarray, y: np.ndarray) -> float:
+    def compute_cohens_d(
+        self,
+        X: np.ndarray,
+        y: np.ndarray
+    ) -> float:
         """Compute Cohen's d (effect size between two groups)."""
         try:
             group0 = X[y == 0]
             group1 = X[y == 1]
-            
+
             if len(group0) < 2 or len(group1) < 2:
+                print(
+                    f"      Cohen's d: insufficient group size "
+                    f"(group0={len(group0)}, group1={len(group1)})"
+                )
                 return 0.0
-            
+
             n0, n1 = len(group0), len(group1)
-            mean0, mean1 = np.mean(group0), np.mean(group1)
-            var0, var1 = np.var(group0, ddof=1), np.var(group1, ddof=1)
-            
-            # Pooled standard deviation
-            pooled_std = np.sqrt(((n0 - 1) * var0 + (n1 - 1) * var1) / (n0 + n1 - 2))
-            
+
+            mean0 = np.mean(group0)
+            mean1 = np.mean(group1)
+
+            var0 = np.var(group0, ddof=1)
+            var1 = np.var(group1, ddof=1)
+
+            pooled_std = np.sqrt(
+                (
+                    (n0 - 1) * var0 +
+                    (n1 - 1) * var1
+                )
+                / (n0 + n1 - 2)
+            )
+
             if pooled_std == 0:
+                print("      Cohen's d: pooled standard deviation = 0")
                 return 0.0
-            
+
             d = abs(mean1 - mean0) / pooled_std
-            # Normalize to [0, 1] (Cohen's d typically max ~2-3)
+
             return float(min(1.0, d / 2.0))
-        except:
+
+        except Exception as e:
+            print(
+                f"      Cohen's d FAILED: "
+                f"{type(e).__name__}: {e}"
+            )
             return 0.0
 
     def compute_predictive_score(self, metrics: Dict[str, float]) -> float:
@@ -301,12 +462,44 @@ class FeaturePredictivePowerEngine:
         
         # Get target
         if self.target_column not in df.columns:
-            raise ValueError(f"Target column '{self.target_column}' not found")
-        
-        y = df[self.target_column].values
-        
+            raise ValueError(
+                f"Target column '{self.target_column}' not found"
+            )
+
+        # ------------------------------------------------------------------
+        # Remove rows where the target is undefined.
+        #
+        # future_breakout cannot be calculated for the final horizon bars
+        # because there is no future data available.
+        #
+        # These rows must not participate in statistical analysis.
+        # ------------------------------------------------------------------
+
+        target_valid_mask = df[self.target_column].notna()
+
+        invalid_target_rows = int((~target_valid_mask).sum())
+
+        if invalid_target_rows > 0:
+            print(
+                f"  Removing {invalid_target_rows} rows with "
+                f"undefined target '{self.target_column}'"
+            )
+
+            df = df.loc[target_valid_mask].copy()
+
+        # Extract clean target
+        y = df[self.target_column].to_numpy()
+
+        # Safety check
+        if np.isnan(y).any():
+            raise ValueError(
+                f"Target '{self.target_column}' still contains "
+                f"{np.isnan(y).sum()} NaN values after cleaning"
+            )
+
         # Get features
         features = self.get_feature_columns(df)
+
         print(f"  Found {len(features)} features")
         
         if not features:
@@ -344,7 +537,30 @@ class FeaturePredictivePowerEngine:
         
         for feature in features:
             X = df[feature].values
-            
+
+            print(f"\n    Analyzing feature: {feature}")
+            print(f"      X dtype: {X.dtype}")
+            print(f"      X length: {len(X)}")
+            print(f"      X unique: {len(np.unique(X))}")
+            print(f"      X NaN: {np.isnan(X).sum()}")
+            print(f"      X finite: {np.isfinite(X).sum()}")
+
+            print(f"      y dtype: {y.dtype}")
+            print(f"      y length: {len(y)}")
+            print(f"      y unique: {np.unique(y)}")
+
+            y_values, y_counts = np.unique(
+                y,
+                return_counts=True
+            )
+
+            print(
+                f"      y distribution: "
+                f"{dict(zip(y_values, y_counts))}"
+            )
+
+            print(f"      X/Y same length: {len(X) == len(y)}")
+
             # Compute all metrics
             pearson = self.compute_pearson(X, y)
             spearman = self.compute_spearman(X, y)
