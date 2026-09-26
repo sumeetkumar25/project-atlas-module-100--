@@ -27,7 +27,12 @@ class FeaturePredictivePowerResearch(BaseResearchModule):
     """Main research module for feature predictive power analysis."""
     
     MODULE_OUTPUT = "module122"
-    METADATA = FeaturePredictivePowerStatisticsEngine.METADATA
+
+    METADATA = {
+        **FeaturePredictivePowerStatisticsEngine.METADATA,
+        "depends_on": ["102"],
+    }
+
     REQUIRED_TARGETS = ["future_breakout"]
     
     def __init__(
